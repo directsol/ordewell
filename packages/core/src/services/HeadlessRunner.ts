@@ -127,6 +127,8 @@ export interface PreparedLaunch {
   env: Record<string, string>;
   /** True when the invocation was wrapped in `script` to allocate a PTY. */
   pty: boolean;
+  /** True when the started process needs an explicit Enter sent to submit its pre-filled prompt. */
+  submitPromptKey: boolean;
 }
 
 export class HeadlessRunner extends AbstractRunner<HeadlessSession> {
@@ -192,6 +194,7 @@ export class HeadlessRunner extends AbstractRunner<HeadlessSession> {
       resolvedPath,
       env: invocation.env,
       pty,
+      submitPromptKey: invocation.submitPromptKey,
     };
   }
 
@@ -204,6 +207,7 @@ export class HeadlessRunner extends AbstractRunner<HeadlessSession> {
     console.error(`[headless] Starting ${opts.runner} [${modeStr}] (${opts.modelId || 'default'}) for task ${opts.taskId.slice(0, 8)}${prepared.pty ? ' (PTY)' : ''}`);
 
     session.start(prepared.launch, opts.cwd, prepared.resolvedPath, prepared.env);
+    if (prepared.submitPromptKey) session.write('\r');
     this.registerSession(id, session);
     return session;
   }

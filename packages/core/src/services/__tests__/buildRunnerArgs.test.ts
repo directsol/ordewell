@@ -12,6 +12,13 @@ describe('buildRunnerInvocation — claude-code', () => {
     expect(inv.args).toEqual(['--permission-mode', 'acceptEdits', 'do the thing']);
   });
 
+  // Claude's prompt is a bare positional arg its CLI runs immediately, even
+  // in the interactive TUI — no composer to get stuck in, so no submit key.
+  it('never needs a submit key: its prompt runs on launch, interactive or not', () => {
+    const inv = buildRunnerInvocation({ runner: 'claude-code', prompt: 'do the thing', mode: 'build', registry });
+    expect(inv.submitPromptKey).toBe(false);
+  });
+
   it('with model + high thinking emits --thinking enabled --effort high', () => {
     const inv = buildRunnerInvocation({ runner: 'claude-code', prompt: 'P', modelId: 'm', thinkingEffort: 'high', mode: 'build', registry });
     expect(inv.args).toEqual(['--model', 'm', '--thinking', 'enabled', '--effort', 'high', '--permission-mode', 'acceptEdits', 'P']);
@@ -89,6 +96,18 @@ describe('buildRunnerInvocation — opencode', () => {
     expect(inv.command).toBe('opencode');
     expect(inv.promptInArgs).toBe(true);
     expect(inv.args).toEqual(['--agent', 'build', '--auto', '--prompt', 'do']);
+  });
+
+  // Regression: `--prompt` only pre-fills the TUI's composer, it does not run
+  // it — a surface driving this unattended must send Enter itself (the actual
+  // "have to press Enter in the terminal" bug). `run`'s positional message
+  // has no such gap, so headless must stay false.
+  it('needs a submit key only in the interactive shape, never headless', () => {
+    const interactive = buildRunnerInvocation({ runner: 'opencode', prompt: 'do', mode: 'build', registry });
+    expect(interactive.submitPromptKey).toBe(true);
+
+    const headless = buildRunnerInvocation({ runner: 'opencode', prompt: 'do', mode: 'build', headless: true, registry });
+    expect(headless.submitPromptKey).toBe(false);
   });
 
   it('interactive plan mode emits --agent plan without --auto', () => {

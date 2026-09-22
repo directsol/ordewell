@@ -22,6 +22,14 @@ export interface PluginRunnerDef {
   env?: Record<string, string>;
   /** When true, the runner requires a PTY. HeadlessRunner wraps with `script` to allocate one. */
   requiresTty?: boolean;
+  /**
+   * True when this runner's interactive prompt flag (e.g. opencode's
+   * `--prompt`) only pre-fills its TUI's composer instead of running it, so a
+   * surface driving that TUI unattended must send an explicit Enter after
+   * launch. Only takes effect while the resolved invocation is interactive —
+   * see `RunnerInvocation.submitPromptKey`.
+   */
+  submitPromptKey?: boolean;
 }
 
 export interface PluginFeatures {
@@ -150,6 +158,8 @@ export interface RunnerInvocation {
   args: string[];
   env: Record<string, string>;
   promptInArgs: boolean;
+  /** True when a surface running this invocation on a real TTY must send an explicit Enter once the process starts. */
+  submitPromptKey: boolean;
 }
 
 /**

@@ -89,6 +89,7 @@ export function resolveArgs(manifest: RunnerPluginManifest, ctx: ResolveContext)
     args,
     env,
     promptInArgs: manifest.runner.promptInArgs,
+    submitPromptKey: manifest.runner.submitPromptKey === true && isInteractive(ctx),
   };
 }
 

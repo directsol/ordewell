@@ -71,6 +71,11 @@ export class VsCodeTerminalRunner extends HeadlessRunner {
           },
           prepared.pty ? { controlChannel: true } : undefined,
         );
+        // Some runners' interactive prompt flag only pre-fills their TUI's
+        // composer (opencode's `--prompt`) rather than running it — see
+        // TmuxRunner.spawn for the same fix. The pty queues this even though
+        // the process hasn't read stdin yet.
+        if (prepared.submitPromptKey) session.write('\r');
       } catch (err) {
         // The validation call above makes this unreachable for the usual
         // failures (unknown runner, overlong command). A transient error must

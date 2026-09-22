@@ -36,10 +36,10 @@ class FakeChildProcess extends EventEmitter {
   kill = vi.fn(() => { this.killed = true; return true; });
 }
 
-function makeRunner(opts: { hasScript?: boolean } = {}) {
+function makeRunner(opts: { hasScript?: boolean; manifestOverrides?: Partial<RunnerPluginManifest['runner']> } = {}) {
   const child = new FakeChildProcess();
   const spawnImpl = vi.fn().mockReturnValue(child);
-  const m = manifest();
+  const m = manifest(opts.manifestOverrides);
   const runner = new VsCodeTerminalRunner({
     spawnImpl: spawnImpl as never,
     hasScriptCmd: () => opts.hasScript ?? false,
@@ -147,6 +147,27 @@ describe('VsCodeTerminalRunner', () => {
     __terminals[0].pty.handleInput?.('ORDEWELL_CONTINUE\r');
 
     expect(child.stdin.write).toHaveBeenCalledWith('ORDEWELL_CONTINUE\r');
+  });
+
+  /**
+   * Regression: opencode's `--prompt` flag only pre-fills its TUI's composer,
+   * it does not submit it — the tab opened with the prompt sitting there until
+   * a human pressed Enter, same underlying bug as TmuxRunner's.
+   */
+  it('sends Enter to the child after start when the runner declares submitPromptKey', async () => {
+    const { runner, child, spawnOpts } = makeRunner({ manifestOverrides: { submitPromptKey: true } });
+    await runner.spawn(spawnOpts);
+    await __terminals[0].pty.open({ columns: 100, rows: 40 });
+
+    expect(child.stdin.write).toHaveBeenCalledWith('\r');
+  });
+
+  it('never sends a submit Enter for a runner that does not declare submitPromptKey', async () => {
+    const { runner, child, spawnOpts } = makeRunner();
+    await runner.spawn(spawnOpts);
+    await __terminals[0].pty.open({ columns: 100, rows: 40 });
+
+    expect(child.stdin.write).not.toHaveBeenCalledWith('\r');
   });
 
   it('resizes the PTY when the terminal tab changes size', async () => {

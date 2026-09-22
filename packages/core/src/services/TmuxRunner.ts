@@ -322,6 +322,13 @@ export class TmuxRunner extends AbstractRunner<TmuxSession> {
 
     invocation.env = { ...invocation.env, PATH: await this.resolvePath() };
     await session.start(invocation.command, invocation.args, opts.cwd, invocation.env);
+
+    // Some runners' interactive prompt flag only pre-fills their TUI's
+    // composer (opencode's `--prompt`) rather than running it. `new-window`'s
+    // pty queues this even though the process hasn't read stdin yet — tmux
+    // delivers it as the app's first keystroke once it starts reading.
+    if (invocation.submitPromptKey) session.write('\r');
+
     this.registerSession(id, session);
     return session;
   }

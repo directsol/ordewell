@@ -34,6 +34,11 @@ export const OPENCODE_MANIFEST: RunnerPluginManifest = {
     },
     promptInArgs: true,
     requiresTty: true,
+    // `--prompt` only pre-fills the TUI's composer; it does not submit it.
+    // (`opencode run` — the headless subcommand — has no such gap: its
+    // message is a positional arg that runs immediately.) An unattended
+    // surface driving the TUI must press Enter itself.
+    submitPromptKey: true,
   },
 
   features: {

@@ -127,6 +127,34 @@ describe('TmuxRunner', () => {
     expect(session.interactive).toBe(true);
   });
 
+  /**
+   * Regression: opencode's `--prompt` flag only pre-fills its TUI's composer,
+   * it does not submit it — the window opened with the prompt sitting there
+   * until a human pressed Enter. `new-window`'s pty queues a keystroke sent
+   * before the app starts reading, so this fires right after the window opens
+   * rather than waiting on any readiness signal.
+   */
+  it('sends Enter after the window opens when the runner declares submitPromptKey', async () => {
+    const m = manifest({
+      runner: { command: 'test-cli', argsTemplate: ['--prompt', '{{prompt}}'], promptInArgs: true, submitPromptKey: true },
+    });
+    const runner = makeRunner();
+    await runner.spawn(baseOpts(m));
+
+    const calls = tmuxCalls();
+    const windowIdx = calls.findIndex(([, args]) => args[0] === 'new-window');
+    const sendKeysIdx = calls.findIndex(([, args]) => args[0] === 'send-keys');
+    expect(sendKeysIdx).toBeGreaterThan(windowIdx);
+    expect(calls[sendKeysIdx][1]).toEqual(['send-keys', '-t', 'ordewell-3742:t-task1234abcd', '-l', '\r']);
+  });
+
+  it('never sends a submit Enter for a runner that does not declare submitPromptKey', async () => {
+    const runner = makeRunner();
+    await runner.spawn(baseOpts(manifest()));
+
+    expect(tmuxCalls().some(([, args]) => args[0] === 'send-keys')).toBe(false);
+  });
+
   it('passes the task cwd through to arg resolution, not just to the window', async () => {
     const m = manifest({
       runner: { command: 'test-cli', argsTemplate: ['{{if projectTrust}}', '-c', '{{projectTrust}}', '{{/if}}', '{{prompt}}'], promptInArgs: true },

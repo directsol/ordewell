@@ -40,6 +40,20 @@ describe('resolveArgs', () => {
     expect(result.promptInArgs).toBe(true);
   });
 
+  it('defaults submitPromptKey to false when the manifest does not declare it', () => {
+    const result = resolveArgs(basicManifest(), ctx());
+    expect(result.submitPromptKey).toBe(false);
+  });
+
+  it('sets submitPromptKey only when the manifest declares it AND the shape is interactive', () => {
+    const m = basicManifest({
+      runner: { command: 'c', argsTemplate: ['{{prompt}}'], promptInArgs: true, submitPromptKey: true },
+    });
+    expect(resolveArgs(m, ctx({ interactive: true })).submitPromptKey).toBe(true);
+    expect(resolveArgs(m, ctx({ interactive: false })).submitPromptKey).toBe(false);
+    expect(resolveArgs(m, ctx({ headless: true })).submitPromptKey).toBe(false);
+  });
+
   it('injects model when present', () => {
     const m = basicManifest({
       runner: { command: 'c', argsTemplate: ['--model', '{{model}}', '{{prompt}}'], promptInArgs: true },
