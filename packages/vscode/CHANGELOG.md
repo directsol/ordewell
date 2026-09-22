@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.4.20] — 2026-09-22
+
+### Fixed
+
+- An OpenCode task's terminal tab no longer sits with the prompt typed in but
+  unsent — it now starts on its own instead of waiting for a manual Enter.
+
 ## [0.4.19] — 2026-09-10
 
 ### Fixed

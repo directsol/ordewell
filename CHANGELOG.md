@@ -8,6 +8,18 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.4.20] — 2026-09-22
+
+### Fixed
+
+- **OpenCode tasks no longer sit waiting for a manual Enter to start.** In a
+  tmux window or a VS Code terminal tab, OpenCode's `--prompt` flag only
+  pre-fills its TUI's composer — it never submits it, unlike Claude Code's and
+  Codex's own interactive prompts. A task's window opened with the prompt
+  visibly typed in but idle, and a human had to press Enter in the terminal
+  before it would run. The runner now sends that Enter itself right after
+  launch.
+
 ## [0.4.19] — 2026-09-10
 
 ### Fixed
