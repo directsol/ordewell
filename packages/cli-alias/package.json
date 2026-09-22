@@ -39,6 +39,6 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@ordewell/cli": "0.4.20"
+    "@ordewell/cli": "0.4.21"
   }
 }
