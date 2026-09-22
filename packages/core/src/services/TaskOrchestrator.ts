@@ -4,6 +4,7 @@ import { INotification } from '../interfaces/INotification';
 import { ITerminalRunner } from '../interfaces/ITerminalRunner';
 import { composeAugmentedPrompt, summarizeOutput } from './promptAugment';
 import { VerdictEngine, renderCleanCapture } from './VerdictEngine';
+import { readFinalAssistantText } from './transcriptCapture';
 import { PlanStore } from './PlanStore';
 import type { RunnerRegistry } from '../plugins/RunnerRegistry';
 
@@ -56,6 +57,11 @@ export class TaskOrchestrator {
   private workspaceRootFn: () => string = () => process.cwd();
   private observers: OrchestratorObserver[] = [];
   private tddEnabled: () => boolean = () => false;
+  /**
+   * Spawn context per active task, for locating the agent's own session
+   * transcript at verdict time (issue #16). Cleared with the session entry.
+   */
+  private taskSpawnContext = new Map<string, { runner: string; cwd: string; startedAt: string }>();
 
   constructor(
     private config: IConfig,
@@ -249,6 +255,8 @@ export class TaskOrchestrator {
     const task = this.store.get(taskId);
     if (!task) return;
     this.activeTaskSessions.delete(taskId);
+    const spawnContext = this.taskSpawnContext.get(taskId);
+    this.taskSpawnContext.delete(taskId);
 
     console.error(`[TaskOrchestrator] Task #${task.order} "${task.title}" verdict=${verdict.outcome}`);
     console.error(`[TaskOrchestrator] Runner: ${task.assignedRunner}, Model: ${task.assignedModel?.modelId ?? 'default'}`);
@@ -261,13 +269,18 @@ export class TaskOrchestrator {
 
     this.store.setTaskVerdict(taskId, verdict);
 
-    // The durable summary is built from the cleaned capture (screen-rendered,
-    // marker-anchored), not the raw chronological tail — for interactive
-    // runners the raw tail is mostly TUI paint (issue #14). Headless streams
-    // pass through unchanged: renderTerminalOutput on plain stdout text is a
-    // near-identity, and without a marker the fallback is the same render.
+    // The durable summary prefers the agent's own session transcript (issue
+    // #16): the clean, structured record the agent writes about itself, no
+    // terminal roundtrip. All transcript readers are defensive — a missing or
+    // rotated store returns null and the #14 cleaned terminal render takes
+    // over, so the capture degrades, never breaks. The terminal stays the
+    // source of truth for the verdict itself; this only changes what gets
+    // summarized for downstream consumers.
     const doneToken = `<<<ORDEWELL_DONE_${task.completionMarker}>>>`;
-    const cleaned = renderCleanCapture(output, doneToken);
+    const transcript = spawnContext
+      ? await readFinalAssistantText(spawnContext)
+      : null;
+    const cleaned = transcript ?? renderCleanCapture(output, doneToken);
     const effective = cleaned.length > 0 ? cleaned : output;
     if (verdict.outcome === 'pass') {
       this.store.markCompleted(taskId);
@@ -562,6 +575,8 @@ export class TaskOrchestrator {
     try {
       const cwd = this.workspaceRootFn();
       const runner = this.store.resolveTaskRunner(task);
+      const startedAt = new Date().toISOString();
+      this.taskSpawnContext.set(task.id, { runner, cwd, startedAt });
       const finalPrompt = composeAugmentedPrompt(task, this.store.planTasks, {
         planMapEnabled: this.config.planMapEnabled,
         tddEnabled: this.tddEnabled(),
