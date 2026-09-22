@@ -185,6 +185,38 @@ const MARKER_SCAN_TAIL = 16384;
 /** No output for this long marks a running task idle (advisory, UI-only). */
 const IDLE_TIMEOUT_MS = 60_000;
 
+/**
+ * Reconstruct what the user actually saw, then stop at the completion marker.
+ * Used for anything captured as a task's durable output (outputSummary.logTail,
+ * and any future planner read channel): the raw chronological PTY tail is
+ * dominated by TUI paint — spinner lines, status bars, box-drawing borders,
+ * cursor-positioned fragments — because screen-painting agents emit answer
+ * text at absolute positions and repaint unrelated widgets around it.
+ *
+ * The marker row is the cut anchor: everything below it is the TUI's
+ * persistent chrome, not task output. Falls back to the chronological
+ * (stripAnsi'd) tail when neither render exposes the marker — the common case
+ * for headless runners, whose raw stream IS meaningful.
+ */
+export function renderCleanCapture(raw: string, doneToken?: string): string {
+  const rendered = renderTerminalOutput(raw).replace(/[\s─-▟]+$/gm, '');
+  if (!doneToken) return rendered.trim();
+  const lines = rendered.split('\n');
+  const flat = (s: string) => flattenTerminalOutput(s);
+  for (let i = 0; i < lines.length; i++) {
+    // The marker may be split across two rendered rows (painted at a row
+    // boundary): the first row alone won't match, so a two-row window is
+    // scanned too. The cut is the last row that carries marker text — rows
+    // above it are content, rows below are TUI chrome.
+    const own = flat(lines[i]).includes(doneToken);
+    if (own) return lines.slice(0, i).join('\n').trim();
+    const window = flat(lines[i]) + (i + 1 < lines.length ? flat(lines[i + 1]) : '');
+    if (window.includes(doneToken)) return lines.slice(0, i + 1).join('\n').trim();
+  }
+  return rendered.trim();
+}
+
+
 export class VerdictEngine {
   private markerSeen = new Set<string>();
   private buffers = new Map<string, string>();
