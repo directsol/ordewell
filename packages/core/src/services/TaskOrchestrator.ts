@@ -3,7 +3,7 @@ import { IConfig } from '../interfaces/IConfig';
 import { INotification } from '../interfaces/INotification';
 import { ITerminalRunner } from '../interfaces/ITerminalRunner';
 import { composeAugmentedPrompt, summarizeOutput } from './promptAugment';
-import { VerdictEngine } from './VerdictEngine';
+import { VerdictEngine, renderCleanCapture } from './VerdictEngine';
 import { PlanStore } from './PlanStore';
 import type { RunnerRegistry } from '../plugins/RunnerRegistry';
 
@@ -261,6 +261,14 @@ export class TaskOrchestrator {
 
     this.store.setTaskVerdict(taskId, verdict);
 
+    // The durable summary is built from the cleaned capture (screen-rendered,
+    // marker-anchored), not the raw chronological tail — for interactive
+    // runners the raw tail is mostly TUI paint (issue #14). Headless streams
+    // pass through unchanged: renderTerminalOutput on plain stdout text is a
+    // near-identity, and without a marker the fallback is the same render.
+    const doneToken = `<<<ORDEWELL_DONE_${task.completionMarker}>>>`;
+    const cleaned = renderCleanCapture(output, doneToken);
+    const effective = cleaned.length > 0 ? cleaned : output;
     if (verdict.outcome === 'pass') {
       this.store.markCompleted(taskId);
       this.notifications.info(`Task "${task.title}" completed.`);
@@ -274,7 +282,7 @@ export class TaskOrchestrator {
       this.notifications.error(`Task "${task.title}" failed verification: ${verdict.reason}`);
     }
 
-    this.store.setTaskOutputSummary(taskId, summarizeOutput(verdict.reason, output));
+    this.store.setTaskOutputSummary(taskId, summarizeOutput(verdict.reason, effective));
 
     this.logAndArchive(task, verdict);
 
