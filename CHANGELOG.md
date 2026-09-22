@@ -8,6 +8,29 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.4.21] — 2026-09-22
+
+### Fixed
+
+- **Dependent tasks now receive their predecessor's real final message, not a
+  frozen frame of the runner's UI.** The output summary captured as context for
+  dependent tasks was the raw terminal tail — for interactive runners that is
+  mostly TUI paint (spinner lines, the `ctx:` status bar, cursor-positioned
+  fragments) with the actual answer scattered or absent (#14). Capture is now
+  screen-rendered and cut at the completion marker, so everything below the
+  marker — the persistent status bar, spinner and input gutter — is dropped.
+
+### Added
+
+- **The summary prefers the agent's own session transcript.** Claude Code
+  (JSONL transcripts), OpenCode (its SQLite store) and Codex (rollout files)
+  all write a clean, structured record of the conversation. When the runner's
+  transcript can be located for the task's working directory and start time,
+  the dependent task now reads the agent's actual prose; the cleaned terminal
+  capture remains the fallback when no transcript exists (#16). The terminal
+  is untouched as the source of verdict evidence — this changes only what is
+  summarized for downstream consumers.
+
 ## [0.4.20] — 2026-09-22
 
 ### Fixed

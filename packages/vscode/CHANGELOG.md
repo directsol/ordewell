@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.4.21] — 2026-09-22
+
+### Fixed
+
+- A dependent task's context about its predecessors now shows the runner's
+  actual final message, cleaned from the terminal's TUI paint (#14), and reads
+  the agent's own session transcript when one is available (#16).
+
 ## [0.4.20] — 2026-09-22
 
 ### Fixed
