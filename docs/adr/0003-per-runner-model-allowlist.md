@@ -54,3 +54,34 @@ from `UserSettings` entirely; the interview workflow is now the user-invoked
 `grilling` skill, not a mode toggle. The comparisons above describe the
 toggle-based mechanism as it existed when this ADR was written and are left
 as-is.
+## Update (2026-09-23) — the per-turn catalog and edit validation are live (#17)
+
+C1's "mid-conversation allowlist changes take effect on the next
+conversation" no longer holds. Since ADR-0012 the catalog is re-sent every
+turn (`Session.catalogBlock`, and the `taskQuery` catalog answer), and both
+read the allowlist live. Only the system prompt's model block is still a
+snapshot from `startPlanning`, and the per-turn block supersedes it.
+
+Three things still kept a newly allowed model out of reach, and are now
+fixed:
+
+- **The edit validator disagreed with the catalog.** `filterModelsForPrompt`
+  shows the planner an allowlisted id that discovery never listed, but
+  `checkModelAndModeValidity` refused any id missing from discovery before it
+  looked at the allowlist. It now accepts an id in the runner's effective
+  allowlist, which is the same reading `coerceAssignments` makes ("listed for
+  no runner → keep, the runner validates last").
+- **The Session's model catalog was a start-of-session snapshot.** The Session
+  now reads the resolver's discovery cache on every use
+  (`ModelResolver.getCachedRunnerModels`, which never triggers discovery). It
+  falls back to its own discovery only where the resolver has nothing cached,
+  so a model re-discovered mid-session arrives with its real label and
+  variants.
+- **Clearing the allowlist fell back to the old one.** Live reads used
+  `settings.modelAllowlist ?? <allowlist at startPlanning>`, so clearing the
+  last runner's entry (which unsets the whole map) brought back the restriction
+  the user had just removed. Unset now means no restriction, as D1 intended.
+
+We still didn't add a planner tool for listing or selecting models. The
+catalog block already delivers the list on every turn to both planner
+backends, and a registered tool would not reach harness planners (ADR-0012 T1).

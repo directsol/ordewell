@@ -367,6 +367,25 @@ describe('applyTaskOps — model and task-mode validity', () => {
     expect(res.ok).toBe(true);
   });
 
+  it('accepts an allowlisted model discovery does not list, as the catalog block shows it', () => {
+    const res = applyTaskOps(samplePlan(), [
+      { op: 'update', taskId: 'a', changes: { assignedModel: { modelId: 'claude-fable-5', modelLabel: 'claude-fable-5' } } },
+    ], ['claude-code'], { ...CATALOG, perRunnerAllowlist: { 'claude-code': ['claude-sonnet-4-5', 'claude-fable-5'] } });
+    expect(res.ok).toBe(true);
+  });
+
+  it('refuses an allowlisted id another runner lists — it is provably not this runner\'s', () => {
+    const res = applyTaskOps(samplePlan(), [
+      { op: 'update', taskId: 'a', changes: { assignedModel: { modelId: 'gpt-5', modelLabel: 'GPT-5' } } },
+    ], ['claude-code'], {
+      ...CATALOG,
+      modelsByRunner: { ...CATALOG.modelsByRunner, codex: [{ modelId: 'gpt-5', modelLabel: 'GPT-5', variants: [] }] },
+      perRunnerAllowlist: { 'claude-code': ['claude-sonnet-4-5', 'gpt-5'] },
+    });
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]).toContain('gpt-5');
+  });
+
   it('accepts a valid task mode', () => {
     const res = applyTaskOps(samplePlan(), [
       { op: 'update', taskId: 'a', changes: { taskMode: 'plan' } },
