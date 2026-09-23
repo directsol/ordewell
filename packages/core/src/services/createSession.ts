@@ -244,7 +244,6 @@ export class Session {
   private approvalPolicy: ApprovalPolicy;
   private fetcher: HttpWebFetcher;
   private settingsFn: () => SessionRuntimeSettings;
-  private currentAllowlist: Record<string, string[]> = {};
   /** Last discovered model catalog — lets sync plan commits clamp thinking efforts to real variants. */
   private modelsCache: Partial<Record<RunnerId, DiscoveredModel[]>> = {};
   private unsubObserver: (() => void) | null = null;
@@ -471,7 +470,6 @@ export class Session {
     // approved for the previous goal must not stay approved for the next one.
     this.approvalPolicy.reset();
     this.modelsCache = {};
-    this.currentAllowlist = {};
     this.remintSessionId();
   }
 
@@ -483,16 +481,42 @@ export class Session {
    * The catalog a model/task-mode edit is checked against — the same
    * discovered models and manifest modes the per-turn catalog block shows the
    * planner, so a refusal here can never name something invalid that the
-   * planner was never told about. `modelsCache` is read live, not filtered by
-   * the allowlist here — {@link checkModelAndModeValidity} narrows by
+   * planner was never told about. The catalog is not filtered by the
+   * allowlist here — {@link checkModelAndModeValidity} narrows by
    * allowlist itself, the same way `coerceAssignments` does.
    */
   private editCatalog(): EditCatalog {
     return {
-      modelsByRunner: this.modelsCache,
+      modelsByRunner: this.models(),
       runnerModes: this.runnerModesFor(this.plan?.runners ?? []),
-      perRunnerAllowlist: this.settingsFn().modelAllowlist ?? this.currentAllowlist,
+      perRunnerAllowlist: this.allowlist(),
     };
+  }
+
+  /**
+   * The allowlist in force right now. Unset means no restriction — falling
+   * back to the one planning started under would keep a restriction the user
+   * has since cleared.
+   */
+  private allowlist(): Record<string, string[]> {
+    return this.settingsFn().modelAllowlist ?? {};
+  }
+
+  /**
+   * The discovered catalog as the resolver holds it now, per runner, with this
+   * session's own discovery as the fallback where the resolver has nothing
+   * cached. The resolver's cache outlives this session's snapshot in both
+   * directions — an allowlist picker re-discovers into it mid-session — and a
+   * model allowed after that must reach the planner with its real label and
+   * variants, not as an id-only stub. Never triggers discovery itself.
+   */
+  private models(): Partial<Record<RunnerId, DiscoveredModel[]>> {
+    const out = { ...this.modelsCache };
+    for (const runner of new Set([...Object.keys(out), ...(this.plan?.runners ?? [])])) {
+      const cached = this.modelResolver.getCachedRunnerModels(runner);
+      if (cached.length > 0) out[runner] = cached;
+    }
+    return out;
   }
 
   get planState(): LegacyPlanState | null { return this.plan; }
@@ -630,8 +654,7 @@ export class Session {
     this.modelsCache = modelsByRunner;
     const runnerModes = this.runnerModesFor(chosenRunners);
     const { verificationEnabled, modelAllowlist } = this.settingsFn();
-    this.currentAllowlist = modelAllowlist ?? {};
-    const filteredModels = filterModelsForPrompt(modelsByRunner, this.currentAllowlist);
+    const filteredModels = filterModelsForPrompt(modelsByRunner, modelAllowlist ?? {});
 
     const now = new Date().toISOString();
     this.plan = {
@@ -802,12 +825,12 @@ export class Session {
    */
   private taskQueryAnswer(query: TaskQuery): string {
     const runners = this.plan?.runners ?? [];
-    const allowlist = this.settingsFn().modelAllowlist ?? this.currentAllowlist;
+    const allowlist = this.allowlist();
     return renderTaskQueryAnswer(query, this.store.planTasks, {
       runners,
       // Allowlist-filtered like the always-on block: a read must not offer a
       // model the planner is forbidden to assign.
-      models: filterModelsForPrompt(this.modelsCache, allowlist),
+      models: filterModelsForPrompt(this.models(), allowlist),
       modes: this.runnerModesFor(runners),
       autonomousDefault: this.config.autonomousMode,
     });
@@ -877,7 +900,7 @@ export class Session {
    *
    * Built from the allowlist-filtered view (`filterModelsForPrompt`), the same
    * one the system prompt used — a restricted allowlist stays a hard bound on
-   * every turn, not just the first. `this.modelsCache` itself is never
+   * every turn, not just the first. {@link models} itself is never
    * filtered: `coerceAssignments` needs the full discovered catalog alongside
    * the allowlist to resolve labels and clamp effort to real variants.
    *
@@ -887,8 +910,8 @@ export class Session {
    */
   private catalogBlock(): string | null {
     if (!this.plan) return null;
-    const allowlist = this.settingsFn().modelAllowlist ?? this.currentAllowlist;
-    const filteredModels = filterModelsForPrompt(this.modelsCache, allowlist);
+    const allowlist = this.allowlist();
+    const filteredModels = filterModelsForPrompt(this.models(), allowlist);
     const runnerModes = this.runnerModesFor(this.plan.runners);
     const autonomousDefault = this.config.autonomousMode;
 
@@ -989,8 +1012,8 @@ export class Session {
     const plan = this.mutatePlan(
       () => {
         this.plan!.researchLog = [...(this.plan!.researchLog ?? []), ...turn.researchLog];
-        const allowlist = this.settingsFn().modelAllowlist ?? this.currentAllowlist;
-        const coerced = coerceAssignments(result.tasks, allowlist, this.plan!.runners, this.modelsCache);
+        const allowlist = this.allowlist();
+        const coerced = coerceAssignments(result.tasks, allowlist, this.plan!.runners, this.models());
         // An armed scheduler owns run state the edit is not allowed to wipe:
         // `loadPlan` clears the on-hold set and the review approval, so a task
         // the user cancelled would be re-armed and re-spawned by the re-tick
@@ -1031,8 +1054,7 @@ export class Session {
     this.modelsCache = modelsByRunner;
     const runnerModes = this.runnerModesFor(runners);
     const { verificationEnabled, modelAllowlist } = this.settingsFn();
-    this.currentAllowlist = modelAllowlist ?? {};
-    const filteredModels = filterModelsForPrompt(modelsByRunner, this.currentAllowlist);
+    const filteredModels = filterModelsForPrompt(modelsByRunner, modelAllowlist ?? {});
     const goal = this.goal || priorHistory.find((m) => m.role === 'user')?.content || userMessage;
 
     return this.aiService.startConversation({
@@ -1090,8 +1112,8 @@ export class Session {
         this.capturePrd(turn.text);
         // Read the allowlist live: it may have changed since startPlanning, and
         // committed tasks must respect the current one.
-        const allowlist = this.settingsFn().modelAllowlist ?? this.currentAllowlist;
-        const coerced = coerceAssignments(turn.tasks, allowlist, this.plan!.runners, this.modelsCache);
+        const allowlist = this.allowlist();
+        const coerced = coerceAssignments(turn.tasks, allowlist, this.plan!.runners, this.models());
         this.orchestrator.loadPlan(coerced, this.plan!.runners);
         this.store.resetForRun({ preserveCompleted: false });
         this.appendTranscript('assistant', `Plan generated with ${coerced.length} task${coerced.length === 1 ? '' : 's'}.`, now, 'plan_generated');
@@ -1382,7 +1404,7 @@ export class Session {
     const allowed = effectiveAllowlist(
       this.settingsFn().modelAllowlist?.[runner],
       runner,
-      { ...this.modelsCache, [runner]: catalog.models },
+      { ...this.models(), [runner]: catalog.models },
     );
     if (!allowed) return catalog;
     const models = catalog.models.filter((m) => allowed.includes(m.modelId));

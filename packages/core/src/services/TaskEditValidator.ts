@@ -64,10 +64,13 @@ export function checkModelAndModeValidity(
     const models = catalog.modelsByRunner[runner];
     if (models) {
       const modelId = assignedModel.modelId;
-      if (!models.some((m) => m.modelId === modelId)) {
+      const allowed = effectiveAllowlist(catalog.perRunnerAllowlist?.[runner], runner, catalog.modelsByRunner);
+      // An allowlisted id discovery doesn't list is one `filterModelsForPrompt`
+      // shows the planner anyway — refusing it here would contradict the
+      // catalog block; the runner validates it last.
+      if (!models.some((m) => m.modelId === modelId) && !allowed?.includes(modelId)) {
         return { ok: false, error: `Runner "${runner}" does not offer model "${modelId}"` };
       }
-      const allowed = effectiveAllowlist(catalog.perRunnerAllowlist?.[runner], runner, catalog.modelsByRunner);
       if (allowed && !allowed.includes(modelId)) {
         return { ok: false, error: `Model "${modelId}" is excluded by the allowlist for runner "${runner}"` };
       }
