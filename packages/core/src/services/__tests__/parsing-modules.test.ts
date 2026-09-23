@@ -640,6 +640,21 @@ describe('parsePlanJson with dynamic modes', () => {
     expect(tasks[0].taskMode).toBe('plan');
   });
 
+  it('resolves a missing mode to the toggle default when the runner declares modes', () => {
+    const codex = {
+      codex: [
+        { id: 'agent', label: 'Agent', description: 'workspace-write', safe: true },
+        { id: 'plan', label: 'Plan', description: 'read-only' },
+        { id: 'fullAccess', label: 'Full access', description: 'no sandbox', autonomous: true },
+      ],
+    };
+    const raw = JSON.stringify({
+      tasks: [{ id: 't1', order: 1, title: 'T', description: 'd', type: 'ai', dependencies: [], subtasks: [], sliceType: 'AFK', autonomy: 'AFK', assignedRunner: 'codex' }],
+    });
+    expect(parsePlanJson(raw, ['codex'], codex, true)[0].taskMode).toBe('fullAccess');
+    expect(parsePlanJson(raw, ['codex'], codex, false)[0].taskMode).toBe('agent');
+  });
+
   it('accepts legacy "build" mode for claude-code (backward compat)', () => {
     const tasks = parsePlanJson(planWithMode('build'), ['claude-code'], claudeModes);
     expect(tasks[0].taskMode).toBe('build');

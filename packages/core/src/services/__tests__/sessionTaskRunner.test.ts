@@ -44,8 +44,8 @@ describe('Session.setTaskRunner', () => {
       thinkingEffort: 'high',
       availableVariants: ['low', 'high'],
     });
-    // codex's manifest modes are agent/plan/fullAccess — 'acceptEdits' is Claude-only.
-    expect(task.taskMode).toBe('agent');
+    // 'acceptEdits' is Claude-only; the toggle (ON in test config) picks codex's autonomous mode, not its first.
+    expect(task.taskMode).toBe('fullAccess');
   });
 
   it('admits the new runner into plan.runners so the next planner turn does not snap it back', async () => {
@@ -155,6 +155,6 @@ describe('Session.setTaskRunner', () => {
 
     expect(state!.tasks[0].assignedRunner).toBe('codex');
     expect(state!.tasks[0].assignedModel!.modelId).toBe('claude-sonnet-4-5');
-    expect(state!.tasks[0].taskMode).toBe('agent');
+    expect(state!.tasks[0].taskMode).toBe('fullAccess');
   });
 });

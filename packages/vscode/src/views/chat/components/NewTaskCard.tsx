@@ -60,13 +60,15 @@ export default function NewTaskCard({
   const modes = effectiveRunner ? (modesByRunner?.[effectiveRunner] ?? []) : [];
 
   // A model or mode picked for one runner may not exist on another, so the
-  // shown value falls back to that runner's first entry — the same choice the
-  // host would derive if we sent nothing.
+  // shown model falls back to that runner's first entry — the same choice the
+  // host would derive if we sent nothing. The mode falls back to sending
+  // nothing: the host's default follows the autonomous toggle, which this view
+  // cannot see, and `modes[0]` is not it (Codex lists its sandboxed mode first).
   const effectiveModel = useMemo(() => {
     if (model && runnerModels.some((m) => m.modelId === model.modelId)) return model;
     return runnerModels[0] ? assignmentFor(runnerModels[0]) : undefined;
   }, [model, runnerModels]);
-  const effectiveMode = modes.some((m) => m.id === mode) ? mode : (modes[0]?.id ?? '');
+  const effectiveMode = modes.some((m) => m.id === mode) ? mode : '';
 
   const candidates = useMemo(() => dependencyCandidates(tasks), [tasks]);
 
@@ -130,6 +132,7 @@ export default function NewTaskCard({
         <div className="model-selector">
           <label htmlFor="new-task-mode">Mode</label>
           <select id="new-task-mode" value={effectiveMode} onChange={(e) => setMode(e.target.value)}>
+            <option value="">Runner default</option>
             {modes.map((m) => <option key={m.id} value={m.id}>{m.label} — {m.description}</option>)}
           </select>
         </div>

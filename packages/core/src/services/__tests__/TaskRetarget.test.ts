@@ -53,6 +53,14 @@ describe('retargetTaskRunner', () => {
     });
   });
 
+  it('lands on the catalog default mode rather than the first listed one', () => {
+    // Codex lists its workspace-write sandbox first; under the autonomous toggle
+    // the default is full access, and an unattended task needs exactly that.
+    const catalog = { models: CODEX_MODELS, modes: CODEX_MODES, defaultMode: 'plan' };
+    expect(retargetTaskRunner(claudeTask(), 'codex', catalog).taskMode).toBe('plan');
+    expect(runnerAssignment(catalog, { taskMode: 'build' }).taskMode).toBe('plan');
+  });
+
   it('keeps a mode the new runner also offers instead of snapping to its first', () => {
     const changes = retargetTaskRunner(claudeTask({ taskMode: 'plan' }), 'codex', { models: CODEX_MODELS, modes: CODEX_MODES });
 

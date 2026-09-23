@@ -49,14 +49,14 @@ describe('NewTaskCard', () => {
     expect(screen.queryByPlaceholderText('Task title')).toBeNull();
   });
 
-  it('defaults to the first runner with that runner first model and mode', () => {
+  it('defaults to the first runner with that runner first model and its default mode', () => {
     open();
 
     const runner = screen.getByLabelText('Runner') as HTMLSelectElement;
     expect(runner.value).toBe('claude-code');
     // No blank row: an empty option would let a user unset the runner entirely.
     expect([...runner.options].map((o) => o.value)).toEqual(['claude-code', 'codex']);
-    expect((screen.getByLabelText('Mode') as HTMLSelectElement).value).toBe('build');
+    expect((screen.getByLabelText('Mode') as HTMLSelectElement).value).toBe('');
     expect(screen.getByText(/Claude Sonnet 4\.5/)).toBeTruthy();
   });
 
@@ -73,9 +73,19 @@ describe('NewTaskCard', () => {
       prompt: 'do the docs',
       assignedRunner: 'claude-code',
       assignedModel: expect.objectContaining({ modelId: 'claude-sonnet-4-5' }),
-      taskMode: 'build',
+      taskMode: undefined,
       dependencies: ['t2'],
     });
+  });
+
+  it('submits a mode the user picked', () => {
+    const onAdd = open();
+
+    act(() => { fireEvent.change(screen.getByLabelText('Mode'), { target: { value: 'build' } }); });
+    act(() => { fireEvent.change(screen.getByPlaceholderText('Task title'), { target: { value: 'Write docs' } }); });
+    act(() => { fireEvent.click(screen.getByText('Add task')); });
+
+    expect(onAdd).toHaveBeenCalledWith(expect.objectContaining({ taskMode: 'build' }));
   });
 
   it('falls back to the title as the prompt', () => {
@@ -90,6 +100,7 @@ describe('NewTaskCard', () => {
   it('re-picks the model and mode when the runner changes, since neither exists on both', () => {
     const onAdd = open();
 
+    act(() => { fireEvent.change(screen.getByLabelText('Mode'), { target: { value: 'build' } }); });
     act(() => { fireEvent.change(screen.getByLabelText('Runner'), { target: { value: 'codex' } }); });
     act(() => { fireEvent.change(screen.getByPlaceholderText('Task title'), { target: { value: 'Write docs' } }); });
     act(() => { fireEvent.click(screen.getByText('Add task')); });
@@ -97,7 +108,7 @@ describe('NewTaskCard', () => {
     expect(onAdd).toHaveBeenCalledWith(expect.objectContaining({
       assignedRunner: 'codex',
       assignedModel: expect.objectContaining({ modelId: 'gpt-5-codex' }),
-      taskMode: 'agent',
+      taskMode: undefined,
     }));
   });
 

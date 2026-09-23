@@ -6,6 +6,13 @@ import type { RunnerModeInfo } from './ModeResolver';
 export interface RunnerCatalog {
   models: DiscoveredModel[];
   modes: RunnerModeInfo[];
+  /**
+   * The mode a task lands on when it carries none this runner offers: the
+   * manifest's `autonomous`/`safe`-tagged mode under the user's toggle
+   * (ADR-0001). Absent, `modes[0]` stands in — which for Codex is its
+   * workspace-write sandbox, not the full access an unattended run needs.
+   */
+  defaultMode?: string;
 }
 
 /**
@@ -17,8 +24,8 @@ export interface RunnerCatalog {
  * assignment — a runner change (below) and a hand-added task derive it the same
  * way. Each field in `current` is preserved when the runner also offers it, and
  * otherwise snapped to that runner's preferred entry (discovery already sorts
- * models by the manifest's `preferredPatterns`; `modes[0]` is the manifest's own
- * first choice).
+ * models by the manifest's `preferredPatterns`; the mode is the catalog's
+ * `defaultMode`).
  *
  * An empty catalog means discovery failed or the runner is a plugin we have no
  * list for — not that the runner offers nothing. That field is left out of the
@@ -47,7 +54,7 @@ export function runnerAssignment(
   }
 
   if (catalog.modes.length > 0) {
-    changes.taskMode = catalog.modes.some((m) => m.id === current?.taskMode) ? current!.taskMode : catalog.modes[0].id;
+    changes.taskMode = catalog.modes.some((m) => m.id === current?.taskMode) ? current!.taskMode : catalog.defaultMode ?? catalog.modes[0].id;
   }
 
   return changes;

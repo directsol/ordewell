@@ -1358,9 +1358,11 @@ export class Session {
 
   /** What a runner offers, as {@link runnerAssignment} needs it. Spawns the runner's CLI to list models. */
   private async catalogFor(runner: RunnerId): Promise<RunnerCatalog> {
+    const modes = this.runnerModesFor([runner])[runner];
     return {
       models: (await this.modelResolver.modelsForRunners([runner]))[runner] ?? [],
-      modes: this.runnerModesFor([runner])[runner],
+      modes,
+      defaultMode: resolveDefaultMode(modes, this.config.autonomousMode),
     };
   }
 

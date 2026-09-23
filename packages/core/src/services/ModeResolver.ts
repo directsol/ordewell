@@ -116,6 +116,10 @@ export function resolveTaskMode(
 
   if (!modes || modes.length === 0) return rawMode;
 
+  // A missing mode is an invalid emission, not a request for legacy `build` —
+  // which on Codex aliases the workspace-write sandbox, not full access.
+  if (!emittedMode) return resolveDefaultMode(modes, autonomousDefault) ?? 'build';
+
   const validIds = new Set(modes.map((m) => m.id));
 
   if (rawMode === 'build' || validIds.has(rawMode)) {
