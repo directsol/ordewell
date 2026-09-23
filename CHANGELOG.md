@@ -8,6 +8,19 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.4.22] — 2026-09-23
+
+### Fixed
+
+- **Codex tasks now run with full access under autonomous mode.** A task moved
+  onto Codex, or added by hand, took the first mode Codex lists — its
+  workspace-write sandbox — instead of the mode the autonomous toggle selects.
+  With approvals off, a sandboxed Codex task could not ask for more access, so
+  it stopped at the first blocked command. New and retargeted tasks now land on
+  the toggle's mode (`fullAccess` when autonomous mode is on), and a planned
+  task with no mode resolves the same way. Existing tasks keep the mode they
+  have — change it per task or regenerate the plan.
+
 ## [0.4.21] — 2026-09-22
 
 ### Fixed

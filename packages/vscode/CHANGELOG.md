@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.4.22] — 2026-09-23
+
+### Fixed
+
+- Codex tasks added or moved onto Codex now run with full access when
+  autonomous mode is on, instead of the workspace-write sandbox. The New Task
+  card's mode defaults to "Runner default", which follows the toggle.
+
 ## [0.4.21] — 2026-09-22
 
 ### Fixed
