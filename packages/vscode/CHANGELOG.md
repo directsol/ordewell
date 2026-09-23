@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.4.23] — 2026-09-23
+
+### Fixed
+
+- Models added to a runner's allowlist during a session can now be assigned
+  by the planner, and clearing the allowlist lifts the restriction right away
+  (#17).
+
 ## [0.4.22] — 2026-09-23
 
 ### Fixed

@@ -8,6 +8,18 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.4.23] — 2026-09-23
+
+### Fixed
+
+- **The planner can use models you allowlist mid-session (#17).** Adding a
+  model to a runner's allowlist during a session showed it to the planner, but
+  its edits assigning that model were refused as "does not offer model" when
+  the session's start-up model discovery hadn't listed it. The planner now uses
+  the allowlist in force on each turn and the latest discovered model catalog.
+  Clearing the allowlist mid-session also lifts the restriction; before, it
+  fell back to the list the session started with.
+
 ## [0.4.22] — 2026-09-23
 
 ### Fixed
