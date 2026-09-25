@@ -117,7 +117,7 @@ describe('task editor caret, through the rendered frame', () => {
     }
   });
 
-  it('re-anchors on the selection after a manual wheel scroll', () => {
+  it('keeps the selection on screen after a manual wheel scroll', () => {
     const many: TaskView[] = Array.from({ length: 25 }, (_, i) => ({
       id: `t${i}`, order: i + 1, title: `Task ${i + 1}`, type: 'ai' as const, status: 'pending', dependencies: [],
     }));
@@ -126,7 +126,6 @@ describe('task editor caret, through the rendered frame', () => {
     for (let i = 0; i < 10; i++) state = press(state, 'scrollup').state;
     state = press(state, 'down').state;
 
-    expect(state.planScroll).toBeNull();
     expect(selectedRow(state)).toBeGreaterThanOrEqual(0);
   });
 

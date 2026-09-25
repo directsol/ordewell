@@ -300,13 +300,10 @@ export interface TuiState {
   /** Lines the transcript is scrolled back from its tail; 0 follows live output. */
   scroll: number;
   /**
-   * The plan pane's viewport, as an absolute line offset — or `null` for the
-   * default, which is to follow the selected task. A delta layered on top of
-   * that auto-anchor (what this used to be) could never scroll *above* the
-   * anchor, so with a task selected far down the plan the first task was
-   * unreachable without dragging the selection through it. The first manual
-   * scroll seeds the offset from the anchor so the view does not jump; moving
-   * the selection with the arrows hands the pane back to follow mode.
+   * The plan pane's viewport, as an absolute line offset. It holds still while
+   * the cursor walks inside it and moves only to keep the selection on screen.
+   * `null` means nothing has positioned it yet: it is derived from the
+   * selection until the first key or resize settles it into a number.
    */
   planScroll: number | null;
   skills: Skills;
