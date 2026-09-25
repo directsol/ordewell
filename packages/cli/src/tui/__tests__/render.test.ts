@@ -545,6 +545,82 @@ describe('overlays', () => {
     expect(out).toContain('Write docs');
   });
 
+  describe('the rewind confirmation', () => {
+    const rewindOverlay = (quote: string, index = 0): TuiState['overlay'] => ({
+      kind: 'confirm',
+      title: 'Rewind',
+      message: 'Confirm you want to restore to the point before you sent this message:',
+      quote,
+      note: 'The conversation will be forked.\nThe code will be unchanged.',
+      action: { kind: 'rewind', index: 4 },
+      choice: {
+        options: [{ label: 'Restore Conversation', confirms: true }, { label: 'Never mind', confirms: false }],
+        index,
+      },
+    });
+    const lines = (over: Partial<TuiState>) => screen(over).map((l) => stripAnsi(l).trimEnd());
+
+    it('reads as the popup the user was promised, wording and all', () => {
+      const out = lines({ overlay: rewindOverlay('Make it stream\nand resumable') });
+      const at = out.findIndex((l) => l.includes('Confirm you want to restore'));
+
+      expect(out.some((l) => l.startsWith('┌─ Rewind'))).toBe(true);
+      expect(out.slice(at, at + 12).map((l) => l.trim())).toEqual([
+        'Confirm you want to restore to the point before you sent this message:',
+        '',
+        '│ Make it stream',
+        '│ and resumable',
+        '',
+        'The conversation will be forked.',
+        'The code will be unchanged.',
+        '',
+        '❯ 1. Restore Conversation',
+        '2. Never mind',
+        '',
+        expect.stringMatching(/^↑↓ move · .*esc/),
+      ]);
+    });
+
+    it('moves the caret to the highlighted option', () => {
+      const out = lines({ overlay: rewindOverlay('hi', 1) }).map((l) => l.trim());
+
+      expect(out).toContain('1. Restore Conversation');
+      expect(out).toContain('❯ 2. Never mind');
+    });
+
+    it('wraps a long message inside the pane, keeping the gutter on every row', () => {
+      const out = lines({ cols: 50, overlay: rewindOverlay('word '.repeat(30).trim()) });
+      const quoted = out.filter((l) => l.trim().startsWith('│'));
+
+      expect(quoted.length).toBeGreaterThan(2);
+      for (const l of quoted) expect(width(l)).toBeLessThanOrEqual(50);
+    });
+
+    it('caps a long message with an ellipsis line and still shows the options', () => {
+      const long = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n');
+      const out = lines({ overlay: rewindOverlay(long) }).map((l) => l.trim());
+
+      expect(out).toContain('│ line 1');
+      expect(out).not.toContain('│ line 40');
+      expect(out).toContain('│ …');
+      expect(out).toContain('❯ 1. Restore Conversation');
+      expect(out).toContain('2. Never mind');
+    });
+
+    it('does not add an ellipsis to a message that fits', () => {
+      expect(lines({ overlay: rewindOverlay('short\nand sweet') }).join('\n')).not.toContain('│ …');
+    });
+  });
+
+  it('draws the existing confirms as before: message and the enter/esc hint', () => {
+    const out = text({ overlay: { kind: 'confirm', title: 'Remove?', message: 'Sure?', action: { kind: 'remove-task', taskId: 't1' } } });
+
+    expect(out).toContain('Remove?');
+    expect(out).toContain('Sure?');
+    expect(out).toContain('enter confirms · esc cancels');
+    expect(out).not.toContain('1. ');
+  });
+
   it('scrolls the help sheet to reach the commands below the fold', () => {
     const top = text({ overlay: { kind: 'help', scroll: 0 }, rows: 24 });
     const down = text({ overlay: { kind: 'help', scroll: 14 }, rows: 24 });

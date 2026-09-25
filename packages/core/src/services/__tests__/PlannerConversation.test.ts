@@ -241,8 +241,8 @@ describe('PlannerConversation rewind targets', () => {
     const { conversation } = fakeHost(fakeAi(), plan);
 
     expect(conversation.rewindTargets()).toEqual([
-      { index: 2, preview: 'JSON only', timestamp: '2026-01-01T00:00:02Z' },
-      { index: 4, preview: 'Streaming', timestamp: '2026-01-01T00:00:04Z' },
+      { index: 2, preview: 'JSON only', content: 'JSON only', timestamp: '2026-01-01T00:00:02Z' },
+      { index: 4, preview: 'Streaming', content: 'Streaming\nand also resumable', timestamp: '2026-01-01T00:00:04Z' },
     ]);
   });
 

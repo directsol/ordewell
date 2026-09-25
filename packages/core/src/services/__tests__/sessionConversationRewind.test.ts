@@ -151,7 +151,7 @@ describe('Session.rewindConversation', () => {
   it('lists the rewind targets', () => {
     const session = adoptedSession();
 
-    expect(session.rewindTargets()).toEqual([{ index: 2, preview: 'add streaming', timestamp: '2026-01-01T00:00:02Z' }]);
+    expect(session.rewindTargets()).toEqual([{ index: 2, preview: 'add streaming', content: 'add streaming\nbut keep the reader pull-based', timestamp: '2026-01-01T00:00:02Z' }]);
   });
 
   it('refuses an index that is not a rewind target, forking nothing', () => {

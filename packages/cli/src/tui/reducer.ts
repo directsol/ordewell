@@ -15,7 +15,7 @@ import { activeToken, findCommand, parseSlash, tokenCompletions, type ParsedComm
 import {
   findTask, initialState, SKILL_IDS, planRows, selectedPlanRow, visibleItems,
   type ApprovalRequestView, type Cell, type ChatMessage, type Focus, type ModeView,
-  type HandoffView, type ModelView, type PickerItem, type PickerState, type RewindTargetView, type RunnerView, type Selection, type SessionView,
+  type ConfirmOption, type HandoffView, type ModelView, type PickerItem, type PickerState, type RewindTargetView, type RunnerView, type Selection, type SessionView,
   type SkillId, type TaskIsolationView, type TaskView, type TuiState,
 } from './state';
 import { assignedModelFor, effortsForTask, modelsForRunner, modelsForTask, modesForTask, runnerAccepts } from './taskAssignment';
@@ -46,7 +46,8 @@ export type Effect =
   | { type: 'loadSession'; sessionId: string }
   | { type: 'deleteSession'; sessionId: string }
   | { type: 'forkConversation'; sessionId: string }
-  | { type: 'loadRewindTargets'; sessionId: string }
+  /** `pick` is `/rewind <n>`: the messages are wanted to quote message n in the confirmation, not to fill the picker. */
+  | { type: 'loadRewindTargets'; sessionId: string; pick?: number }
   | { type: 'rewindConversation'; sessionId: string; index: number }
   | { type: 'compactConversation'; sessionId: string }
   | { type: 'isolationReviewDiff'; sessionId: string }
@@ -102,7 +103,8 @@ export type Action =
   | { type: 'modelsLoaded'; models: ModelView[]; orchestratorModels?: ModelView[]; providers?: string[]; providerErrors?: Record<string, string>; modesByRunner?: Record<string, ModeView[]> }
   | { type: 'sessionsLoaded'; sessions: SessionView[] }
   | { type: 'sessionForked'; sessionId: string; goal: string }
-  | { type: 'rewindTargetsLoaded'; targets: RewindTargetView[]; sessionId?: string }
+  | { type: 'inputPrefilled'; text: string; sessionId?: string }
+  | { type: 'rewindTargetsLoaded'; targets: RewindTargetView[]; sessionId?: string; pick?: number }
   | { type: 'runnersLoaded'; runners: RunnerView[]; orchestratorModel?: string }
   | { type: 'failed'; message: string }
   /** The workspace has no project marker — offer to initialize it rather than just failing. */
@@ -450,6 +452,7 @@ export function reduce(state: TuiState, action: Action): Step {
 
     case 'rewindTargetsLoaded':
       if (stale(state, action.sessionId)) return step(state);
+      if (action.pick !== undefined) return pickRewindTarget({ ...state, rewindTargets: action.targets }, action.pick);
       return step(refillPicker({ ...state, rewindTargets: action.targets }, ['rewind']));
 
     // A fork holds no run, whatever the session it came from was doing — the
@@ -465,6 +468,16 @@ export function reduce(state: TuiState, action: Action): Step {
         planApproved: false,
         pendingApprovals: [],
         overlay: state.overlay?.kind === 'approval' ? null : state.overlay,
+      });
+
+    // The rewound message comes back as a draft to edit and resend, so it lands
+    // as if just typed: history is not being browsed, and nothing is parked.
+    case 'inputPrefilled':
+      if (stale(state, action.sessionId)) return step(state);
+      return step({
+        ...state,
+        focus: 'chat',
+        editor: { ...state.editor, text: action.text, cursor: action.text.length, historyIndex: state.editor.history.length, draft: '' },
       });
 
     case 'runnersLoaded':
@@ -1239,7 +1252,24 @@ function handleConfirmKey(
   key: Key,
 ): Step {
   if (key.name === 'escape') return step({ ...state, overlay: null });
-  if (key.name !== 'enter') return step(state);
+  const { choice } = overlay;
+  if (!choice) return key.name === 'enter' ? runConfirm(state, overlay) : step(state);
+
+  if (key.name === 'up' || key.name === 'down') {
+    const index = clamp(choice.index + (key.name === 'down' ? 1 : -1), choice.options.length - 1);
+    return step({ ...state, overlay: { ...overlay, choice: { ...choice, index } } });
+  }
+  // Options are numbered from 1 on screen, so the digit names the row.
+  const chosen = key.name === 'enter' ? choice.index : key.name === 'char' ? Number(key.char) - 1 : -1;
+  const option = choice.options[chosen];
+  if (!option) return step(state);
+  return option.confirms ? runConfirm(state, overlay) : step({ ...state, overlay: null });
+}
+
+function runConfirm(
+  state: TuiState,
+  overlay: Extract<NonNullable<TuiState['overlay']>, { kind: 'confirm' }>,
+): Step {
   const closed = { ...state, overlay: null };
   if (overlay.action.kind === 'new-session') return newSession(closed);
   if (overlay.action.kind === 'remove-task') {
@@ -1252,7 +1282,9 @@ function handleConfirmKey(
   if (overlay.action.kind === 'init-workspace') {
     return step({ ...closed, status: 'planning' }, [{ type: 'startConversation', goal: overlay.action.goal, allowInit: true }]);
   }
-  return step(closed);
+  // The planner may have started answering while the popup was open.
+  const { index } = overlay.action;
+  return withIdlePlanner(closed, (sessionId) => step(closed, [{ type: 'rewindConversation', sessionId, index }]));
 }
 
 /**
@@ -1393,9 +1425,7 @@ function choose(state: TuiState, picker: PickerState, item: PickerItem | undefin
     case 'load-session':
       return step(closed, [{ type: 'loadSession', sessionId: item.id }]);
     case 'rewind':
-      return withSession(closed, (sessionId) =>
-        step(closed, [{ type: 'rewindConversation', sessionId, index: Number(item.id) }]),
-      );
+      return pickRewindTarget(state, Number(item.id));
     case 'delete-session':
       return step(closed, [{ type: 'deleteSession', sessionId: item.id }]);
     case 'set-key':
@@ -1630,12 +1660,37 @@ function rewind(state: TuiState, arg: string | undefined): Step {
   return withIdlePlanner(state, (sessionId) => {
     if (arg === undefined) {
       return step(
-        { ...state, rewindTargets: null, overlay: { kind: 'picker', picker: picker('Rewind to before…', [], { kind: 'rewind' }, { hint: 'Forks the conversation from just before the chosen message; the original is kept and the tasks ride along.' }) } },
+        { ...state, rewindTargets: null, overlay: { kind: 'picker', picker: picker('Rewind to before…', [], { kind: 'rewind' }, { hint: 'Rewinding forks the conversation from just before the chosen message; the original is kept and the tasks ride along.' }) } },
         [{ type: 'loadRewindTargets', sessionId }],
       );
     }
     if (!/^\d+$/.test(arg)) return fail(state, 'Usage: /rewind [<message>] — or /rewind alone to pick one.');
-    return step(state, [{ type: 'rewindConversation', sessionId, index: Number(arg) }]);
+    return step(state, [{ type: 'loadRewindTargets', sessionId, pick: Number(arg) }]);
+  });
+}
+
+const REWIND_OPTIONS: ConfirmOption[] = [
+  { label: 'Restore Conversation', confirms: true },
+  { label: 'Never mind', confirms: false },
+];
+
+/** Both ways to name a message — the picker and `/rewind <n>` — end at the same confirmation. */
+function pickRewindTarget(state: TuiState, index: number): Step {
+  return withIdlePlanner({ ...state, overlay: null }, () => {
+    const target = state.rewindTargets?.find((t) => t.index === index);
+    if (!target) return fail({ ...state, overlay: null }, `No message ${index} to rewind to — /rewind alone lists them.`);
+    return step({
+      ...state,
+      overlay: {
+        kind: 'confirm',
+        title: 'Rewind',
+        message: 'Confirm you want to restore to the point before you sent this message:',
+        quote: target.content,
+        note: 'The conversation will be forked.\nThe code will be unchanged.',
+        action: { kind: 'rewind', index },
+        choice: { options: REWIND_OPTIONS, index: 0 },
+      },
+    });
   });
 }
 

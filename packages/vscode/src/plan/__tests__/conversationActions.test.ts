@@ -22,8 +22,8 @@ function setup(overrides: { generating?: boolean; executing?: boolean } = {}) {
     planState: current,
     forkConversation: vi.fn(() => ({ sessionId: 'sess-fork', goal: 'the goal', workspace: '/ws' })),
     rewindTargets: vi.fn(() => [
-      { index: 2, preview: 'first follow-up', timestamp: 't2' },
-      { index: 4, preview: 'second follow-up', timestamp: 't4' },
+      { index: 2, preview: 'first follow-up', content: 'first follow-up', timestamp: 't2' },
+      { index: 4, preview: 'second follow-up', content: 'second follow-up', timestamp: 't4' },
     ]),
     rewindConversation: vi.fn(() => ({ sessionId: 'sess-rewound', goal: 'the goal', workspace: '/ws', rewoundMessage: 'first follow-up\nin full' })),
     compactConversation: vi.fn(async () => ({ summary: 'the summary', keptMessages: 4 })),

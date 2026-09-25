@@ -7,7 +7,7 @@ import {
 import { chatEditorRoom, chatPaneWidth, paneColumns, planPaneWidth } from './geometry';
 import { diffRoom, handoffActions } from './handoff';
 import { handoffBase, handoffBranch, isRepoGroup, repoResultLines } from '../isolation';
-import { SKILL_IDS, visibleItems, type PickerState, type TuiState } from './state';
+import { SKILL_IDS, visibleItems, type Overlay, type PickerState, type TuiState } from './state';
 
 /**
  * The whole frame as `state.rows` lines, each at most `state.cols` columns
@@ -426,14 +426,7 @@ function renderOverlay(state: TuiState, rows: number, cols: number): string[] {
       cols,
     );
   }
-  if (overlay.kind === 'confirm') {
-    return frame(
-      overlay.title,
-      [overlay.message, '', style.grey('enter confirms · esc cancels')],
-      rows,
-      cols,
-    );
-  }
+  if (overlay.kind === 'confirm') return renderConfirm(overlay, rows, cols);
   if (overlay.kind === 'prompt') {
     // API keys are secrets — never echo one to a screen that may be shared.
     const secret = overlay.action.kind === 'api-key';
@@ -554,6 +547,32 @@ function renderHelp(scroll: number, rows: number, cols: number): string[] {
   const footer = style.grey(offset < maxScroll ? '↑↓ scroll · any other key closes' : 'any key closes');
 
   return frame('Commands', [...lines.slice(offset, offset + room), footer], rows, cols);
+}
+
+/** Most rows of a quoted message a confirmation shows before it cuts to an ellipsis. */
+const QUOTE_MAX_LINES = 8;
+
+function renderConfirm(overlay: Extract<Overlay, { kind: 'confirm' }>, rows: number, cols: number): string[] {
+  const { choice, quote, note } = overlay;
+  const inner = Math.max(1, cols - 3);
+  const options = (choice?.options ?? []).map((o, i) => `${i === choice?.index ? style.cyan('❯') : ' '} ${i + 1}. ${o.label}`);
+  const hint = choice
+    ? style.grey(`↑↓ move · enter or 1–${choice.options.length} chooses · esc cancels`)
+    : style.grey('enter confirms · esc cancels');
+  const noteLines = note ? ['', ...note.split('\n')] : [];
+  const rest = [...noteLines, ...(options.length > 0 ? ['', ...options] : []), '', hint];
+
+  const quoted: string[] = [];
+  if (quote !== undefined) {
+    // The options are what the user is answering, so a long quote gives up
+    // rows to them rather than pushing them off the bottom of a short pane.
+    const fixed = 1 + wrap(overlay.message, inner).length + 1 + 1 + rest.flatMap((l) => wrap(l, inner)).length;
+    const room = Math.max(2, Math.min(QUOTE_MAX_LINES, rows - fixed));
+    const wrapped = wrap(quote, inner - 2);
+    const shown = wrapped.length > room ? [...wrapped.slice(0, room - 1), '…'] : wrapped;
+    quoted.push('', ...shown.map((l) => `${style.grey('│')} ${l}`));
+  }
+  return frame(overlay.title, [overlay.message, ...quoted, ...rest], rows, cols);
 }
 
 /** A titled box the width of the pane, padded or clipped to exactly `rows`. */

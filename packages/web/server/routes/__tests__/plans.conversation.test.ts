@@ -63,7 +63,7 @@ describe('POST /:sessionId/conversation/fork', () => {
 
 describe('GET /:sessionId/conversation/rewind-targets', () => {
   it('lists the user messages a rewind can land before', async () => {
-    const targets = [{ index: 2, preview: 'add streaming', timestamp: '2026-01-01T00:00:02Z' }];
+    const targets = [{ index: 2, preview: 'add streaming', content: 'add streaming', timestamp: '2026-01-01T00:00:02Z' }];
     const app = appFor(poolWith({ rewindTargets: () => targets }));
 
     const res = await app.request('/api/plans/s1/conversation/rewind-targets');

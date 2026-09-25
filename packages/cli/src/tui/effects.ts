@@ -465,17 +465,24 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
     }
 
     case 'loadRewindTargets':
-      dispatch({ type: 'rewindTargetsLoaded', targets: await api.rewindTargets(effect.sessionId), sessionId: effect.sessionId });
+      dispatch({
+        type: 'rewindTargetsLoaded',
+        targets: await api.rewindTargets(effect.sessionId),
+        sessionId: effect.sessionId,
+        ...(effect.pick !== undefined && { pick: effect.pick }),
+      });
       return;
 
     // A rewind is a fork from an earlier point, so the TUI follows it the way
-    // it follows `/fork`; the original keeps its whole conversation.
+    // it follows `/fork`; the original keeps its whole conversation. The
+    // rewound message comes back into the input, to edit and send again.
     case 'rewindConversation': {
       const fork = await api.rewindConversation(effect.sessionId, effect.index);
       dispatch({ type: 'sessionForked', sessionId: fork.sessionId, goal: fork.goal });
       dispatch({ type: 'chatRestored', history: (fork.plan as { conversationHistory?: ConversationMessage[] }).conversationHistory ?? [], sessionId: fork.sessionId });
       dispatch({ type: 'planUpdated', plan: fork.plan, sessionId: fork.sessionId });
-      dispatch({ type: 'notice', message: `Rewound ${effect.sessionId} into a fork, ${fork.sessionId} — the original is kept. /sessions to go back.` });
+      dispatch({ type: 'inputPrefilled', text: fork.rewoundMessage, sessionId: fork.sessionId });
+      dispatch({ type: 'notice', message: `Forked ${effect.sessionId} into ${fork.sessionId} from before that message — the original is kept (/sessions to go back). The message is ready to edit and resend.` });
       return;
     }
 

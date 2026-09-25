@@ -1206,13 +1206,22 @@ describe('conversation fork and rewind effects', () => {
   });
 
   it('loads the rewind targets for the session', async () => {
-    const targets = [{ index: 2, preview: 'JSON only', timestamp: '2026-01-01T00:00:02Z' }];
+    const targets = [{ index: 2, preview: 'JSON only', content: 'JSON only', timestamp: '2026-01-01T00:00:02Z' }];
     const h = harness({ rewindTargets: vi.fn().mockResolvedValue(targets) });
 
     await runEffect({ type: 'loadRewindTargets', sessionId: 'session-1' }, h.deps);
 
     expect(h.api.rewindTargets).toHaveBeenCalledWith('session-1');
     expect(h.actions).toEqual([{ type: 'rewindTargetsLoaded', targets, sessionId: 'session-1' }]);
+  });
+
+  it('hands the message a `/rewind <n>` named back with the targets, so the answer can be told from a picker fill', async () => {
+    const targets = [{ index: 2, preview: 'JSON only', content: 'JSON only', timestamp: '2026-01-01T00:00:02Z' }];
+    const h = harness({ rewindTargets: vi.fn().mockResolvedValue(targets) });
+
+    await runEffect({ type: 'loadRewindTargets', sessionId: 'session-1', pick: 2 }, h.deps);
+
+    expect(h.actions).toEqual([{ type: 'rewindTargetsLoaded', targets, sessionId: 'session-1', pick: 2 }]);
   });
 
   it('rewinds into a fork, then switches the TUI to it with its conversation and tasks', async () => {
@@ -1226,8 +1235,33 @@ describe('conversation fork and rewind effects', () => {
       { type: 'sessionForked', sessionId: 'session-fork', goal: 'build me a parser' },
       { type: 'chatRestored', history, sessionId: 'session-fork' },
       { type: 'planUpdated', plan, sessionId: 'session-fork' },
-      { type: 'notice', message: expect.stringMatching(/session-1.*session-fork/) },
+      { type: 'inputPrefilled', text: 'JSON only', sessionId: 'session-fork' },
+      { type: 'notice', message: expect.stringMatching(/session-1.*session-fork.*from before that message.*original is kept.*\/sessions.*ready to edit and resend/) },
     ]);
+  });
+
+  it('never calls the fork a branch', async () => {
+    const plan = { tasks: [], conversationHistory: history };
+    const h = harness({ rewindConversation: vi.fn().mockResolvedValue({ sessionId: 'session-fork', goal: 'g', plan, rewoundMessage: 'JSON only' }) });
+
+    await runEffect({ type: 'rewindConversation', sessionId: 'session-1', index: 2 }, h.deps);
+
+    expect(messageOf(h.actions, 'notice')).not.toMatch(/branch/i);
+  });
+
+  it('reports a refused rewind and leaves the state as it was', async () => {
+    const h = harness({ rewindConversation: vi.fn().mockRejectedValue(new Error('Cannot rewind the conversation while the planner is answering')) });
+    const before: TuiState = initialState({ sessionId: 'session-1', goal: 'g', messages: history });
+    let state = before;
+
+    await runEffect({ type: 'rewindConversation', sessionId: 'session-1', index: 2 }, h.deps);
+    for (const action of h.actions) state = reduce(state, action).state;
+
+    expect(types(h.actions)).toEqual(['failed']);
+    expect(messageOf(h.actions, 'failed')).toMatch(/planner is answering/);
+    expect(state.sessionId).toBe('session-1');
+    expect(state.messages.slice(0, history.length)).toEqual(before.messages);
+    expect(state.editor.text).toBe('');
   });
 
   it('shows the fork\'s shorter transcript in place of the original\'s', async () => {
@@ -1242,6 +1276,7 @@ describe('conversation fork and rewind effects', () => {
     for (const action of h.actions) state = reduce(state, action).state;
 
     expect(state.sessionId).toBe('session-fork');
+    expect(state.editor).toMatchObject({ text: 'left behind', cursor: 11 });
     expect(state.messages.map((m) => m.content)).not.toContain('left behind');
     expect(state.messages.map((m) => m.content)).toEqual(expect.arrayContaining(['build me a parser', 'Which formats?']));
   });
