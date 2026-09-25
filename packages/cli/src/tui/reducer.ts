@@ -279,10 +279,8 @@ export function reduce(state: TuiState, action: Action): Step {
         expandedTaskId,
         taskEditor: expandedTaskId !== null ? state.taskEditor : null,
       };
-      return step(settlePlan({
-        ...next,
-        selectedTask: Math.min(state.selectedTask, Math.max(0, planRows(next).length - 1)),
-      }));
+      const selectedTask = clampSelection(state.selectedTask, planRows(next).length);
+      return step(settlePlan({ ...next, selectedTask, focus: tasks.length === 0 ? 'chat' : state.focus }));
     }
 
     case 'plannerMessage': {
@@ -1034,7 +1032,11 @@ function handleKey(state: TuiState, key: Key): Step {
       return step({ ...state, editor: { ...state.editor, text, cursor: token.start + completed.length } });
     }
   }
-  if (key.name === 'tab') return step({ ...state, focus: state.focus === 'chat' ? 'plan' : 'chat' });
+  if (key.name === 'tab') {
+    // The pane is hidden while the plan is empty, so there is nothing to focus.
+    if (state.focus === 'chat' && state.tasks.length === 0) return step(state);
+    return step({ ...state, focus: state.focus === 'chat' ? 'plan' : 'chat' });
+  }
   if (state.focus === 'plan') return handlePlanKey(state, key);
 
   if (key.name === 'enter') return submit(state);
@@ -1113,13 +1115,16 @@ function handlePlanKey(state: TuiState, key: Key): Step {
     return step(settlePlan({ ...state, selectedTask: Math.max(0, state.selectedTask - 1) }));
   }
   if (key.name === 'down') {
-    return step(settlePlan({ ...state, selectedTask: Math.min(planRows(state).length - 1, state.selectedTask + 1) }));
+    return step(settlePlan({ ...state, selectedTask: clampSelection(state.selectedTask + 1, planRows(state).length) }));
   }
 
   // pageup/pagedown only — a wheel notch is routed by the pointer well above
   // this, and never reaches the focused pane's handler.
   const scroll = scrollDelta(key, state);
   if (scroll !== null) return scrollPlan(state, scroll, true);
+
+  // Before the row guard: with no tasks there is no row, and this is the way in.
+  if (key.name === 'char' && key.char === 'a') return addTask(state, '');
 
   const row = selectedPlanRow(state);
   if (!row) return step(state);
@@ -1151,7 +1156,6 @@ function handlePlanKey(state: TuiState, key: Key): Step {
     return step(state, [taskActionEffect(state, state.sessionId, task.id, action)]);
   }
   if (key.char === 'd') return confirmRemoveTask(state, task);
-  if (key.char === 'a') return addTask(state, '');
   if (key.char === 't') {
     return step(state, [{ type: 'openTaskTerminal', sessionId: state.sessionId, taskId: task.id }]);
   }
@@ -1339,7 +1343,7 @@ function handlePromptKey(
     if (overlay.action.kind === 'api-key') {
       return step(closed, [{ type: 'setApiKey', provider: overlay.action.provider, key: value }]);
     }
-    if (!state.sessionId) return fail(closed, 'No active plan to add a task to.');
+    if (!state.sessionId) return fail(closed, 'No active plan to add a task to — describe a goal first, then /add-task <title>.');
     return step(closed, [{ type: 'addTask', sessionId: state.sessionId, title: value }]);
   }
 
@@ -2259,16 +2263,22 @@ function taskEffortCommand(state: TuiState, args: string[]): Step {
   });
 }
 
+/** Keeps the cursor on a real row; an empty list has row 0 as its only resting place. */
+function clampSelection(index: number, rows: number): number {
+  return Math.max(0, Math.min(index, rows - 1));
+}
+
 function addTask(state: TuiState, title: string): Step {
-  return withSession(state, (sessionId) => {
-    if (!title) {
-      return step({
-        ...state,
-        overlay: { kind: 'prompt', title: 'New task title', value: '', action: { kind: 'add-task' } },
-      });
-    }
-    return step(state, [{ type: 'addTask', sessionId, title }]);
-  });
+  if (!state.sessionId) {
+    return fail(state, 'No active plan to add a task to — describe a goal first, then /add-task <title>.');
+  }
+  if (!title) {
+    return step({
+      ...state,
+      overlay: { kind: 'prompt', title: 'New task title', value: '', action: { kind: 'add-task' } },
+    });
+  }
+  return step(state, [{ type: 'addTask', sessionId: state.sessionId, title }]);
 }
 
 function taskCommand(

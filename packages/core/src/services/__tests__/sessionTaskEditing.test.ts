@@ -90,6 +90,22 @@ describe('Session.addTask', () => {
     expect(added.status).toBe('pending');
   });
 
+  it('adds the first task to a plan that has none yet', async () => {
+    const session = makeSession({ modelResolver: resolverFor(CLAUDE_CATALOG) });
+    const now = new Date().toISOString();
+    session.loadPlan(
+      { tasks: [], generatedAt: now, status: 'draft', runners: ['claude-code'], lastUpdated: now },
+      'goal',
+      testWorkspace,
+      { persist: false },
+    );
+
+    const state = await session.addTask({ title: 'First', prompt: 'do first' });
+
+    expect(state!.tasks.map((t) => t.title)).toEqual(['First']);
+    expect(state!.tasks[0].assignedRunner).toBe('claude-code');
+  });
+
   it('keeps an explicit runner and admits it into the plan runner set', async () => {
     const session = makeSession({
       modelResolver: resolverFor({ codex: [{ modelId: 'gpt-5-codex', modelLabel: 'GPT-5 Codex', variants: [] }] }),

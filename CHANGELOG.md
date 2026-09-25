@@ -42,6 +42,12 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
   its place: the cursor walks up to the top visible task, and only then does
   the list scroll — by exactly that task's height, at whatever height each task
   has.
+- **You can add the first task to an empty plan.** In the plan pane, `a` was
+  swallowed when there were no tasks, and Tab moved focus into a pane that is
+  hidden until a task exists. Tab now stays in chat while the plan is empty,
+  focus returns to chat when the last task is removed, and the cursor can no
+  longer land on row -1 — so the first task you add is selected. Without a
+  session, `/add-task` now says to describe a goal first.
 
 ## [0.5.0] — 2026-09-25
 
