@@ -289,6 +289,12 @@
           "items": { "type": "string" },
           "default": [],
           "description": "Extra paths or globs, relative to each repository root, linked from the real repository into every task worktree where they exist — for gitignored local state such as *.tfstate or .terraform/."
+        },
+        "ordewell.conflictRepairAttempts": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 0,
+          "description": "When a finished task's work conflicts with what has landed since, how many times Ordewell asks the task's own runner to merge the latest work into its worktree and resolve the conflict before leaving it for you. 0 turns conflict repair off, so every conflict waits for you."
         }
       }
     }

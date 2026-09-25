@@ -71,6 +71,11 @@ export interface IConfig {
    * `*.tfstate` that a task must use, not a copy of.
    */
   worktreeLinks: string[];
+  /**
+   * How many conflict repairs one task may go through before its conflict is
+   * left for a person (ADR-0015); 0 turns repair off.
+   */
+  conflictRepairAttempts: number;
 
   /**
    * What to do when planner research reaches outside its default envelope — an

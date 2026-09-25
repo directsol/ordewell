@@ -122,11 +122,26 @@ describe('taskIsolationOf', () => {
   };
 
   it('carries the conflicting files onto the surface view', () => {
-    expect(taskIsolationOf({ ...base, conflictFiles: ['a.ts', 'b.ts'] })).toMatchObject({ conflictFiles: ['a.ts', 'b.ts'] });
+    expect(taskIsolationOf({ ...base, conflictFiles: ['a.ts', 'b.ts'] }, 2)).toMatchObject({ conflictFiles: ['a.ts', 'b.ts'] });
   });
 
   it('leaves conflictFiles out when the record has none', () => {
-    expect(taskIsolationOf(base)).not.toHaveProperty('conflictFiles');
+    expect(taskIsolationOf(base, 2)).not.toHaveProperty('conflictFiles');
+  });
+
+  it('shows a repair in flight as repairing, with its attempt out of the most a task may have', () => {
+    const repairing: IsolationTaskRecord = { ...base, status: 'repairing', repairs: 1, repairBase: { '.': 'abc' }, conflictFiles: ['a.ts'], repairedFiles: ['a.ts'] };
+    expect(taskIsolationOf(repairing, 2)).toEqual({
+      state: 'repairing', branch: 'ordewell/r1/1-c', worktree: '/work/app/.ordewell/worktrees/r1/1-c', repos: [],
+      conflictRepo: '.', conflictFiles: ['a.ts'], repair: { attempt: 1, limit: 2 }, repairedFiles: ['a.ts'],
+    });
+  });
+
+  it('keeps what repairs a conflicted or landed task went through, and says nothing of repair before the first', () => {
+    expect(taskIsolationOf({ ...base, repairs: 2, repairedFiles: ['a.ts'] }, 2)).toMatchObject({ state: 'conflict', repair: { attempt: 2, limit: 2 }, repairedFiles: ['a.ts'] });
+    expect(taskIsolationOf({ ...base, status: 'merged', repairs: 1, repairedFiles: ['a.ts'] }, 2)).toMatchObject({ state: 'integrated', repair: { attempt: 1, limit: 2 } });
+    expect(taskIsolationOf(base, 2)).not.toHaveProperty('repair');
+    expect(taskIsolationOf(base, 2)).not.toHaveProperty('repairedFiles');
   });
 });
 

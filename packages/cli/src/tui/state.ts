@@ -53,7 +53,7 @@ export interface TaskView {
 }
 
 /** Where a task's isolated work stands (ADR-0013); `none` is a task with no worktree in a run that has some. */
-export type TaskIsolationState = 'none' | 'active' | 'integrated' | 'conflict' | 'kept';
+export type TaskIsolationState = 'none' | 'active' | 'integrated' | 'conflict' | 'repairing' | 'kept';
 
 export interface TaskIsolationView {
   state: TaskIsolationState;
@@ -65,6 +65,9 @@ export interface TaskIsolationView {
   conflictRepo?: string;
   /** Repo-relative paths, in `conflictRepo`, that conflicted. */
   conflictFiles?: string[];
+  /** The conflict repair running or last run (ADR-0015), of the most a task may have. */
+  repair?: { attempt: number; limit: number };
+  repairedFiles?: string[];
 }
 
 export interface LandedTaskView {

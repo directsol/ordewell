@@ -1074,8 +1074,9 @@ export class Session {
    * The opt-in way through a merge conflict: add an AI task, on the conflicted
    * task's own runner and model, that merges its branch by hand in a worktree
    * of its own. When that task lands, the conflicted one lands through it (see
-   * {@link TaskOrchestrator.linkConflictResolver}). Never automatic — nothing
-   * but this call adds it.
+   * {@link TaskOrchestrator.linkConflictResolver}). The automatic answer to a
+   * conflict is a repair, a new attempt of the same task (ADR-0015); a task is
+   * only ever added to the plan by this call.
    */
   async resolveConflictAsTask(taskId: string): Promise<LegacyPlanState | null> {
     if (!this.plan) return null;

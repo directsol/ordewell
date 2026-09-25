@@ -17,6 +17,7 @@ import type {
   IsolationView,
   IWorktreeIsolation,
   PlanIsolation,
+  RepairEvidence,
   RepoGroupLayout,
   TaskIsolation,
 } from '../interfaces/IWorktreeIsolation';
@@ -24,6 +25,7 @@ import { createWorktreeIsolation } from './GitWorktreeIsolation';
 import { describeMergeResult } from './mergeResultNotice';
 import { capConflictFiles, handoffOf, integrationBranchNameOf, layoutOf, SELF_REPO, taskIsolationOf } from './isolationRecord';
 import type { IsolatedExecution } from './plannerModes';
+import { buildConflictRepairPrompt } from './PlanPrompts';
 
 /**
  * The one notification channel out of the orchestrator. Everything that used
@@ -117,10 +119,18 @@ interface TaskAttempt {
   worktree: boolean;
   /** The merge in flight, so a cancel waits for it before tearing the worktree down. */
   integration: Promise<IsolationOutcome> | null;
+  /** Set when this attempt is a conflict repair (ADR-0015) of work that already passed. */
+  readonly repair: RepairAttempt | null;
   readonly startedAt: string;
 }
 
 type AttemptPhase = 'starting' | 'running' | 'integrating';
+
+/** Which repair of a task an attempt is, of the most `conflictRepairAttempts` allows. */
+interface RepairAttempt {
+  n: number;
+  limit: number;
+}
 
 /** Read-only view of a task's live attempt. */
 export interface TaskAttemptSnapshot {
@@ -314,7 +324,7 @@ export class TaskOrchestrator {
     if (!this.isolationRun) return null;
     const record = this.isolationRun.tasks[taskId];
     if (!record) return { state: 'none' };
-    return taskIsolationOf(record);
+    return taskIsolationOf(record, this.config.conflictRepairAttempts);
   }
 
   /**
@@ -324,7 +334,7 @@ export class TaskOrchestrator {
   isolationView(): IsolationView | null {
     const run = this.isolationRun;
     if (!run) return null;
-    const tasks = Object.fromEntries(Object.values(run.tasks).map((r): [string, TaskIsolation] => [r.taskId, taskIsolationOf(r)]));
+    const tasks = Object.fromEntries(Object.values(run.tasks).map((r): [string, TaskIsolation] => [r.taskId, taskIsolationOf(r, this.config.conflictRepairAttempts)]));
     return { tasks, handoff: handoffOf(run) };
   }
 
@@ -444,7 +454,8 @@ export class TaskOrchestrator {
 
   loadPlan(tasks: Task[], planRunners: RunnerId[] = ['claude-code']): void {
     this.store.load(tasks, planRunners);
-    this.endAllAttempts('load');
+    const repairs = this.endAllAttempts('load').filter((a) => a.repair && a.worktree);
+    for (const a of repairs) void this.releaseWorktree(a.taskId, { keep: true }, a.integration);
     // A plan committed while the scheduler runs keeps that run, and its mode
     // with it; otherwise the next start decides afresh.
     if (!this.running) this.runMode = null;
@@ -510,10 +521,12 @@ export class TaskOrchestrator {
     this.planStatus = 'approved';
     this.terminalRunner.stopAll();
     // Interrupted work is kept like a failed attempt's: inspectable, and off
-    // `active` so a crash-recovery prune does not sweep it away.
-    const interrupted = [...this.attempts.values()].filter((a) => a.worktree);
-    this.endAllAttempts('stop');
-    for (const a of interrupted) void this.releaseWorktree(a.taskId, { keep: true }, a.integration);
+    // `active` so a crash-recovery prune does not sweep it away. A stopped
+    // repair did not land, so its task waits on the user as its conflict did.
+    for (const a of this.endAllAttempts('stop')) {
+      if (a.repair) this.store.markAwaitingUser(a.taskId);
+      if (a.worktree) void this.releaseWorktree(a.taskId, { keep: true }, a.integration);
+    }
     this.runMode = null;
     this.blockedStart = null;
     this.onHold.clear();
@@ -532,6 +545,7 @@ export class TaskOrchestrator {
     console.error(`[TaskOrchestrator] Task #${task.order} "${task.title}" verdict=${verdict.outcome}`);
     console.error(`[TaskOrchestrator] Runner: ${task.assignedRunner}, Model: ${task.assignedModel?.modelId ?? 'default'}`);
     console.error(`[TaskOrchestrator] Prompt preview: ${(task.prompt ?? '').slice(0, 200)}`);
+    if (attempt.repair) return this.settleRepair(task, attempt, verdict);
 
     // The terminal stays the source of truth for the verdict itself; this only
     // changes what gets summarized for downstream consumers.
@@ -562,7 +576,10 @@ export class TaskOrchestrator {
     this.store.setTaskOutputSummary(taskId, summarizeOutput(verdict.reason, summary));
 
     this.logAndArchive(task, verdict);
+    await this.afterVerdict();
+  }
 
+  private async afterVerdict(): Promise<void> {
     this.emit('onTaskChanged');
     if (!this.running) {
       if (this.attempts.size === 0) {
@@ -574,6 +591,74 @@ export class TaskOrchestrator {
       return;
     }
     await this.tick();
+  }
+
+  /**
+   * A repair's verdict decides only whether its work may try to land. It never
+   * replaces the verdict the task's own work earned, and a repair that does not
+   * land leaves the task waiting on the user — never a failed task, so never a
+   * halted run.
+   */
+  private async settleRepair(task: Task, attempt: TaskAttempt, verdict: Verdict): Promise<void> {
+    const landed = verdict.outcome === 'pass' ? await this.landRepair(task, attempt) : null;
+    if (this.attempts.get(task.id) !== attempt) return;
+    this.endAttempt(task.id, 'verdict');
+    if (!landed) await this.unrepaired(task, `did not finish (${verdict.reason})`);
+    else if (!landed.evidence.ok) await this.unrepaired(task, this.describeEvidence(landed.evidence));
+    else if (landed.outcome === 'merged') await this.landedRepair(task, verdict);
+    else this.landUnmerged(task, landed.outcome);
+    await this.afterVerdict();
+  }
+
+  /**
+   * Evidence before the queue: the repair's work is committed and checked, and
+   * only then merged, through the same serialized landing as any other task —
+   * so a repair the tip has moved past again is a fresh conflict, not a pass.
+   */
+  private async landRepair(task: Task, attempt: TaskAttempt): Promise<{ evidence: RepairEvidence; outcome: IsolationOutcome }> {
+    const run = this.isolationRun;
+    let evidence: RepairEvidence = { ok: false, reason: 'failed', repo: SELF_REPO };
+    if (!run) return { evidence, outcome: 'failed' };
+    attempt.phase = 'integrating';
+    attempt.integration = (async (): Promise<IsolationOutcome> => {
+      evidence = await this.isolation.verifyRepair(task, run).catch((): RepairEvidence => ({ ok: false, reason: 'failed', repo: run.tasks[task.id]?.conflictRepo ?? SELF_REPO }));
+      if (evidence.ok) return this.integrateWork(task);
+      await this.releaseWorktree(task.id, { keep: true });
+      return 'conflict';
+    })();
+    const outcome = await attempt.integration;
+    return { evidence, outcome };
+  }
+
+  private async landedRepair(task: Task, verdict: Verdict): Promise<void> {
+    const files = this.isolationRun?.tasks[task.id]?.repairedFiles ?? [];
+    this.store.markCompleted(task.id);
+    this.store.unblockDependents(task.id);
+    this.logAndArchive(task, task.verdict ?? verdict);
+    this.tell('info', `Task "${task.title}" landed after repairing a conflict${files.length > 0 ? ` in ${capConflictFiles(files)}` : ''}.`);
+    await this.landResolved(task.id);
+  }
+
+  /** A repair that did not land leaves the task as its conflict did: waiting on the user, worktree and refs kept. */
+  private async unrepaired(task: Task, why: string): Promise<void> {
+    await this.releaseWorktree(task.id, { keep: true });
+    this.store.markAwaitingUser(task.id);
+    const group = this.isolationRun?.repos.some((r) => r.path !== SELF_REPO);
+    this.tell('warn', `The conflict repair of task "${task.title}" ${why}, so it did not land. Its ${group ? 'worktrees are' : 'worktree is'} kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.`);
+  }
+
+  private describeEvidence(evidence: Exclude<RepairEvidence, { ok: true }>): string {
+    const run = this.isolationRun;
+    const inRepo = evidence.repo !== SELF_REPO ? ` in ${evidence.repo}` : '';
+    const branch = run ? integrationBranchNameOf(run) : 'the integration branch';
+    switch (evidence.reason) {
+      case 'not-merged': return `finished, but its branch${inRepo} does not contain ${branch}`;
+      case 'conflict-markers': {
+        const files = (evidence.files ?? []).map((file) => (evidence.repo !== SELF_REPO ? `${evidence.repo}/${file}` : file));
+        return `finished, but left conflict markers in ${capConflictFiles(files)}`;
+      }
+      case 'failed': return `finished, but git could not check its work${inRepo}`;
+    }
   }
 
   /**
@@ -618,13 +703,28 @@ export class TaskOrchestrator {
     // Named only where there is a repo to name: a group of one reads as it always has.
     const inRepo = record?.conflictRepo && record.conflictRepo !== SELF_REPO ? record.conflictRepo : null;
     if (landing === 'conflict') {
-      // Never resolved here, by a model or otherwise: the task waits on the
-      // user, and its dependents wait on it.
+      // Never resolved here: the first answer is a bounded repair by the task
+      // itself, on a new attempt in its own worktree (ADR-0015); until one
+      // lands, the task's dependents wait on it.
+      const repair = this.nextRepair(task.id);
       this.store.markAwaitingUser(task.id);
       const files = record?.conflictFiles?.length ? ` (${capConflictFiles(record.conflictFiles)})` : '';
-      this.notifications.warn(inRepo
-        ? `Task "${task.title}" passed, but landing it on ${branch} conflicted in ${inRepo}${files}, so none of it landed. Its worktrees are kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.`
-        : `Task "${task.title}" passed, but merging it into ${branch} conflicted${files}. Its worktree is kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.`);
+      const conflicted = inRepo
+        ? `Task "${task.title}" passed, but landing it on ${branch} conflicted in ${inRepo}${files}, so none of it landed.`
+        : `Task "${task.title}" passed, but merging it into ${branch} conflicted${files}.`;
+      if (repair) {
+        this.notifications.warn(conflicted);
+        // The slot the ending attempt freed, never one more than the run allows.
+        if (this.attempts.size < this.config.maxParallelSessions) void this.startTask(task);
+        else {
+          this.store.markPending(task.id);
+          this.tell('info', `Task "${task.title}" is repaired once a slot is free.`);
+        }
+        return;
+      }
+      this.notifications.warn(`${conflicted} ${inRepo ? 'Its worktrees are' : 'Its worktree is'} kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.`);
+      const whyNot = this.noRepairReason(task);
+      if (whyNot) this.tell('info', whyNot);
     } else {
       this.store.markFailed(task.id);
       this.running = false;
@@ -633,6 +733,21 @@ export class TaskOrchestrator {
         ? `Task "${task.title}" passed, but git could not integrate its work in ${inRepo}, so none of it landed. Its worktrees are kept for inspection.`
         : `Task "${task.title}" passed, but git could not integrate its work. Its worktree is kept for inspection.`);
     }
+  }
+
+  /** The repair a conflicted task is owed next; null when repair is off, used up, or there is no isolated run to repair it in. */
+  private nextRepair(taskId: string): RepairAttempt | null {
+    const record = this.runMode === 'isolated' ? this.isolationRun?.tasks[taskId] : undefined;
+    const limit = this.config.conflictRepairAttempts;
+    const spent = record?.repairs ?? 0;
+    return record?.status === 'conflict' && spent < limit ? { n: spent + 1, limit } : null;
+  }
+
+  private noRepairReason(task: Task): string | null {
+    const limit = this.config.conflictRepairAttempts;
+    if (limit === 0) return `Conflict repair is off (conflictRepairAttempts is 0), so task "${task.title}" waits for you.`;
+    const spent = this.isolationRun?.tasks[task.id]?.repairs ?? 0;
+    return spent >= limit ? `Task "${task.title}" has had ${spent} of its ${limit} conflict repairs, so its conflict waits for you.` : null;
   }
 
   /**
@@ -969,6 +1084,7 @@ export class TaskOrchestrator {
       cwd: null,
       worktree: false,
       integration: null,
+      repair: this.nextRepair(task.id),
       startedAt: new Date().toISOString(),
     };
     this.spawnCounts.set(task.id, attempt.attempt);
@@ -981,12 +1097,16 @@ export class TaskOrchestrator {
       if (this.attempts.get(task.id) !== attempt) {
         // Ended while its worktree was being made, so whatever ended it could
         // not release it. A newer attempt's own prepare replaces it instead.
-        if (attempt.worktree && !this.attempts.has(task.id)) await this.releaseWorktree(task.id, { keep: false });
-        return this.abandonSpawn(task);
+        // A repair's worktree holds work that passed, so it is only handed back.
+        if (attempt.worktree && !this.attempts.has(task.id)) await this.releaseWorktree(task.id, { keep: attempt.repair !== null });
+        return this.abandonSpawn(task, attempt);
       }
-      const finalPrompt = composeAugmentedPrompt(task, this.store.planTasks, {
+      // Through the same augmenting as any spawn, so the marker is the task's
+      // own and the VerdictEngine watches for it unchanged.
+      const finalPrompt = composeAugmentedPrompt(attempt.repair ? { ...task, prompt: this.repairPrompt(task) } : task, this.store.planTasks, {
         planMapEnabled: this.config.planMapEnabled,
-        tddEnabled: this.tddEnabled(),
+        // A merge to resolve is not new behaviour to drive test-first.
+        tddEnabled: !attempt.repair && this.tddEnabled(),
       });
       const session = await this.terminalRunner.spawn({
         taskId: task.id,
@@ -1006,7 +1126,7 @@ export class TaskOrchestrator {
       // starting. Do not resurrect that execution after the surface already
       // went idle — and compare identity, not presence, because a newer
       // attempt of the same task may have been claimed in the meantime.
-      if (this.attempts.get(task.id) !== attempt) return this.abandonSpawn(task, session);
+      if (this.attempts.get(task.id) !== attempt) return this.abandonSpawn(task, attempt, session);
       attempt.phase = 'running';
       attempt.session = session;
 
@@ -1016,10 +1136,20 @@ export class TaskOrchestrator {
       this.verifier.watch(task, session);
 
       this.emit('onTaskChanged');
-      this.notifications.info(`Task "${task.title}" started (${attempt.runner})`);
+      if (attempt.repair) {
+        const group = this.isolationRun?.repos.some((r) => r.path !== SELF_REPO);
+        this.tell('info', `Repairing the conflict of task "${task.title}" in its own ${group ? 'worktrees' : 'worktree'} (repair ${attempt.repair.n} of ${attempt.repair.limit}).`);
+      } else {
+        this.notifications.info(`Task "${task.title}" started (${attempt.runner})`);
+      }
     } catch (err) {
-      if (this.attempts.get(task.id) !== attempt) return this.abandonSpawn(task);
+      if (this.attempts.get(task.id) !== attempt) return this.abandonSpawn(task, attempt);
       this.endAttempt(task.id, 'spawn-failed');
+      if (attempt.repair) {
+        await this.unrepaired(task, `could not start: ${err instanceof Error ? err.message : String(err)}`);
+        this.emit('onTaskChanged');
+        return this.tick();
+      }
       await this.releaseWorktree(task.id, { keep: false });
       // Couldn't spawn — the task was never executed, so it stays "to do".
       // Held out of auto-scheduling to avoid a spawn-throw retry loop.
@@ -1036,11 +1166,24 @@ export class TaskOrchestrator {
    * and take back the claim it made. Only the claim — whatever ended the
    * attempt may have decided the task since (mark complete, cancel, retry).
    */
-  private abandonSpawn(task: Task, session?: ITerminalSession): void {
+  private abandonSpawn(task: Task, attempt: TaskAttempt, session?: ITerminalSession): void {
     session?.kill();
     if (this.attempts.has(task.id) || this.store.get(task.id)?.status !== 'in_progress') return;
-    this.store.markPending(task.id);
+    if (attempt.repair) this.store.markAwaitingUser(task.id);
+    else this.store.markPending(task.id);
     this.emit('onTaskChanged');
+  }
+
+  private repairPrompt(task: Task): string {
+    const run = this.requireRun();
+    const record = run.tasks[task.id];
+    const conflict = {
+      branch: record?.branch ?? '',
+      repos: Object.keys(record?.repairBase ?? {}),
+      ...(record?.conflictRepo ? { conflictRepo: record.conflictRepo } : {}),
+      ...(record?.conflictFiles ? { conflictFiles: record.conflictFiles } : {}),
+    };
+    return buildConflictRepairPrompt(task, conflict, integrationBranchNameOf(run));
   }
 
   /**
@@ -1048,6 +1191,12 @@ export class TaskOrchestrator {
    * per-attempt workspace (worktree isolation, #12) can be prepared here.
    */
   private async resolveAttemptCwd(task: Task, attempt: TaskAttempt): Promise<string> {
+    if (attempt.repair && this.isolationRun) {
+      const { cwd } = await this.isolation.reopen(task, this.isolationRun);
+      attempt.worktree = true;
+      this.emit('onIsolationChanged');
+      return cwd;
+    }
     if (this.runMode !== 'isolated' || !this.isolationRun) {
       // A worktree left by an earlier attempt describes work this attempt
       // replaces; left alone it could later be integrated as if it were this one's.
@@ -1249,9 +1398,11 @@ export class TaskOrchestrator {
     return attempt;
   }
 
-  private endAllAttempts(reason: 'stop' | 'load'): void {
-    for (const taskId of [...this.attempts.keys()]) this.endAttempt(taskId, reason);
+  private endAllAttempts(reason: 'stop' | 'load'): TaskAttempt[] {
+    const ended = [...this.attempts.values()];
+    for (const { taskId } of ended) this.endAttempt(taskId, reason);
     this.verifier.reset();
     if (reason === 'load') this.output.reset();
+    return ended;
   }
 }

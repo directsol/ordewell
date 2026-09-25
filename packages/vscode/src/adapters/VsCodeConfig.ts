@@ -235,6 +235,11 @@ export class VsCodeConfig extends BaseConfig {
   get worktreeSetupCommand() { return this.config.get<string>('worktreeSetupCommand', '').trim() || super.worktreeSetupCommand; }
   get workspaceRepos() { return this.stringList('workspaceRepos') ?? super.workspaceRepos; }
   get worktreeLinks() { return this.stringList('worktreeLinks') ?? super.worktreeLinks; }
+  get conflictRepairAttempts() {
+    if (process.env.ORDEWELL_CONFLICT_REPAIR_ATTEMPTS !== undefined) return super.conflictRepairAttempts;
+    const configured = this.config.get<number>('conflictRepairAttempts', 2);
+    return Number.isInteger(configured) && configured >= 0 ? configured : 2;
+  }
 
   private stringList(key: string): string[] | undefined {
     const list = this.config.get<string[]>(key, []).map((s) => s.trim()).filter(Boolean);

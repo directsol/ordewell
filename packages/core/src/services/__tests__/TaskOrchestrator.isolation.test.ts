@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { TaskOrchestrator } from '../TaskOrchestrator';
 import { createTask, type Task } from '../../models/Task';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
-import type { IsolationAvailability, IsolationMergeResult } from '../../interfaces/IWorktreeIsolation';
+import type { IConfig } from '../../interfaces/IConfig';
+import type { IsolationAvailability, IsolationMergeResult, RepairEvidence } from '../../interfaces/IWorktreeIsolation';
 import { fakeConfig, FakeTerminalSession, FakeWorktreeIsolation } from '../../testing';
 import { fakeNotification } from './sessionTestKit';
 import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
@@ -19,17 +20,20 @@ function sessionRunner() {
   return { sessions, spawn, runner };
 }
 
-function setup(opts: { isolation?: FakeWorktreeIsolation; workspace?: string } = {}) {
+function setup(opts: { isolation?: FakeWorktreeIsolation; workspace?: string; config?: Partial<IConfig> } = {}) {
   const isolation = opts.isolation ?? new FakeWorktreeIsolation();
   const { sessions, spawn, runner } = sessionRunner();
   const notifications = fakeNotification();
   const output = new BufferedTaskOutputSource({ transcripts: { finalAssistantText: async () => null } });
-  const orchestrator = new TaskOrchestrator(fakeConfig(), notifications, runner, undefined, output, isolation);
+  const orchestrator = new TaskOrchestrator(fakeConfig(opts.config), notifications, runner, undefined, output, isolation);
   orchestrator.setWorkspaceRoot(() => opts.workspace ?? '/repo');
   const spawnedCwd = (taskId: string) => spawn.mock.calls.find(([o]) => o.taskId === taskId)?.[0].cwd;
   const sessionFor = (taskId: string) => sessions.find((s) => s.taskId === taskId);
   const pass = (task: Task) => sessionFor(task.id)!.emitOutput(`<<<ORDEWELL_DONE_${task.completionMarker}>>>`);
-  return { orchestrator, isolation, spawn, sessions, notifications, spawnedCwd, sessionFor, pass };
+  /** The task's newest session: a repair is a second attempt of the same task. */
+  const latest = (taskId: string) => sessions.filter((s) => s.taskId === taskId).at(-1)!;
+  const passLatest = (task: Task) => latest(task.id).emitOutput(`<<<ORDEWELL_DONE_${task.completionMarker}>>>`);
+  return { orchestrator, isolation, spawn, sessions, notifications, spawnedCwd, sessionFor, pass, latest, passLatest };
 }
 
 const task = (id: string, order: number, over: Partial<Task> = {}) =>
@@ -800,6 +804,309 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
       expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user');
       expect(spawn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('conflict repair', () => {
+    const messages = (fn: (message: string) => void) => vi.mocked(fn).mock.calls.map((c) => String(c[0]));
+
+    function repairing(configure: (isolation: FakeWorktreeIsolation) => void = () => undefined, config: Partial<IConfig> = {}) {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.outcomes.set('t1', 'conflict');
+      isolation.conflictFiles.set('t1', ['a.ts']);
+      configure(isolation);
+      return setup({ isolation, config: { conflictRepairAttempts: 2, ...config } });
+    }
+
+    it('repairs a conflicted landing in the task\'s own worktree, on its own runner, model and mode, then lands it and frees its dependents', async () => {
+      const { orchestrator, isolation, pass, passLatest, spawn, spawnedCwd, notifications } = repairing();
+      const t1 = task('t1', 1, { assignedModel: { modelId: 'opus', modelLabel: 'Opus', thinkingEffort: 'high' }, taskMode: 'acceptEdits' });
+      orchestrator.loadPlan([t1, task('t2', 2, { dependencies: ['t1'] })]);
+      await orchestrator.approveReview();
+
+      pass(t1);
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+
+      const [first, repair] = spawn.mock.calls.map(([o]) => o);
+      expect(repair).toMatchObject({ taskId: 't1', cwd: first.cwd, runner: first.runner, modelId: 'opus', thinkingEffort: 'high', mode: 'acceptEdits' });
+      expect(repair.prompt).toContain('conflicted in a.ts');
+      expect(repair.prompt).toContain('git merge --no-edit ordewell/run1/integration');
+      expect(repair.prompt).toContain('What the task was asked to do:\ndo t1');
+      expect(repair.prompt).toContain('DONE_mk-t1>>>');
+      expect(isolation.taskIdsFor('prepare')).toEqual(['t1']);
+      expect(isolation.taskIdsFor('reopen')).toEqual(['t1']);
+      expect(orchestrator.storeInstance.get('t1')!.status).toBe('in_progress');
+      expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'repairing', repair: { attempt: 1, limit: 2 } });
+      expect(messages(notifications.info)).toContain('Repairing the conflict of task "Task t1" in its own worktree (repair 1 of 2).');
+
+      isolation.outcomes.set('t1', 'merged');
+      passLatest(t1);
+
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
+      expect(isolation.taskIdsFor('verifyRepair')).toEqual(['t1']);
+      expect(isolation.taskIdsFor('integrate')).toEqual(['t1', 't1']);
+      await vi.waitFor(() => expect(spawnedCwd('t2')).toBe('/fake-worktrees/run1/2-t2'));
+      expect(messages(notifications.info)).toContain('Task "Task t1" landed after repairing a conflict in a.ts.');
+      expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'integrated', repair: { attempt: 1, limit: 2 }, repairedFiles: ['a.ts'] });
+    });
+
+    it('repairs again when the repaired work conflicts again, then leaves the conflict for the user once the repairs are used up', async () => {
+      const { orchestrator, isolation, pass, passLatest, spawn, notifications } = repairing();
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1, task('t2', 2, { dependencies: ['t1'] })]);
+      await orchestrator.approveReview();
+      pass(t1);
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+
+      isolation.conflictFiles.set('t1', ['b.ts']);
+      passLatest(t1);
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(3));
+      expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'repairing', repair: { attempt: 2, limit: 2 }, conflictFiles: ['b.ts'] });
+      expect(spawn.mock.calls[2][0].prompt).toContain('conflicted in b.ts');
+      expect(messages(notifications.info)).toContain('Repairing the conflict of task "Task t1" in its own worktree (repair 2 of 2).');
+
+      passLatest(t1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(spawn).toHaveBeenCalledTimes(3);
+      expect(isolation.taskIdsFor('reopen')).toEqual(['t1', 't1']);
+      expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'conflict', conflictFiles: ['b.ts'], repair: { attempt: 2, limit: 2 }, repairedFiles: ['a.ts', 'b.ts'] });
+      expect(isolation.taskIdsFor('release')).toEqual([]);
+      expect(messages(notifications.warn)).toContain('Task "Task t1" passed, but merging it into ordewell/run1/integration conflicted (b.ts). Its worktree is kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.');
+      expect(messages(notifications.info)).toContain('Task "Task t1" has had 2 of its 2 conflict repairs, so its conflict waits for you.');
+      expect(orchestrator.storeInstance.get('t1')!.verdict?.outcome).toBe('pass');
+    });
+
+    it('with conflictRepairAttempts at 0, leaves every conflict for the user as before, and says why', async () => {
+      const { orchestrator, isolation, pass, spawn, notifications } = repairing(() => undefined, { conflictRepairAttempts: 0 });
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1, task('t2', 2, { dependencies: ['t1'] })]);
+      await orchestrator.approveReview();
+
+      pass(t1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(isolation.taskIdsFor('reopen')).toEqual([]);
+      expect(orchestrator.getTaskIsolation('t1')).toEqual({
+        state: 'conflict', branch: 'ordewell/run1/1-t1', worktree: '/fake-worktrees/run1/1-t1', repos: ['.'], conflictRepo: '.', conflictFiles: ['a.ts'],
+      });
+      expect(messages(notifications.warn)).toContain('Task "Task t1" passed, but merging it into ordewell/run1/integration conflicted (a.ts). Its worktree is kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.');
+      expect(messages(notifications.info)).toContain('Conflict repair is off (conflictRepairAttempts is 0), so task "Task t1" waits for you.');
+    });
+
+    it('does not halt the run when a repair fails: the task waits on the user with its conflict, and other tasks keep landing', async () => {
+      const { orchestrator, isolation, pass, latest, spawn, spawnedCwd, notifications } = repairing(undefined, { maxParallelSessions: 2 });
+      const t1 = task('t1', 1);
+      const t2 = task('t2', 2);
+      orchestrator.loadPlan([t1, t2, task('t3', 3), task('t4', 4, { dependencies: ['t1'] })]);
+      await orchestrator.approveReview();
+      pass(t1);
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(3));
+      const originalVerdict = orchestrator.storeInstance.get('t1')!.verdict;
+
+      latest('t1').emitExit(1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
+
+      expect(orchestrator.storeInstance.get('t1')!.verdict).toEqual(originalVerdict);
+      expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'conflict', conflictFiles: ['a.ts'], repair: { attempt: 1, limit: 2 } });
+      expect(isolation.calls).toContainEqual({ op: 'release', taskId: 't1', keep: true });
+      expect(orchestrator.status).toBe('running');
+      expect(messages(notifications.warn).some((m) => m.startsWith('The conflict repair of task "Task t1" did not finish ('))).toBe(true);
+      expect(vi.mocked(notifications.error)).not.toHaveBeenCalled();
+
+      await vi.waitFor(() => expect(spawnedCwd('t3')).toBe('/fake-worktrees/run1/3-t3'));
+      pass(t2);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t2')!.status).toBe('completed'));
+      expect(spawnedCwd('t4')).toBeUndefined();
+      expect(isolation.taskIdsFor('reopen')).toEqual(['t1']);
+    });
+
+    it('never runs more than maxParallelSessions: a repair takes the slot its landing freed, or waits for one', async () => {
+      const { orchestrator, isolation, pass, latest, spawn, spawnedCwd, notifications } = repairing(undefined, { maxParallelSessions: 1 });
+      const t1 = task('t1', 1);
+      const t2 = task('t2', 2);
+      orchestrator.loadPlan([t1, t2]);
+      await orchestrator.approveReview();
+      pass(t1);
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+      expect(spawn.mock.calls[1][0].taskId).toBe('t1');
+      expect(orchestrator.activeTaskIds).toEqual(['t1']);
+
+      latest('t1').emitExit(1);
+      await vi.waitFor(() => expect(spawnedCwd('t2')).toBe('/fake-worktrees/run1/2-t2'));
+
+      // The user vouches for the conflicted work while t2 holds the only slot: it conflicts again.
+      await orchestrator.markTaskComplete('t1');
+      expect(orchestrator.storeInstance.get('t1')!.status).toBe('pending');
+      expect(orchestrator.activeTaskIds).toEqual(['t2']);
+      expect(messages(notifications.info)).toContain('Task "Task t1" is repaired once a slot is free.');
+
+      isolation.outcomes.set('t1', 'merged');
+      pass(t2);
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(4));
+      expect(spawn.mock.calls[3][0]).toMatchObject({ taskId: 't1', cwd: '/fake-worktrees/run1/1-t1' });
+      expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'repairing', repair: { attempt: 2, limit: 2 } });
+      expect(orchestrator.activeTaskIds).toEqual(['t1']);
+    });
+
+    it('starts a retried task over with every repair available again, from a fresh worktree', async () => {
+      const { orchestrator, isolation, pass, latest, passLatest, spawn } = repairing(undefined, { conflictRepairAttempts: 1 });
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1]);
+      await orchestrator.approveReview();
+      pass(t1);
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+      latest('t1').emitExit(1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
+
+      await orchestrator.retryTask('t1');
+      expect(isolation.taskIdsFor('prepare')).toEqual(['t1', 't1']);
+      expect(orchestrator.getTaskIsolation('t1')).not.toHaveProperty('repair');
+      passLatest(t1);
+
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(4));
+      expect(isolation.taskIdsFor('reopen')).toEqual(['t1', 't1']);
+      expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'repairing', repair: { attempt: 1, limit: 1 } });
+    });
+
+    it.each<[string, RepairEvidence, string]>([
+      ['never merged the tip in', { ok: false, reason: 'not-merged', repo: 'web' }, 'finished, but its branch in web does not contain ordewell/run1/integration'],
+      ['left conflict markers', { ok: false, reason: 'conflict-markers', repo: 'web', files: ['web.txt'] }, 'finished, but left conflict markers in web/web.txt'],
+    ])('takes no repair at its word: one that %s does not land, and waits on the user', async (_, evidence, why) => {
+      const { orchestrator, isolation, pass, passLatest, spawn, notifications } = repairing((iso) => {
+        iso.repos = ['api', 'web'];
+        iso.stopsIn.set('t1', 'web');
+        iso.repairEvidence.set('t1', evidence);
+      });
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1, task('t2', 2, { dependencies: ['t1'] })]);
+      await orchestrator.approveReview();
+      pass(t1);
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+      expect(spawn.mock.calls[1][0].prompt).toContain('In each repository the task changed — api, web — run `git merge --no-edit ordewell/run1/integration`');
+      expect(messages(notifications.info)).toContain('Repairing the conflict of task "Task t1" in its own worktrees (repair 1 of 2).');
+      isolation.outcomes.set('t1', 'merged');
+
+      passLatest(t1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(isolation.taskIdsFor('integrate')).toEqual(['t1']);
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'conflict', conflictRepo: 'web', conflictFiles: ['a.ts'] });
+      expect(messages(notifications.warn)).toContain(`The conflict repair of task "Task t1" ${why}, so it did not land. Its worktrees are kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.`);
+    });
+
+    it('keeps every way out of a conflict open after a failed repair: mark complete, or a resolver task', async () => {
+      async function failedRepair() {
+        const env = repairing(undefined, { conflictRepairAttempts: 1 });
+        const t1 = task('t1', 1);
+        env.orchestrator.loadPlan([t1, task('t2', 2, { dependencies: ['t1'] })]);
+        await env.orchestrator.approveReview();
+        env.pass(t1);
+        await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(2));
+        env.latest('t1').emitExit(1);
+        await vi.waitFor(() => expect(env.orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
+        env.isolation.outcomes.set('t1', 'merged');
+        return env;
+      }
+
+      const byHand = await failedRepair();
+      await byHand.orchestrator.markTaskComplete('t1');
+      expect(byHand.orchestrator.storeInstance.get('t1')!.status).toBe('completed');
+      expect(byHand.spawnedCwd('t2')).toBe('/fake-worktrees/run1/2-t2');
+
+      const asTask = await failedRepair();
+      const resolver = asTask.orchestrator.storeInstance.add({ title: 'Resolve', prompt: 'merge it' });
+      asTask.orchestrator.linkConflictResolver(resolver.id, 't1');
+      await asTask.orchestrator.tick();
+      asTask.pass(resolver);
+      await vi.waitFor(() => expect(asTask.orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
+    });
+
+    it('leaves the conflict for the user when a repair cannot even start, without holding anything else up', async () => {
+      const { orchestrator, isolation, pass, spawn, notifications } = repairing();
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1, task('t2', 2)]);
+      await orchestrator.approveReview();
+      spawn.mockRejectedValueOnce(new Error('runner vanished'));
+
+      pass(t1);
+
+      await vi.waitFor(() => expect(messages(notifications.warn)).toContain(
+        'The conflict repair of task "Task t1" could not start: runner vanished, so it did not land. Its worktree is kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.',
+      ));
+      expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user');
+      expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'conflict', repair: { attempt: 1, limit: 2 } });
+      expect(isolation.taskIdsFor('release')).toEqual(['t1']);
+      expect(orchestrator.status).toBe('running');
+      expect(orchestrator.activeTaskIds).toEqual(['t2']);
+    });
+
+    it('leaves a stopped repair\'s task waiting on the user with its conflict and its worktree', async () => {
+      const { orchestrator, isolation, pass, spawn } = repairing();
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1]);
+      await orchestrator.approveReview();
+      pass(t1);
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(orchestrator.getAttempt('t1')?.phase).toBe('running'));
+
+      orchestrator.stop();
+
+      await vi.waitFor(() => expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'conflict', conflictFiles: ['a.ts'], repair: { attempt: 1, limit: 2 } }));
+      expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user');
+      expect(orchestrator.storeInstance.get('t1')!.verdict?.outcome).toBe('pass');
+      expect(isolation.calls).toContainEqual({ op: 'release', taskId: 't1', keep: true });
+    });
+
+    describe('restored from disk', () => {
+      /** A saved run: t0 landed, t1 conflicted after `repairs` repairs, and the plan's next Execute has put t1 back up for scheduling. */
+      function restored(repairs: number) {
+        const env = repairing((iso) => iso.outcomes.set('t1', 'merged'));
+        const workspace = '/wt/1';
+        const run = {
+          id: 'old', workspaceRoot: '/repo', shared: [], sharedRepos: [],
+          repos: [{ path: '.', root: '/repo', baseRef: 'abc', integrationBranch: 'ordewell/old/integration' }],
+          tasks: {
+            t0: { taskId: 't0', order: 0, title: 'Task t0', branch: 'ordewell/old/0-t0', workspace: '/wt/0', status: 'merged' as const, repos: { '.': { worktree: '/wt/0', linked: [], changed: true } } },
+            t1: {
+              taskId: 't1', order: 1, title: 'Task t1', branch: 'ordewell/old/1-t1', workspace, status: 'conflict' as const,
+              repos: { '.': { worktree: workspace, linked: [], changed: true } }, conflictRepo: '.', conflictFiles: ['a.ts'], repairs,
+            },
+          },
+        };
+        env.orchestrator.loadPlan([task('t0', 0, { status: 'completed' }), task('t1', 1, { status: 'approved' })]);
+        return { ...env, adopt: () => env.orchestrator.adoptIsolation({ run, resolvers: {} }), workspace };
+      }
+
+      it('repairs a conflicted task with repairs left when the run next schedules, counting from what was spent', async () => {
+        const { orchestrator, isolation, adopt, spawn, passLatest, workspace } = restored(1);
+        await adopt();
+
+        await orchestrator.approveReview();
+
+        expect(isolation.taskIdsFor('prepare')).toEqual([]);
+        expect(isolation.taskIdsFor('reopen')).toEqual(['t1']);
+        expect(spawn.mock.calls[0][0]).toMatchObject({ taskId: 't1', cwd: workspace });
+        expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'repairing', repair: { attempt: 2, limit: 2 } });
+        passLatest(orchestrator.storeInstance.get('t1')!);
+        await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
+      });
+
+      it('never repairs a task past what it has spent already: it runs afresh, as a conflicted task always has', async () => {
+        const { orchestrator, isolation, adopt, spawn } = restored(2);
+        await adopt();
+
+        await orchestrator.approveReview();
+
+        expect(isolation.taskIdsFor('reopen')).toEqual([]);
+        expect(isolation.taskIdsFor('prepare')).toEqual(['t1']);
+        expect(spawn.mock.calls[0][0].prompt).not.toContain('git merge --no-edit');
+      });
     });
   });
 

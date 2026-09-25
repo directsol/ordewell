@@ -11,6 +11,11 @@ function commaList(raw: string | undefined): string[] {
   return (raw || '').split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+function nonNegativeInt(raw: string | undefined, fallback: number): number {
+  const trimmed = (raw ?? '').trim();
+  return /^\d+$/.test(trimmed) ? Number(trimmed) : fallback;
+}
+
 export abstract class BaseConfig implements IConfig {
   abstract aiProvider: AiProvider;
   abstract apiKey: string;
@@ -117,6 +122,7 @@ export abstract class BaseConfig implements IConfig {
   get worktreeSetupCommand(): string | undefined { return process.env.ORDEWELL_WORKTREE_SETUP?.trim() || undefined; }
   get workspaceRepos(): string[] { return commaList(process.env.ORDEWELL_WORKSPACE_REPOS); }
   get worktreeLinks(): string[] { return commaList(process.env.ORDEWELL_WORKTREE_LINKS); }
+  get conflictRepairAttempts(): number { return nonNegativeInt(process.env.ORDEWELL_CONFLICT_REPAIR_ATTEMPTS, 2); }
 
   get approvalMode(): ApprovalMode {
     const raw = (process.env.ORDEWELL_APPROVAL_MODE || '').trim().toLowerCase();
