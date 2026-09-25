@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as path from 'path';
 
 /** How a path from the real workspace was made to appear in a task workspace. Only `copy` is not live. */
 export type LinkKind = 'symlink' | 'junction' | 'hardlink' | 'copy';
@@ -32,4 +33,73 @@ export function linkPath(
     fs.copyFileSync(source, target);
     return 'copy';
   }
+}
+
+export interface MirrorOptions {
+  platform: NodeJS.Platform;
+  /** The checkout `source` lives in, and the one `target` stands in for it. */
+  from: string;
+  to: string;
+  hardLink?: (existing: string, link: string) => void;
+}
+
+/**
+ * Make `source`'s entries appear in a real directory at `target`, one link per
+ * entry, going one level into `@scope` and `.bin` directories. Returns the
+ * entries that had to be copied, relative to `target`.
+ */
+export function mirrorDir(source: string, target: string, opts: MirrorOptions): string[] {
+  const copied: string[] = [];
+  const links: Array<{ from: string; to: string; name: string }> = [];
+  const mirror = (from: string, to: string, prefix: string, top: boolean): void => {
+    fs.mkdirSync(to, { recursive: true });
+    for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+      const name = path.join(prefix, entry.name);
+      const at = { from: path.join(from, entry.name), to: path.join(to, entry.name), name };
+      if (entry.isSymbolicLink()) links.push(at);
+      else if (top && entry.isDirectory() && (entry.name.startsWith('@') || entry.name === '.bin')) mirror(at.from, at.to, name, false);
+      else if (linkPath(at.from, at.to, opts.platform, opts.hardLink) === 'copy') copied.push(name);
+    }
+  };
+  mirror(source, target, '', true);
+
+  // On Windows a link is made from what it leads to, which may be another
+  // link not made yet, so the links go last and retry until none progresses.
+  let pending = links;
+  for (let before = Infinity; pending.length > 0 && pending.length < before;) {
+    before = pending.length;
+    pending = pending.filter((link) => {
+      const kind = relink(link.from, link.to, opts);
+      if (kind === 'copy') copied.push(link.name);
+      return kind === null;
+    });
+  }
+  return copied;
+}
+
+/**
+ * Recreate the link at `from` at `to`. A relative one keeps its text, so a
+ * workspace link such as `../../packages/core` resolves inside the task
+ * checkout; an absolute one into the main checkout is moved to the same place
+ * in the task checkout, except into a node_modules, which is the shared install.
+ */
+function relink(from: string, to: string, opts: MirrorOptions): LinkKind | null {
+  const text = fs.readlinkSync(from);
+  const pointee = path.isAbsolute(text) ? rebased(text, opts) : text;
+  if (opts.platform !== 'win32') {
+    fs.symlinkSync(pointee, to);
+    return 'symlink';
+  }
+  // A junction needs an absolute target, and whether it can be one at all
+  // depends on what the link leads to, so resolve it where it will live. One
+  // that leads nowhere there has nothing to share.
+  const resolved = path.resolve(path.dirname(to), pointee);
+  try { fs.statSync(resolved); } catch { return null; }
+  return linkPath(resolved, to, opts.platform, opts.hardLink);
+}
+
+function rebased(pointee: string, opts: MirrorOptions): string {
+  const rel = path.relative(opts.from, pointee);
+  const inside = rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  return inside && !rel.split(/[\\/]/).includes('node_modules') ? path.join(opts.to, rel) : pointee;
 }

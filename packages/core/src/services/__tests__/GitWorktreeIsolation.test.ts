@@ -554,10 +554,13 @@ describe.skipIf(!hasGit)('WorktreeIsolation bootstrap', () => {
     const run = await iso.startRun(root);
     const { cwd } = await iso.prepare(task(1, 'Bootstrap'), run);
 
-    for (const name of ['node_modules', '.venv', '.claude', '.env', '.envrc']) {
+    for (const name of ['.venv', '.claude', '.env', '.envrc']) {
       expect(lstatSync(join(cwd, name)).isSymbolicLink(), name).toBe(true);
       expect(realpathSync(join(cwd, name))).toBe(realpathSync(join(root, name)));
     }
+    // node_modules is a real directory whose entries are linked one by one.
+    expect(lstatSync(join(cwd, 'node_modules')).isSymbolicLink()).toBe(false);
+    expect(realpathSync(join(cwd, 'node_modules', 'left-pad'))).toBe(join(root, 'node_modules', 'left-pad'));
     expect(readFileSync(join(cwd, 'node_modules', 'left-pad', 'index.js'), 'utf8')).toBe('module.exports = 1;\n');
     expect(existsSync(join(cwd, '.ordewell'))).toBe(false);
     // A tracked file is checked out for real, not replaced by a link.
@@ -604,7 +607,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation bootstrap', () => {
     const run = await iso.startRun(root);
     const { cwd } = await iso.prepare(task(1, 'Windows'), run);
 
-    expect(lstatSync(join(cwd, 'node_modules')).isSymbolicLink()).toBe(true);
+    expect(lstatSync(join(cwd, 'node_modules', 'left-pad')).isSymbolicLink()).toBe(true);
     expect(lstatSync(join(cwd, '.env')).isSymbolicLink()).toBe(false);
     expect(readFileSync(join(cwd, '.env'), 'utf8')).toBe('SECRET=1\n');
     expect(lstatSync(join(cwd, '.envrc')).isSymbolicLink()).toBe(false);
@@ -642,6 +645,100 @@ describe.skipIf(!hasGit)('WorktreeIsolation bootstrap', () => {
     expect(worktreePaths(root)).toEqual([root]);
     expect(branches(root)).toEqual([run.repos[0].integrationBranch]);
     expect(run.tasks['task-1']).toBeUndefined();
+  });
+});
+
+describe.skipIf(!hasGit)('WorktreeIsolation bootstrap of a workspace install', () => {
+  // An npm workspace installed in the main checkout: a real dependency, a
+  // workspace link to packages/a, a bin link, and packages/b's own node_modules.
+  function installedWorkspace(ignore: string): string {
+    const root = repo({
+      '.gitignore': ignore,
+      'package.json': JSON.stringify({ name: 'mono', private: true, workspaces: ['packages/*'] }),
+      'packages/a/package.json': '{"name":"@scope/a"}\n',
+      'packages/a/index.js': "module.exports = 'a';\n",
+      'packages/b/package.json': '{"name":"b"}\n',
+    });
+    mkdirSync(join(root, 'node_modules', 'left-pad', 'bin'), { recursive: true });
+    writeFileSync(join(root, 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1;\n');
+    writeFileSync(join(root, 'node_modules', 'left-pad', 'bin', 'pad'), '#!/bin/sh\necho padded\n', { mode: 0o755 });
+    mkdirSync(join(root, 'node_modules', '@scope'));
+    symlinkSync('../../packages/a', join(root, 'node_modules', '@scope', 'a'));
+    mkdirSync(join(root, 'node_modules', '.bin'));
+    symlinkSync('../left-pad/bin/pad', join(root, 'node_modules', '.bin', 'pad'));
+    mkdirSync(join(root, 'packages', 'b', 'node_modules', 'only-b'), { recursive: true });
+    writeFileSync(join(root, 'packages', 'b', 'node_modules', 'only-b', 'index.js'), 'module.exports = 2;\n');
+    return root;
+  }
+
+  it('resolves a workspace package to the worktree’s own code and dependencies to the main install', async () => {
+    const root = installedWorkspace('node_modules/\n');
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const { cwd } = await iso.prepare(task(1, 'Change a'), run);
+
+    expect(realpathSync(join(cwd, 'node_modules', '@scope', 'a'))).toBe(join(cwd, 'packages', 'a'));
+    expect(realpathSync(join(cwd, 'node_modules', 'left-pad'))).toBe(join(root, 'node_modules', 'left-pad'));
+    expect(execFileSync(join(cwd, 'node_modules', '.bin', 'pad'), { encoding: 'utf8' })).toBe('padded\n');
+    expect(realpathSync(join(cwd, 'packages', 'b', 'node_modules', 'only-b'))).toBe(join(root, 'packages', 'b', 'node_modules', 'only-b'));
+    expect(existsSync(join(cwd, 'packages', 'a', 'node_modules'))).toBe(false);
+    expect(git(cwd, 'status', '--porcelain')).toBe('');
+  });
+
+  it.each([
+    ['ignored', 'node_modules/\n'],
+    ['not ignored', 'dist/\n'],
+  ])('keeps the mirrored install out of the task commit when node_modules is %s', async (_, ignore) => {
+    const root = installedWorkspace(ignore);
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const t = task(1, 'Edit a');
+    const { cwd } = await iso.prepare(t, run);
+    writeFileSync(join(cwd, 'packages', 'a', 'index.js'), "module.exports = 'a2';\n");
+
+    expect(await iso.integrate(t, run)).toBe('merged');
+    const tree = git(root, 'ls-tree', '-r', '--name-only', run.repos[0].integrationBranch).split('\n');
+    expect(tree).toContain('packages/a/index.js');
+    expect(tree.filter((f) => f.split('/').includes('node_modules'))).toEqual([]);
+  });
+
+  it('removing the worktree leaves the main install intact, links and all', async () => {
+    const root = installedWorkspace('node_modules/\n');
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const { cwd } = await iso.prepare(task(1, 'Cancel'), run);
+    await iso.release(run, 'task-1', { keep: false });
+
+    expect(existsSync(cwd)).toBe(false);
+    expect(readFileSync(join(root, 'node_modules', 'left-pad', 'index.js'), 'utf8')).toBe('module.exports = 1;\n');
+    expect(realpathSync(join(root, 'node_modules', '@scope', 'a'))).toBe(join(root, 'packages', 'a'));
+    expect(readFileSync(join(root, 'node_modules', '.bin', 'pad'), 'utf8')).toBe('#!/bin/sh\necho padded\n');
+    expect(readFileSync(join(root, 'packages', 'b', 'node_modules', 'only-b', 'index.js'), 'utf8')).toBe('module.exports = 2;\n');
+    expect(readFileSync(join(root, 'packages', 'a', 'index.js'), 'utf8')).toBe("module.exports = 'a';\n");
+  });
+
+  it('crash recovery sweeps a worktree no record owns without touching the main install', async () => {
+    const root = installedWorkspace('node_modules/\n');
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const { cwd } = await iso.prepare(task(1, 'Crashed'), run);
+    delete run.tasks['task-1'];
+    await iso.pruneOrphans(run);
+
+    expect(existsSync(cwd)).toBe(false);
+    expect(realpathSync(join(root, 'node_modules', '@scope', 'a'))).toBe(join(root, 'packages', 'a'));
+    expect(readFileSync(join(root, 'node_modules', 'left-pad', 'index.js'), 'utf8')).toBe('module.exports = 1;\n');
+    expect(readFileSync(join(root, 'packages', 'b', 'node_modules', 'only-b', 'index.js'), 'utf8')).toBe('module.exports = 2;\n');
+    expect(readFileSync(join(root, 'packages', 'a', 'index.js'), 'utf8')).toBe("module.exports = 'a';\n");
+  });
+
+  it('with a setup command links nothing by default', async () => {
+    const root = installedWorkspace('node_modules/\n');
+    const iso = create({ config: fakeConfig({ worktreeSetupCommand: 'true' }) });
+    const run = await iso.startRun(root);
+    const { cwd } = await iso.prepare(task(1, 'Setup'), run);
+    expect(lexists(join(cwd, 'node_modules'))).toBe(false);
+    expect(lexists(join(cwd, 'packages', 'b', 'node_modules'))).toBe(false);
   });
 });
 
@@ -1211,7 +1308,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
       const t = task(1, 'Use the defaults');
       const { cwd } = await iso.prepare(t, run);
 
-      expect(realpathSync(join(cwd, 'web', 'node_modules'))).toBe(join(dir, 'web', 'node_modules'));
+      expect(realpathSync(join(cwd, 'web', 'node_modules', 'left-pad'))).toBe(join(dir, 'web', 'node_modules', 'left-pad'));
       expect(realpathSync(join(cwd, 'infra', '.envrc'))).toBe(join(dir, 'infra', '.envrc'));
       expect(existsSync(join(cwd, 'api', 'node_modules'))).toBe(false);
       expect(run.tasks['task-1'].repos.web.linked).toEqual(['node_modules']);

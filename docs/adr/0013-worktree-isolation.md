@@ -314,3 +314,40 @@ it does not own. Within that:
 Rejected: deleting the integration branch whenever its run is forgotten.
 `cleanupRun` exists to keep that branch for a user who has not decided, and a
 branch that holds unmerged work is the one thing never given up unasked.
+
+## Update (2026-09-26) — node_modules is mirrored entry by entry
+
+A whole-folder `node_modules` link broke workspaces. npm, yarn and pnpm install
+a workspace package as a link inside `node_modules`
+(`node_modules/@scope/pkg -> ../../packages/pkg`), and through a folder link
+that resolves from the main checkout. A task changing `packages/core` then
+built and tested its dependents against the main checkout's `core` and its
+stale build, and failed for reasons outside the task.
+
+- **`node_modules` is a real directory in the worktree**, for the repo root and
+  for each workspace package the root `package.json` lists under `workspaces`
+  (the same single-segment globs as `worktreeLinks`) that the main checkout has
+  installed and the worktree has the folder for. Its entries are linked one by
+  one, going one level into `@scope` directories and `.bin`.
+- **A real package is linked to the main checkout's copy**, as before: the
+  install stays shared. **A link is recreated**: a relative one keeps its text,
+  so a workspace link resolves to the worktree's own package and a `.bin` link
+  resolves through the worktree's `node_modules`; an absolute one into the main
+  checkout outside any `node_modules` (what npm writes on Windows, as a
+  junction) is moved to the same place in the worktree; any other keeps its
+  text. On Windows a relative link becomes a junction or hard link to its
+  target resolved in the worktree, and one that resolves to nothing there is
+  skipped. The platform rules stay in `worktreeLink.ts` (ADR-0010).
+- **Recording and cleanup are unchanged in shape.** The mirrored directory is
+  recorded like a link and excluded from the task's commit; an ignore rule such
+  as `node_modules/` now matches it, so it is also out of `git status`. Removal
+  unlinks every link inside it before anything deletes the worktree, and finds
+  the workspace packages' directories again from `package.json` when a crash
+  left no record.
+- A configured setup command still replaces all of this.
+
+Rejected: linking each workspace package's folder into the worktree's
+`node_modules` by name from `package.json`. The installed links already say
+which package goes where, for every package manager that writes them; reading
+them avoids a second, drifting model of the workspace. Links inside a real
+package (pnpm's `.pnpm` store) still resolve to the main checkout.
