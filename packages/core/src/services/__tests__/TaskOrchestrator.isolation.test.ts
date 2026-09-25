@@ -393,10 +393,11 @@ describe('TaskOrchestrator with worktree isolation', () => {
       return setup({ isolation, workspace: '/group' });
     }
 
-    it('names the repository a task\'s landing conflicted in, and says none of it landed', async () => {
+    it('names the repository and files a task\'s landing conflicted in, and says none of it landed', async () => {
       const { orchestrator, notifications, pass } = group((iso) => {
         iso.outcomes.set('t1', 'conflict');
         iso.stopsIn.set('t1', 'web');
+        iso.conflictFiles.set('t1', ['web.txt']);
       });
       const t1 = task('t1', 1);
       orchestrator.loadPlan([t1, task('t2', 2, { dependencies: ['t1'] })]);
@@ -406,10 +407,29 @@ describe('TaskOrchestrator with worktree isolation', () => {
       await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
 
       expect(orchestrator.getTaskIsolation('t1')).toEqual({
-        state: 'conflict', branch: 'ordewell/run1/1-t1', worktree: '/fake-worktrees/run1/1-t1', repos: ['api', 'web'], conflictRepo: 'web',
+        state: 'conflict', branch: 'ordewell/run1/1-t1', worktree: '/fake-worktrees/run1/1-t1', repos: ['api', 'web'], conflictRepo: 'web', conflictFiles: ['web.txt'],
       });
       expect(vi.mocked(notifications.warn).mock.calls.map((c) => String(c[0]))).toContain(
-        'Task "Task t1" passed, but landing it on ordewell/run1/integration conflicted in web, so none of it landed. Its worktrees are kept — resolve it by hand, retry it, or resolve it as a task.',
+        'Task "Task t1" passed, but landing it on ordewell/run1/integration conflicted in web (web.txt), so none of it landed. Its worktrees are kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.',
+      );
+    });
+
+    it('caps a long list of conflicting files', async () => {
+      const files = ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts', 'f.ts'];
+      const { orchestrator, notifications, pass } = group((iso) => {
+        iso.outcomes.set('t1', 'conflict');
+        iso.stopsIn.set('t1', 'web');
+        iso.conflictFiles.set('t1', files);
+      });
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1]);
+      await orchestrator.approveReview();
+
+      pass(t1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
+
+      expect(vi.mocked(notifications.warn).mock.calls.map((c) => String(c[0]))).toContain(
+        'Task "Task t1" passed, but landing it on ordewell/run1/integration conflicted in web (a.ts, b.ts, c.ts, d.ts, e.ts, +1 more), so none of it landed. Its worktrees are kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.',
       );
     });
 
@@ -679,7 +699,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
     await orchestrator.mergeRun();
 
     const warned = vi.mocked(notifications.warn).mock.calls.map((c) => String(c[0]));
-    expect(warned).toContain('Task "Task t1" passed, but merging it into ordewell/run1/integration conflicted. Its worktree is kept — resolve it by hand, retry it, or resolve it as a task.');
+    expect(warned).toContain('Task "Task t1" passed, but merging it into ordewell/run1/integration conflicted. Its worktree is kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.');
     expect(warned).toContain('Merging ordewell/run1/integration conflicted, so it was aborted — your tree is as it was.');
     expect(vi.mocked(notifications.error).mock.calls.map((c) => String(c[0]))).toContain(
       'Could not merge ordewell/run1/integration — finish or abort the merge already in progress, then try again.',

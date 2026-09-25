@@ -210,7 +210,8 @@ export function chooseBlocked(state: TuiState, choice: BlockedChoice): Step {
 
 export function sameIsolation(a: TaskIsolationView | undefined, b: TaskIsolationView | undefined): boolean {
   return a?.state === b?.state && a?.branch === b?.branch && a?.worktree === b?.worktree
-    && a?.conflictRepo === b?.conflictRepo && (a?.repos ?? []).join('\0') === (b?.repos ?? []).join('\0');
+    && a?.conflictRepo === b?.conflictRepo && (a?.repos ?? []).join('\0') === (b?.repos ?? []).join('\0')
+    && (a?.conflictFiles ?? []).join('\0') === (b?.conflictFiles ?? []).join('\0');
 }
 
 function mapTasks(tasks: TaskView[], map: (task: TaskView) => TaskView): TaskView[] {

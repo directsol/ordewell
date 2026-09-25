@@ -6,7 +6,7 @@ import { taskRepoNames } from '../isolation';
 import { SLASH_COMMANDS, type SlashCategory } from './slash';
 import { isTaskRunning, planRows, selectedPlanRow, type ChatMessage, type PlanRow, type TuiState } from './state';
 import { modesForTask } from './taskAssignment';
-import { ALL_PROVIDERS, runnerForProvider, taskOrderLabel, type AiProvider, type ResearchStepOutcome } from '@ordewell/core';
+import { ALL_PROVIDERS, capConflictFiles, runnerForProvider, taskOrderLabel, type AiProvider, type ResearchStepOutcome } from '@ordewell/core';
 
 /**
  * What each pane's content actually is, and therefore how far it can scroll.
@@ -598,7 +598,8 @@ function taskLines(state: TuiState, row: PlanRow, index: number, cols: number): 
   // row and shows only in the expanded detail below.
   if (task.isolation?.state === 'conflict') {
     const where = task.isolation.conflictRepo && task.isolation.conflictRepo !== '.' ? ` in ${task.isolation.conflictRepo}` : '';
-    lines.push(style.red(truncate(`${bodyPad}⚠ merge conflict${where} — its work is kept on its own branch`, cols)));
+    const files = task.isolation.conflictFiles?.length ? ` (${capConflictFiles(task.isolation.conflictFiles)})` : '';
+    lines.push(style.red(truncate(`${bodyPad}⚠ merge conflict${where}${files} — its work is kept on its own branch`, cols)));
   }
 
   let editorLine: number | undefined;

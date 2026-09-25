@@ -47,7 +47,13 @@ export function taskIsolationOf(record: IsolationTaskRecord): TaskIsolation {
     worktree: record.workspace,
     repos: Object.entries(record.repos).filter(([, r]) => r.changed).map(([repoPath]) => repoPath),
     ...(record.conflictRepo ? { conflictRepo: record.conflictRepo } : {}),
+    ...(record.conflictFiles?.length ? { conflictFiles: record.conflictFiles } : {}),
   };
+}
+
+/** A conflict's files as one surface shows them: every one, up to `max`, then how many more. */
+export function capConflictFiles(files: string[], max = 5): string {
+  return files.length <= max ? files.join(', ') : `${files.slice(0, max).join(', ')}, +${files.length - max} more`;
 }
 
 /** What a run hands over: each repo's integration branch and base, and what landed, in plan order. */
