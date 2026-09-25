@@ -1,6 +1,6 @@
 # 0013 — Worktree isolation: one checkout per task, one branch per run
 
-**Status:** accepted — amended by [ADR-0014](0014-multi-repo-workspaces.md)
+**Status:** accepted — amended by [ADR-0014](0014-multi-repo-workspaces.md) and [ADR-0015](0015-conflict-repair.md)
 
 **Amended by ADR-0014** (multi-repo workspaces): the workspace is a *repo group* rather than one repository. Where a decision below is changed, a note marked *ADR-0014* says how; everything unmarked stands.
 
@@ -132,6 +132,9 @@ the surfaces is separate work.
   nobody reviewed. It also makes the verdict depend on a model, against the rule
   that verdicts come from evidence. The conflict is surfaced with everything
   needed to resolve it by hand, or as an explicit, opt-in task.
+  *2026-09-26 (ADR-0015):* narrowed, not reversed — a bounded, evidenced repair
+  attempt now runs before a conflict is surfaced, on the task's own runner and
+  model; the Verdict still decides, not the model's say-so.
 - **Excluding links with a shared `info/exclude`.** Rejected in favor of
   recording the links per task: that file is shared by every worktree of the
   repository, so it would edit the user's repository configuration and leak the
@@ -211,6 +214,10 @@ first draft of the wiring was wrong, and what was chosen instead:
   through the same queue: its branch is an ancestor by then, so it merges clean
   — and if the resolver did not really bring it along, it conflicts again rather
   than being taken at its word. Nothing adds the task but the explicit call.
+  *2026-09-26 (ADR-0015):* this is now also what an automatic conflict repair
+  does — the same merge-and-resolve prompt and the same re-landing guard, run
+  as a new attempt of the conflicted task itself rather than an added one, and
+  bounded by `conflictRepairAttempts`.
 - **Discard does not rewrite the plan.** Discarding a run leaves completed tasks
   completed. Whether their work was kept (merged by hand, or with `mergeRun`)
   is something only the user knows; Mark not done is how they say it was not.
