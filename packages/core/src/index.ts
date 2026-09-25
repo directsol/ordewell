@@ -19,13 +19,16 @@ export { BaseConfig, normalizeGeminiModel } from './interfaces/BaseConfig';
 export { EnvConfig } from './interfaces/EnvConfig';
 export * from './interfaces/INotification';
 export * from './interfaces/ITerminalRunner';
+export * from './interfaces/IWorktreeIsolation';
+export { createWorktreeIsolation } from './services/GitWorktreeIsolation';
+export type { WorktreeIsolationDeps, GitExecFn } from './services/GitWorktreeIsolation';
 export * from './interfaces/ILogger';
 export { BaseAiService } from './services/BaseAiService';
 export type { ResearchChat, ResearchTurn, ToolCall, ToolResult } from './services/BaseAiService';
 export { GeminiService } from './services/GeminiService';
 export { OpenAiService } from './services/OpenAiService';
 export { TaskOrchestrator } from './services/TaskOrchestrator';
-export type { OrchestratorObserver } from './services/TaskOrchestrator';
+export type { OrchestratorObserver, TaskAttemptSnapshot } from './services/TaskOrchestrator';
 export { PlanStore } from './services/PlanStore';
 export { Planner } from './services/Planner';
 export type { PlanRequest, ModifyPlanRequest } from './services/Planner';
@@ -69,10 +72,13 @@ export type { TaskOp, ApplyTaskOpsResult, TaskRef } from './services/TaskOps';
 export {
   parseTaskQueryJson, textHasTaskQuery, taskQuerySignature, renderTaskQueryAnswer,
   TASK_QUERY_FIELDS, TASK_QUERY_PROTOCOL, TASK_QUERY_REMINDER, TASK_QUERY_ANSWER_OR_OPS,
+  OUTPUT_LINES_DEFAULT, OUTPUT_LINES_MAX, TASK_QUERY_ANSWER_MAX_CHARS,
 } from './services/TaskQuery';
-export type { TaskQuery, TaskQueryField, TaskQueryCatalog } from './services/TaskQuery';
+export type { TaskQuery, TaskQueryField, TaskQueryCatalog, LiveOutputLookup } from './services/TaskQuery';
 export { Session, PlanEditError, sessionRuntimeSettings, resolveSkillInvocation } from './services/createSession';
-export type { SessionDeps, SessionRuntimeSettings, SessionPlanner } from './services/createSession';
+export type { SessionDeps, SessionRuntimeSettings, SessionPlanner, ConversationFork } from './services/createSession';
+export { ConversationEditError, ConversationBusyError } from './services/PlannerConversation';
+export type { RewindTarget, ConversationCompaction } from './services/PlannerConversation';
 export {
   SkillsService,
   createSkillsService,
@@ -92,6 +98,9 @@ export { serializeTask, serializeTaskStatus, serializePlan, executionSummary, tr
 export { summarizeToolCall, classifyOutcome } from './services/researchStepSummary';
 export { VerdictEngine } from './services/VerdictEngine';
 export type { VerdictListener, CheckpointListener } from './services/VerdictEngine';
+export * from './interfaces/TaskOutputSource';
+export { BufferedTaskOutputSource } from './services/BufferedTaskOutputSource';
+export { HomeTranscriptReader } from './services/transcriptCapture';
 export * from './services/ModeResolver';
 export * from './services/ModelAllowlistResolver';
 export * from './services/TaskRetarget';

@@ -32,6 +32,7 @@ export const workspace = {
   onDidChangeConfiguration(): { dispose(): void } {
     return { dispose() {} };
   },
+  openTextDocument: vi.fn(async () => ({})) as never,
 };
 
 export const ProgressLocation = {
@@ -121,9 +122,14 @@ export const window = {
   showWarningMessage: vi.fn() as never,
   showInformationMessage: vi.fn() as never,
   showErrorMessage: vi.fn() as never,
+  showTextDocument: vi.fn() as never,
   createOutputChannel: vi.fn(() => ({
     appendLine: vi.fn(),
     show: vi.fn(),
     dispose: vi.fn(),
   })) as never,
+};
+
+export const commands = {
+  executeCommand: vi.fn(async () => undefined) as never,
 };

@@ -8,6 +8,9 @@ import type { INotification } from '../../interfaces/INotification';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
 import type { IFileSystem } from '../../interfaces/IFileSystem';
 import type { SkillsService } from '../SkillsService';
+import type { TaskOutputSource } from '../../interfaces/TaskOutputSource';
+import type { IWorktreeIsolation } from '../../interfaces/IWorktreeIsolation';
+import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
 
 import { fakeConfig, FakeTerminalSession } from '../../testing';
 
@@ -46,6 +49,10 @@ export interface SessionOverrides {
   planner?: Partial<SessionPlanner>;
   modelResolver?: Pick<ModelResolver, 'modelsForRunners'> & Partial<Pick<ModelResolver, 'getCachedRunnerModels'>>;
   skillsService?: Pick<SkillsService, 'findSkill'>;
+  /** Defaults to one with no transcripts, so no test reads the real home directory. */
+  taskOutput?: TaskOutputSource;
+  /** Defaults to git behind a config with isolation off, so no test runs git in the repo it runs in. */
+  isolation?: IWorktreeIsolation;
 }
 
 /**
@@ -83,5 +90,7 @@ export function makeSession(overrides: SessionOverrides = {}): Session {
       : undefined,
     planner: overrides.planner as SessionPlanner | undefined,
     skillsService: overrides.skillsService as SkillsService | undefined,
+    taskOutput: overrides.taskOutput ?? new BufferedTaskOutputSource({ transcripts: { finalAssistantText: async () => null } }),
+    isolation: overrides.isolation,
   });
 }

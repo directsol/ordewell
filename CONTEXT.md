@@ -27,7 +27,11 @@ state directly; Session owns the store and routes plan mutations through it.
 plan is the artifact.
 
 **Session** — the deep module owning one plan's full lifecycle: generation,
-execution, mutation, persistence, and the orchestrator observer wiring.
+execution, mutation, persistence, and the orchestrator observer wiring. It
+*hosts* the planner conversation but does not own it: `startPlanning`,
+`continueConversation` and `isConversationActive` are thin delegations to a
+**PlannerConversation**, which reaches plan state, persistence and scheduling
+only through the host interface Session hands it.
 Constructed with injected adapters (`config`, `runner`, `registry`,
 `fsAdapter`, `broadcast`, `modelResolver`, `settings`, and optionally
 `aiService`/`planner` — the constructor is the test seam; no test reaches
@@ -38,15 +42,17 @@ queue-ready signals travel over it and become `status_update`/`queue_ready`
 broadcasts (there is no separate `onRefresh` callback for a surface to wire).
 Mutation is an internal seam — every structural plan mutation *and every
 settled conversation turn* (plan commit, task-ops apply, planner message) runs
-one `mutatePlan` ritual (store op → persist → broadcast), so forgetting the
-persist step is impossible. Direct (non-planner) edits go one step further
+one `mutatePlan` ritual (store op → persist → broadcast), and so do the one-shot
+`modifyPlan` and the between-batch drain of queued edits. The ritual covers plan
+edits only: scheduler actions (retry, cancel, mark complete, tick) go through
+the orchestrator, persist after it, and reach surfaces as `status_update` over
+the observer, while `generatePlan` and `loadPlan` persist the plan they adopt
+directly. Direct (non-planner) edits go one step further
 through `editPlan`, which adds the reschedule they owe an armed scheduler:
 nothing else wakes one after a hand edit, because a direct edit never queues,
-so a task the edit unblocked would sit ready and never start. Planner turns
-settle through one path
-(`settleTurn`): the first turn and every later turn get the same task-ops
-validation and bounded corrective retries. PlanStore is the single source of truth for task
-state; `LegacyPlanState.tasks` is populated only at persist time. The old
+so a task the edit unblocked would sit ready and never start. PlanStore is the single source of truth for task
+state; `LegacyPlanState.tasks` is written from it at persist time and never read
+back into it. The old
 `syncStoreFromPlan` (plan → store direction) is removed — there is only one
 direction (store → plan, at persist). Emits
 **SessionMessage** (the plan-lifecycle events) through the `broadcast` seam;
@@ -72,6 +78,27 @@ current plan.
 *Avoid:* "the pool" (that's the web transport host), "the session manager" —
 Session is the lifecycle owner, not a registry.
 
+**PlannerConversation** — the deep module owning the planner conversation
+(ADR-0002) end to end: the persisted dialogue record (`conversationHistory` and
+the planner's `researchLog`), the live model context behind it, and every turn
+from the user's message to a settled outcome. Planner turns settle through one
+path: the first turn and every later turn get the same read draining (the
+task-query channel), task-ops validation and bounded corrective retries, and
+commit through the host's `mutatePlan` ritual. It builds the per-turn prompt
+blocks (the always-on catalog block and the current-plan block, whose edit
+protocol prose lives beside the applier as `taskOpsProtocol` in `TaskOps.ts`).
+The live model context — a vendor service's message list, a harness planner's
+process and native session id — is disposable: `reset()` drops it, and the
+next turn is replayed from the transcript (`reset` runs before every replay,
+so a harness planner never resumes its own memory on top of the replayed
+one). A turn that throws before anything was persisted rolls its own writes
+back (`snapshot`/`restore`); once anything has been persisted, memory already
+matches disk and the rollback declines. Transcript edits are whole-array
+operations (`append`, `replace`), so rewinding, forking or compacting a
+conversation is a transcript edit plus a `reset`.
+*Avoid:* "chat" or "thread" for the module — the conversation is the thing; the
+AI service only holds a disposable copy of it.
+
 **SessionMessage** — the single union every delivery surface consumes: the
 plan-lifecycle events (`plan_generated`, `planner_message`, `status_update`, …)
 plus the four planner streaming variants (`plan_token`, `plan_thinking`,
@@ -80,6 +107,13 @@ plus the four planner streaming variants (`plan_token`, `plan_thinking`,
 into a surface. Surfaces adapt it to their own presentation protocol (VS Code:
 `PlannerStreamRouter` → webview messages; web: raw JSON over WS) but never
 re-map `ResearchProgress` themselves.
+Isolated execution (ADR-0013) travels on it too: each `status_update` task
+carries `isolation` (`state: none | active | integrated | conflict | kept`, plus
+its branch and worktree) — absent altogether while the plan has no isolation
+run, so a shared-root plan's updates are exactly what they were;
+`isolation_blocked` says a run did not start on a dirty tree; and
+`isolation_handoff` (integration branch, base ref, landed tasks) is sent when an
+isolated run settles, *before* `execution_complete`.
 *Avoid:* "event", "progress callback" for this concept — and do not add a
 per-call progress override; the broadcast seam is the only channel.
 
@@ -116,7 +150,10 @@ part of it.
 *Avoid:* hand-rolling a retry loop or a corrective prompt at a call site —
 adapt `repairLoop` instead.
 
-**Context compaction** (`contextCompaction.ts`) — the recovery for a plan
+**Context compaction** (`contextCompaction.ts`) — comes in two kinds that share
+a name and nothing else: this entry's *reactive/proactive* compaction, which
+Ordewell triggers on its own, and the *user-triggered* **Compaction** below,
+which the user asks for. This one is the recovery for a plan
 emission cut off by the output-token limit (a long research phase, especially
 with subagents, bloats the planner context until the final JSON no longer
 fits). Truncation is detected two ways — the unbalanced-JSON heuristic
@@ -136,12 +173,81 @@ reactive repair is the backstop, not the primary path.
 *Avoid:* a truncation retry that re-sends the same context — it will be cut
 at the same point again.
 
+**Compaction** (`Session.compactConversation()`) — the user-triggered kind: the
+user decides a planner conversation has grown unwieldy and asks for it to be
+condensed, on a live turn rather than after a cut-off. One hidden planner turn,
+through whichever planner is configured, asks for a summary of the goal,
+decisions, constraints, open questions, key file and code findings and where the
+plan stands. The live context is pruned of bulky tool output first
+(`IAiService.pruneContext`, the same pruning **Context compaction** does), or
+the whole transcript is replayed into the turn when no live context matches. The
+transcript then becomes a `compaction` entry — the summary, visible, always
+first — followed by the last two user messages and their replies verbatim, and
+the live context is reset so the next message replays from that shorter record
+on every backend alike. The summary must arrive inside `<conversation_summary>`
+tags: a harness planner reports a failure as an ordinary reply, and the tags are
+how a dead agent is told apart from a summary. Anything else the turn emits —
+task ops included — is discarded, so the task list is untouched, and nothing is
+written until the summary is in hand, so a failed or stopped turn leaves the
+conversation as it was. Refused while a planner turn is in flight and when the
+conversation has two user messages or fewer; a message sent while it runs is
+refused in turn (`ConversationBusyError`, 409 from the daemon), since the reply
+would share the live context the compaction resets. **Rewind** stops at the summary
+(its entry plays the part the goal did) and **Fork** copies the compacted
+transcript. Only the planner conversation compacts, never a runner. TUI and
+VS Code `/compact` (VS Code also "Ordewell: Compact Conversation", cancellable
+from its progress notification, with the chat input locked while it runs); CLI
+`ordewell compact`; the daemon route is
+`POST /api/plans/:id/conversation/compact`. It announces itself with a
+`planner_message` carrying the summary.
+*Avoid:* "summarize" for the operation — the result replaces the transcript; and
+"clear", which loses what was decided.
+
 **conversationHistory** — the planner dialogue persisted on the plan state:
-`{ role: 'user' | 'assistant', content, timestamp }[]`. The single source of
+`{ role: 'user' | 'assistant', content, timestamp, kind? }[]`. The single source of
 truth for UI redisplay. Tool-call results are NOT stored here — they live in
 the AI service's in-memory tool-use history; `researchLog` remains the
-persisted tool trace. A reloaded session cannot resume the conversation (the
-tool history is gone); a new message starts a fresh one.
+persisted tool trace. A reloaded session resumes by replaying this transcript
+into a fresh model context; the tool history is gone. Written only by
+**PlannerConversation**: conversation turns, the one-shot `modifyPlan`
+exchange (request plus a `plan_generated` marker), and queued mid-run edits
+once `processQueuedMessages` applies them (a `system` entry, so the transcript
+and the plan do not drift apart), a **Rewind**, which cuts it short, and a
+**Compaction**, which replaces it with a summary and its last two exchanges. Every
+write is persisted and broadcast through Session's `mutatePlan` ritual.
+
+**Rewind** (`Session.rewindConversation(index)`) — cut the conversation back to
+just before one of the user's messages, discarding it and everything after it;
+the planner's `researchLog` goes back to the same point. `index` is the
+message's position in `conversationHistory`, and `rewindTargets()` lists the
+candidates with a one-line preview — every user message except the opening
+goal, since a conversation without its goal is a new session (after a
+**Compaction**, the summary entry stands where the goal did). The task list
+is untouched, including tasks the discarded turns created, and so is any run
+executing it: a rewind moves where the conversation resumes, not what the plan
+is (ADR-0002, update of 2026-09-25). The planner's live context is reset, so
+the next message replays from the shortened transcript on every backend alike.
+Refused while a planner turn is in flight (`ConversationBusyError`), because
+the turn's reply would land on a transcript that no longer holds the message
+it answers. TUI and VS Code `/rewind` (picker) or `/rewind <n>` (VS Code also
+"Ordewell: Rewind Conversation"); CLI `ordewell rewind [n]`.
+*Avoid:* "undo" — nothing about the plan is undone.
+
+**Fork** (`Session.forkConversation()`) — copy the conversation and its task
+list into a new persisted session and continue there; the original, its file
+and its live planner context are untouched, so either side can be forked
+again. The fork carries no run: tasks caught in progress or at a checkpoint
+become pending, finished ones keep their status, and queued mid-run edits and
+any other per-run record stay behind. What travels is decided in one place,
+`forkPlanState`, which lists fields rather than spreading the plan, so a field
+added to the plan later stays behind until someone decides it should travel.
+The daemon adopts the fork immediately (see **Adopt**); its first message
+replays the copied transcript. Refused mid-turn like a rewind; allowed while
+the original executes. TUI `/fork` switches to the fork; `ordewell fork` makes
+it the current session; VS Code `/fork` ("Ordewell: Fork Conversation") loads
+it like a saved session, which replaces the extension's one in-process
+`Session` — so it asks first when a run is executing, since loading stops it.
+*Avoid:* "branch" — that word belongs to git and to worktree isolation.
 
 **PRD (prdMarkdown)** — with the PRD toggle on, the planner previews the PRD in
 prose, and after the user agrees writes the full markdown wrapped in
@@ -194,6 +300,135 @@ interface, including per-session `stop`). Tests hit the pure functions and the
 injected seams, never a real PTY.
 *Avoid:* re-declaring quoting/ANSI helpers inside an adapter — that
 duplication is exactly what this module deleted.
+
+**Task attempt** (`TaskAttempt`, inside TaskOrchestrator) — one run of one
+task, from the moment the scheduler claims it to the moment it ends. It holds
+everything that has to die with the run: the attempt number, the phase
+(`starting` while the async spawn is in flight, `running` once the runner is
+up, `integrating` while a passed verdict's worktree merges), the live
+`ITerminalSession`, and the runner, working directory and start
+time the transcript reader needs at verdict time — plus, in an isolated run,
+whether that directory is its worktree and the merge in flight. The orchestrator keeps one
+`Map<taskId, TaskAttempt>`, and every way a run ends — verdict, cancel, release,
+mark complete, retry, a failed spawn, stop, plan load — goes through the one
+`endAttempt`, which also clears the verifier state an interrupted run leaves
+behind. Ending an attempt is also what invalidates a spawn still in flight: the
+late session is compared by identity against the task's *current* attempt, so
+it is killed rather than resurrecting a stopped task or displacing a newer run,
+and it takes back only its own claim — a task marked complete meanwhile stays
+complete. A verdict obeys the same identity rule: the attempt stays live while
+its summary is read, and the verdict lands only if that attempt is still the
+task's current one, so a cancel, retry, mark complete, stop or plan load in that
+window is never overwritten by a stale verdict.
+The working directory is decided in one place (`resolveAttemptCwd`): the
+workspace root, or in an isolated run the worktree `WorktreeIsolation.prepare`
+made for the attempt. A passed verdict keeps the attempt live through its merge,
+so the task completes — and frees its dependents — only once its work is on the
+integration branch. Holds, retry counts and spawn counts are
+deliberately *not* on the record — they describe the task across attempts and
+must survive one ending. Surfaces read an attempt through `getAttempt` /
+`getAttemptSession`; `activeSessionMap` is derived from it. Runner session ids
+are unique per spawn for the same reason: a retry reuses its task id, and a
+registry keyed by task let the old attempt's exit unregister the new one.
+*Avoid:* "session" for this concept — the session is the runner's process, one
+field of the attempt. Do not add another per-task map to the orchestrator for
+state that ends with the run; put it on the attempt.
+
+**Isolated execution** — running each AI task in its own *worktree* instead of
+the shared workspace root, then integrating the results deterministically
+(ADR-0013). Available only when the workspace is a git repository with a clean
+tracked tree and `worktreeIsolation` on; otherwise every task runs in the
+workspace root exactly as before, and `WorktreeIsolation.isActive` says which
+of `disabled`, `git-missing`, `not-git`, `no-commits` or `dirty` applied. The
+Runner is only ever handed a `cwd` (ADR-0007) — git never enters
+`ITerminalRunner`, `RunnerRegistry` or a runner adapter.
+*Avoid:* "sandbox" (an OS-level runner sandbox is a separate concern, ADR-0011),
+"clone" (a worktree shares the repository's object store).
+
+**WorktreeIsolation** — the deep module owning every git and filesystem
+operation isolated execution needs: worktree creation, the artifact bootstrap,
+committing a task's work, the serialized integration merge, conflict detection,
+release, orphan pruning, and the end-of-run handoff (diff, merge, discard).
+`GitWorktreeIsolation` is the implementation; the orchestrator's tests use
+`FakeWorktreeIsolation` from `@ordewell/core/testing`, and git behavior is
+tested only against real temporary repositories.
+
+**Worktree** — a linked git checkout on its own branch, created for one task at
+`.ordewell/worktrees/<run-id>/<order>-<slug>` on branch
+`ordewell/<run-id>/<order>-<slug>`. It is where that task's Runner executes.
+Created when the task starts, removed when it integrates cleanly. A failed or
+conflicted task's worktree is kept so its work can be inspected; a retry
+discards it and starts a fresh one from the current integration tip. Ignored
+artifacts (`node_modules`, `.env*`, `.claude`, …) are linked in from the main
+worktree so it is runnable at once — never `.ordewell/`, which stays at the main
+root.
+*Avoid:* "workspace" for a worktree — the workspace is the user's checkout.
+
+**Integration branch** — `ordewell/<run-id>/integration`, the one branch a run's
+work lands on. Each task that passes its Verdict is merged into it with
+`git merge --no-ff`, one at a time, lowest plan order first among the tasks
+waiting, so the history is reproducible and each task is attributable to a merge
+commit. A merge conflict is aborted and reported, never resolved for the user
+and never by a model. It is never merged into the checked-out branch until the
+user asks; it survives a discarded run until it is explicitly given up.
+*Avoid:* "result branch", "staging branch".
+
+**Base ref** — the commit the user's checked-out branch pointed at when a run
+started, resolved once at that moment. The integration branch forks from it and
+the review diff is taken against it, so switching or advancing the user's branch
+mid-run does not retarget the run.
+
+**Isolation run** — one Execute-Plan click or one manual task run's worth of
+isolation: the `IsolationRun` record holding the run id, base ref, integration
+branch name and each task's branch, worktree and status. It is plain JSON so it
+can persist with the plan state, and a new run mints a new record. Task ids are
+only unique within one plan, so every operation that acts on a task takes the run
+it belongs to.
+It persists as `LegacyPlanState.isolation` (`{ run, resolvers }`), written from
+the orchestrator at persist time and saved whenever it changes; adopting a saved
+plan prunes the run's orphans. A plan's record is *continued* rather than
+replaced while anything has landed on it — a resumed plan's dependents need
+their predecessors' work, which a fresh branch from the checked-out commit does
+not have — and a record with nothing landed is discarded whole when the next run
+mints its own. One with landed work that cannot be continued (it ran from another
+workspace path) loses its worktrees but keeps its integration branch. A run closes
+when its last attempt ends, however it ends — verdict, cancel, Mark complete or a
+failed spawn — so the next one decides its own mode. The field belongs to one
+plan: a fork must not copy it.
+
+**Isolation handoff** — the end of an isolated run: the integration branch, the
+base ref and the tasks that landed, broadcast as `isolation_handoff`. What
+follows is the user's: `reviewRunDiff`, `mergeRun` (a normal `git merge` into the
+checked-out branch, only ever on that explicit call), `cleanupRun` (worktrees and
+task branches go, the integration branch stays) and `discardRun` (everything
+goes, and the plan forgets the run; task statuses are left as they are). A
+conflicted task leaves by a hand resolution plus Mark complete, a retry, or
+`resolveConflictAsTask` — an added task that merges the branch by hand and
+through whose landing the conflicted task lands, if it is still conflicted by
+then (a retry in the meantime replaces the conflict with a new attempt).
+*Avoid:* "result", "output branch" for the handoff — it is a branch to review,
+not an outcome.
+In the terminal the same four steps are the handoff overlay (`/handoff`, opened
+by `isolation_handoff` on a screen with nothing else open) and
+`ordewell handoff [review|merge|discard|cleanup]`. Merge and discard are asked
+about first, in both — the CLI takes `--yes` as having asked. A reloaded session
+gets its handoff and its per-task marks from the plan's persisted run record, not
+from a stream: the terminal reads it off the saved plan, and VS Code asks
+`Session.isolationView` whenever its webview reconnects or a session is loaded
+(the handoff card waits while a run executes). A conflicted task carries a **conflict mark** in the plan pane;
+every other isolation state stays out of the row and appears, with the task's
+branch, only in the expanded detail.
+
+**Blocked run** — a run `isolation_blocked` turned away because tracked files are
+modified. The daemon parks the start until it hears `continueWithStash` or
+`continueWithoutIsolation`, so the run's execution stream ends at the block and
+the choice opens its own. Cancelling is `stopExecution`, not a dismissal: a
+parked start swallows a re-run. The TUI asks with a three-way picker (Stash and
+continue / Run without isolation / Cancel); `ordewell run` takes `--stash` and
+`--without-isolation`, and without either releases the run and says so. The block
+is broadcast from inside the call that starts the run, so every surface opens its
+execution stream before making that call — one opened after it never hears the
+block.
 
 **The plan** — the typed, editable, diffable artifact the planner emits: an ordered
 list of tasks with per-task model, thinking effort, runner, and mode. It is data,
@@ -313,18 +548,28 @@ block is short-fields-only by design (title, status, runner, model, mode,
 deps — never a task's `prompt`, `userSteps`, `verdict`, `outputSummary`, or
 `userStoriesCovered`), so a query is how the planner reads what the block
 leaves out before rewriting it, instead of fabricating content it never saw.
-`Session.drainTaskQueries` answers it — from live state, never persisted to
-`conversationHistory` — in its own loop *before* `repairLoop`, so a read never
-spends the corrective-retry budget a fumbled edit is owed, and *before* the
-live-execution queue gate, so a read still lands mid-run (it mutates nothing).
-Budgeted per user turn: three reads before every answer also nudges the model
-to land the turn, six before the loop stops answering and returns a message
-turn instead; a repeated identical query (`taskQuerySignature`) is treated as
-already at the soft cap. `catalog: true` needs no plan yet, so it is legal on
-the very first planning turn.
+`PlannerConversation.drainTaskQueries` answers it — from live state, never
+persisted to `conversationHistory` — in its own loop *before* `repairLoop`, so
+a read never spends the corrective-retry budget a fumbled edit is owed, and
+*before* the live-execution queue gate, so a read still lands mid-run (it
+mutates nothing). One field reads execution state: `output` (with top-level
+`outputLines`, default 80 capped at 400, and `outputSince`, a previous
+answer's next offset) returns the clean-rendered tail of a task that is
+running right now, from `TaskOrchestrator.getLiveOutput` through the
+conversation host — the planner's way to diagnose a stuck task mid-execution.
+An ended task is pointed at its `outputSummary`/`verdict` instead. The answer
+is kept within a character budget, trimming the tail's oldest lines and saying
+so. Budgeted per user turn: three reads before every answer also nudges the
+model to land the turn, six before the loop stops answering and returns a
+message turn instead; a repeated identical query (`taskQuerySignature`) is
+treated as already at the soft cap. `catalog: true` needs no plan yet, so it is
+legal on the very first planning turn.
 *Avoid:* inlining full task bodies into the per-turn plan block to sidestep
 this — that is the token cost the channel exists to avoid paying on every
-turn regardless of whether the turn needs it.
+turn regardless of whether the turn needs it. *Avoid:* disclosing task log
+file paths to the planner as a second read mechanism — it would carve `.ordewell/`
+out of ADR-0008's path confinement and put the read outside the query budget;
+the envelope read is bounded by construction.
 
 **Webview modals are host modals** — `window.confirm`/`alert`/`prompt` are inert
 in a VS Code webview: it is sandboxed without `allow-modals`, so Chromium ignores
@@ -467,18 +712,58 @@ selected task's status (footer hint follows: `m done` / `m undone`).
 a retry attempt and releases the hold.
 
 **VerdictEngine** — the deep module owning the whole verification state
-machine: the completion-marker lifecycle (detect in session output, track,
-reconstruct cursor-positioned TUI repaints before scanning), exit-code
-normalization, verdict production, and
-the manual "Mark complete" override. The orchestrator hands each spawned
-session to `watch(task, session)` and receives the verdict via `onVerdict`; it
-never re-derives a verdict. `markComplete`, `clear` (retry), and `reset`
-(stop/loadPlan) route through here too — one producer of every verdict. The
-old two-branch `verifyTask` function and the marker tracking that used to live
-in `TaskOrchestrator` are its *implementation*, not its interface; a fake
-`ITerminalSession` is the test seam.
+machine: the completion-marker lifecycle (detect in session output, track),
+the checkpoint protocol, idle tracking, exit-code normalization, verdict
+production, and the manual "Mark complete" override. The orchestrator hands
+each spawned session to `watch(task, session)` and receives the verdict via
+`onVerdict`; it never re-derives a verdict, though it drops one whose attempt
+has already ended (see **Task attempt**). `markComplete`, `clear` (every user
+interruption of a task: cancel, retry, mark complete, removal, mark not done),
+and `reset` (stop/loadPlan) route through here too — one producer of every
+verdict. It does not render or capture output: it keeps only a bounded raw
+tail to scan for the marker (on the exit path too, never the runner's
+ANSI-stripped `getOutput()`) and a small carry so a checkpoint split across
+chunks still assembles; rendering is **Terminal render**'s and what a task
+printed or answered is **TaskOutputSource**'s. Every callback carries the
+generation its `watch` was given, and generations come from one counter that
+`reset` never rewinds, so a terminal that outlives a stop or plan load (an open
+VS Code terminal, a tmux exit seen on the next poll) cannot speak for the task's
+next attempt. The old two-branch `verifyTask` function and the marker tracking
+that used to live in `TaskOrchestrator` are its *implementation*, not its
+interface; a fake `ITerminalSession` is the test seam.
 *Avoid:* "the verifier", "TaskVerifier" (the old shallow pass-through, now
 deleted) — use VerdictEngine.
+
+**Terminal render** (`terminalRender.ts`) — the pure functions that turn raw
+PTY bytes into what a user would see: `renderTerminalOutput` replays the
+cursor/erase subset coding-agent TUIs use onto a small virtual screen,
+`flattenTerminalOutput` strips escapes, box-drawing and whitespace for marker
+scanning, and `renderCleanCapture` renders and cuts at the completion-marker
+row, dropping the TUI chrome below it. No state, no I/O. It needs *raw* output:
+the cursor escapes it replays are exactly what a runner's stripped buffer has
+lost.
+
+**TaskOutputSource** (`interfaces/TaskOutputSource.ts`, default
+`BufferedTaskOutputSource`) — the one owner of a task attempt's output,
+injected into TaskOrchestrator (through `SessionDeps.taskOutput` when a Session
+builds it, which is how no test reads the real home directory). It keeps one bounded raw buffer per attempt,
+fed from the attempt's session, and answers two questions: `finalText` — the
+durable summary, taken from the agent's own transcript when one matches and
+from the clean **Terminal render** otherwise — and `liveTail` — the last lines
+of what a task printed, rendered clean, with an absolute `nextOffset` to read
+only what follows (`TaskOrchestrator.getLiveOutput`). Transcripts come through
+an injected **TranscriptReader** (`HomeTranscriptReader`, home directory
+injectable) that binds a transcript to a task by content: the startedAt cutoff
+only narrows the candidates, and the transcript must carry the task's
+completion marker UUID, which its prompt contains. Directory and recency alone
+hand task A task B's answer when parallel attempts share a cwd — and for Claude
+Code the directory is not even unique: past 200 characters it keeps a prefix of
+the munged cwd plus a hash, so every directory with that prefix is a candidate. The binding holds
+only while no other task's prompt carries that id, which is why a dependent's
+prompt quotes its predecessor's output with the marker id dropped
+(`defuseMarkers` in `promptAugment.ts`).
+*Avoid:* "the output buffer", "transcript capture" as the owner — the runners'
+`getOutput()` buffers are transport detail, and the transcript is one input.
 
 **Check** — one deterministic signal inside a verdict. The VerdictEngine
 requires `completion_marker` and records `exit_code` as supporting diagnostic
@@ -492,8 +777,8 @@ to every agent prompt as `<<<ORDEWELL_DONE_<uuid>>>>`. The **VerdictEngine** own
 the marker lifecycle: it detects the marker in session output (via `watch`),
 and produces a `pass` verdict immediately with `exit_code` bypassed
 (marker-seen), while leaving an interactive terminal open. Cursor-positioned
-TUI output is rendered into a small virtual screen so split OpenCode repaints
-are scanned as the token visible to the user. If the marker never appears and
+TUI output is rendered into a small virtual screen (**Terminal render**) so
+split OpenCode repaints are scanned as the token visible to the user. If the marker never appears and
 the process exits — even with code 0 — the verdict fails and dependent tasks
 stay blocked. A stuck task (no marker, no exit) is advanced manually via "Mark
 complete", which calls `VerdictEngine.markComplete` for a `pass` verdict.
@@ -507,11 +792,16 @@ strategy is gone — a human who must confirm is modeled directly as a
 
 ## Surfaces
 
-**Surface** — a client that drives Ordewell. There are four: the **VS Code
-extension** (webview), the **web UI**, the per-command **CLI**, and the **TUI**.
-All four consume the same `SessionMessage` union over the same daemon seam; none
-of them holds orchestration logic. A session planned on one surface opens
-unchanged on another.
+**Surface** — a client that drives Ordewell: the **VS Code extension**
+(webview), the per-command **CLI**, and the **TUI**. All of them consume the same
+`SessionMessage` union and none holds orchestration logic, but they reach a
+`Session` two ways. The CLI and the TUI talk to the **local daemon**
+(`packages/web`, HTTP + WebSocket on `127.0.0.1`, with no frontend of its own);
+the VS Code extension runs core's `Session` in-process and never connects to the
+daemon. A session planned on one surface opens unchanged on another through the
+saved-session store in `.ordewell/sessions/`, not through a shared transport
+(ADR-0006, update of 2026-09-24).
+*Avoid:* "web UI" — there is none; the web package is the daemon.
 
 **TUI** — `ordewell tui`, the full-screen terminal surface (ADR-0006). Its core
 is pure: `reduce(state, action)` returns `{ state, effects }` and `render(state)`

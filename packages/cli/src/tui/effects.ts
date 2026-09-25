@@ -6,7 +6,7 @@ import { WorkspaceInitNeededError } from '../apiClient';
 import { normalizeCatalog } from '../catalog';
 import { describePlannerSwitch } from '../plannerModelSwitch';
 import type { Action, Effect } from './reducer';
-import type { SessionView } from './state';
+import type { RewindTargetView, SessionView, TaskIsolationView } from './state';
 import type { WsEvent } from '../apiClient';
 
 /** The slice of the daemon client the TUI needs; `ApiClient` satisfies it. */
@@ -27,7 +27,18 @@ export interface OrdewellApi {
   getSession(sessionId: string, workspace?: string): Promise<{ meta: any; plan: any }>;
   adoptSession(sessionId: string, workspace?: string): Promise<{ plan: any; goal: string }>;
   deleteSession(sessionId: string, workspace?: string): Promise<{ ok: boolean }>;
+  forkConversation(sessionId: string): Promise<{ sessionId: string; goal: string; plan: unknown }>;
+  rewindTargets(sessionId: string): Promise<RewindTargetView[]>;
+  rewindConversation(sessionId: string, index: number): Promise<unknown>;
+  compactConversation(sessionId: string): Promise<{ plan: unknown; summary: string; keptMessages: number }>;
   closeSession(sessionId: string): Promise<{ ok: boolean }>;
+  reviewRunDiff(sessionId: string): Promise<string>;
+  mergeRun(sessionId: string): Promise<'merged' | 'conflict' | 'failed'>;
+  discardRun(sessionId: string): Promise<void>;
+  cleanupRun(sessionId: string): Promise<void>;
+  continueWithStash(sessionId: string): Promise<void>;
+  continueWithoutIsolation(sessionId: string): Promise<void>;
+  resolveConflictAsTask(sessionId: string, taskId: string): Promise<unknown>;
   getSettings(): Promise<Record<string, unknown>>;
   updateSettings(changes: Record<string, unknown>): Promise<Record<string, unknown>>;
   sendCommand(name: string, args?: Record<string, string>): Promise<{ ok: boolean; settings?: Record<string, unknown> }>;
@@ -441,6 +452,81 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
       return;
     }
 
+    // The daemon has already adopted the fork, so switching is only the TUI
+    // catching up — the original session is not closed: it may be running.
+    case 'forkConversation': {
+      const fork = await api.forkConversation(effect.sessionId);
+      dispatch({ type: 'sessionForked', sessionId: fork.sessionId, goal: fork.goal });
+      dispatch({ type: 'chatRestored', history: (fork.plan as { conversationHistory?: ConversationMessage[] }).conversationHistory ?? [], sessionId: fork.sessionId });
+      dispatch({ type: 'planUpdated', plan: fork.plan, sessionId: fork.sessionId });
+      dispatch({ type: 'notice', message: `Forked ${effect.sessionId} into ${fork.sessionId} — you are in the fork now. /sessions to go back.` });
+      return;
+    }
+
+    case 'loadRewindTargets':
+      dispatch({ type: 'rewindTargetsLoaded', targets: await api.rewindTargets(effect.sessionId), sessionId: effect.sessionId });
+      return;
+
+    case 'rewindConversation': {
+      const plan = await api.rewindConversation(effect.sessionId, effect.index);
+      dispatch({ type: 'chatRestored', history: (plan as { conversationHistory?: ConversationMessage[] }).conversationHistory ?? [], sessionId: effect.sessionId });
+      dispatch({ type: 'planUpdated', plan, sessionId: effect.sessionId });
+      dispatch({ type: 'notice', message: 'Rewound the conversation. The tasks are unchanged; your next message continues from here.' });
+      return;
+    }
+
+    // The redrawn transcript opens with the summary entry, which is what the
+    // user gets to read — no separate notice to repeat it.
+    case 'compactConversation': {
+      const { plan } = await api.compactConversation(effect.sessionId);
+      dispatch({ type: 'chatRestored', history: (plan as { conversationHistory?: ConversationMessage[] }).conversationHistory ?? [], sessionId: effect.sessionId });
+      dispatch({ type: 'planUpdated', plan, sessionId: effect.sessionId });
+      return;
+    }
+
+    case 'isolationReviewDiff':
+      dispatch({ type: 'handoffDiff', diff: await api.reviewRunDiff(effect.sessionId), sessionId: effect.sessionId });
+      return;
+
+    // A conflict or a refusal is an answer, not a fault: either way the user's
+    // tree is exactly as it was, and the words say what to do next.
+    case 'isolationMerge': {
+      const outcome = await api.mergeRun(effect.sessionId);
+      dispatch(outcome === 'merged'
+        ? { type: 'notice', message: `Merged ${effect.branch} into your checked-out branch.` }
+        : outcome === 'conflict'
+          ? { type: 'failed', message: `Merging ${effect.branch} conflicted, so it was aborted — your tree is as it was. Merge it with git and resolve the conflict there.` }
+          : { type: 'failed', message: `Could not merge ${effect.branch} — finish or abort the merge already in progress, then try again.` });
+      return;
+    }
+
+    case 'isolationDiscard':
+      await api.discardRun(effect.sessionId);
+      dispatch({ type: 'handoffDiscarded', sessionId: effect.sessionId });
+      dispatch({ type: 'notice', message: `Discarded the run and ${effect.branch}.` });
+      return;
+
+    case 'isolationCleanup':
+      await api.cleanupRun(effect.sessionId);
+      await refreshPlan(deps, effect.sessionId);
+      dispatch({ type: 'notice', message: `Removed the run's worktrees and task branches; ${effect.branch} is kept.` });
+      return;
+
+    // Spawns runners again, so it needs the stream a run needs — the blocked
+    // one closed itself when nothing started.
+    case 'isolationContinue': {
+      const { sessionId } = effect;
+      await withExecutionStream(deps, sessionId, () => effect.mode === 'stash' ? api.continueWithStash(sessionId) : api.continueWithoutIsolation(sessionId));
+      await refreshPlan(deps, sessionId);
+      return;
+    }
+
+    case 'resolveConflict':
+      await api.resolveConflictAsTask(effect.sessionId, effect.taskId);
+      await refreshPlan(deps, effect.sessionId);
+      dispatch({ type: 'notice', message: 'Added a task that merges the conflicted branch by hand. Run it with E (run plan); when it lands, the conflicted task lands through it.' });
+      return;
+
     case 'deleteSession':
       await api.deleteSession(effect.sessionId, workspace);
       await loadSessions(deps);
@@ -679,9 +765,9 @@ function lastAssistantMessage(plan: any): string | null {
 function onExecutionEvent(dispatch: (action: Action) => void, event: WsEvent, sessionId: string): void {
   switch (event?.type) {
     case 'status_update': {
-      const updates: Record<string, { status: string; idleSince?: string | null }> = {};
+      const updates: Record<string, { status: string; idleSince?: string | null; isolation?: TaskIsolationView }> = {};
       for (const task of event.tasks ?? []) {
-        updates[String(task.id)] = { status: String(task.status), idleSince: task.idleSince ?? null };
+        updates[String(task.id)] = { status: String(task.status), idleSince: task.idleSince ?? null, isolation: task.isolation };
       }
       dispatch({ type: 'tasksStatus', updates, sessionId });
       return;
@@ -734,10 +820,37 @@ function onExecutionEvent(dispatch: (action: Action) => void, event: WsEvent, se
       dispatch({ type: 'executionComplete', stopped: true, sessionId });
       return;
 
-    // task_output / plan_token / plan_thinking are raw runner chatter; the
-    // status line and the plan pane already say everything the user needs.
-    default:
+    // Nothing started; the user chooses how to go on.
+    case 'isolation_blocked':
+      dispatch({ type: 'isolationBlocked', message: event.message, sessionId });
       return;
+
+    case 'isolation_handoff':
+      dispatch({ type: 'isolationHandoff', handoff: { branch: event.branch, baseRef: event.baseRef, landed: event.landed }, sessionId });
+      return;
+
+    // Raw runner chatter, and the planner's own turn: the status line and the
+    // plan pane already say everything the user needs during a run. Listed
+    // rather than defaulted, so a new SessionMessage variant fails to compile
+    // here until someone decides what a run's watcher does with it.
+    case 'task_updated':
+    case 'task_output':
+    case 'plan_thinking':
+    case 'planner_liveness':
+    case 'research_step':
+    case 'plan_token':
+    case 'research_step_done':
+    case 'approval_request':
+    case 'approval_settled':
+      return;
+
+    default: {
+      // Compile-time only. The socket also greets with `connected` and
+      // `chat_backlog`, which are not SessionMessages and must stay ignorable.
+      const unhandled: never = event;
+      void unhandled;
+      return;
+    }
   }
 }
 

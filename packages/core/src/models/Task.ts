@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import type { PlanIsolation } from '../interfaces/IWorktreeIsolation';
 
 export interface UserStep {
   order: number;
@@ -200,10 +201,12 @@ export interface ConversationMessage {
   /**
    * Timeline marker: 'plan_generated' records the point in the dialogue where
    * the plan was committed (the UI anchors the plan card there on restore);
-   * 'system' is a host-injected notice. Absent for ordinary chat turns, so
+   * 'system' is a host-injected notice; 'compaction' is the summary a
+   * user-triggered compaction left in place of the earlier messages — always
+   * the transcript's first entry. Absent for ordinary chat turns, so
    * sessions saved before markers existed degrade gracefully.
    */
-  kind?: 'plan_generated' | 'system';
+  kind?: 'plan_generated' | 'system' | 'compaction';
 }
 
 export interface QueuedMessage {
@@ -237,6 +240,13 @@ export interface LegacyPlanState {
   prdMarkdown?: string;
   /** Follow-ups queued while tasks execute — applied as plan modifications between batches. */
   queuedMessages?: QueuedMessage[];
+  /**
+   * The plan's isolation run (ADR-0013), written from the orchestrator at
+   * persist time and read back only when a saved plan is adopted. It names
+   * branches and worktrees that belong to this plan alone: a fork of the plan
+   * must leave it behind rather than share it.
+   */
+  isolation?: PlanIsolation;
 }
 
 export interface Message {

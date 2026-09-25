@@ -9,6 +9,8 @@ import {
   type AiProvider,
 } from '@ordewell/core';
 import type { ChatViewProvider } from '../providers/ChatViewProvider';
+import { replayIsolation } from '../plan/isolation';
+import { forkConversation, rewindConversation, compactConversation } from '../plan/conversation';
 import { VsCodeConfig } from '../adapters/VsCodeConfig';
 import { VsCodeFileSystem } from '../adapters/VsCodeFileSystem';
 import { VsCodeTerminalRunner } from '../adapters/VsCodeTerminalRunner';
@@ -84,6 +86,7 @@ function applyLoadedSession(
   deps.chatProvider.restoreChat(loaded.plan.conversationHistory ?? [], loaded.plan.tasks.length > 0);
   deps.chatProvider.setGoal(loaded.meta.goal);
   if (loaded.plan.tasks.length > 0) deps.chatProvider.planGenerated(loaded.plan);
+  replayIsolation(deps.session, deps.chatProvider);
   saveState(loaded.plan, deps.fsAdapter.getWorkspaceRoot());
   return true;
 }
@@ -356,6 +359,11 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       if (!applyLoadedSession(loaded, deps)) return;
       deps.log(`Loaded session by id: ${loaded.meta.id}`);
     }),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('ordewell.forkConversation', () => forkConversation(deps)),
+    vscode.commands.registerCommand('ordewell.rewindConversation', (arg?: string) => rewindConversation(deps, arg)),
+    vscode.commands.registerCommand('ordewell.compactConversation', () => compactConversation(deps)),
   );
   context.subscriptions.push(
     vscode.commands.registerCommand('ordewell.clearPlan', async () => {

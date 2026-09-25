@@ -2,7 +2,7 @@ import http from 'http';
 import WebSocket from 'ws';
 import { DEFAULT_PORT } from './daemon';
 import { bearerHeaderValue, readDaemonToken, tokenSubprotocols, mintSessionId } from '@ordewell/core';
-import type { SerializedPlan, DiscoveredModel, SessionMessage } from '@ordewell/core';
+import type { SerializedPlan, DiscoveredModel, SessionMessage, RewindTarget } from '@ordewell/core';
 
 const DEFAULT_HTTP_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -348,6 +348,92 @@ export class ApiClient {
     return res.data;
   }
 
+  /** Copy the conversation and its tasks into a new session the daemon has already adopted. */
+  async forkConversation(sessionId: string): Promise<{ sessionId: string; goal: string; plan: SerializedPlan }> {
+    const res = await this.httpRequest<{ sessionId: string; goal: string; plan: SerializedPlan } & ErrorResponse>('POST', `/api/plans/${sessionId}/conversation/fork`);
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Fork failed');
+    }
+    return { sessionId: res.data.sessionId, goal: res.data.goal, plan: res.data.plan };
+  }
+
+  async rewindTargets(sessionId: string): Promise<RewindTarget[]> {
+    const res = await this.httpRequest<{ targets: RewindTarget[] } & ErrorResponse>('GET', `/api/plans/${sessionId}/conversation/rewind-targets`);
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Failed to list rewind targets');
+    }
+    return res.data.targets;
+  }
+
+  /** Cut the conversation back to just before the user message at `index` (a transcript position). */
+  async rewindConversation(sessionId: string, index: number): Promise<SerializedPlan> {
+    const res = await this.httpRequest<{ plan: SerializedPlan } & ErrorResponse>('POST', `/api/plans/${sessionId}/conversation/rewind`, { index });
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Rewind failed');
+    }
+    return res.data.plan;
+  }
+
+  /**
+   * Condense the conversation into a summary. One planner call, so it can take
+   * as long as a reply; a refusal or failure leaves the conversation as it was.
+   */
+  async compactConversation(sessionId: string): Promise<{ plan: SerializedPlan; summary: string; keptMessages: number }> {
+    const res = await this.httpRequest<{ plan: SerializedPlan; summary: string; keptMessages: number } & ErrorResponse>('POST', `/api/plans/${sessionId}/conversation/compact`);
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Compaction failed');
+    }
+    return { plan: res.data.plan, summary: res.data.summary, keptMessages: res.data.keptMessages };
+  }
+
+  async reviewRunDiff(sessionId: string): Promise<string> {
+    const res = await this.httpRequest<{ diff: string } & ErrorResponse>('GET', `/api/plans/${sessionId}/isolation/diff`);
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Could not read the diff');
+    }
+    return res.data.diff;
+  }
+
+  /** A conflict or a refusal is an outcome, not an error: the user's tree is untouched either way. */
+  async mergeRun(sessionId: string): Promise<'merged' | 'conflict' | 'failed'> {
+    const res = await this.httpRequest<{ outcome: 'merged' | 'conflict' | 'failed' } & ErrorResponse>('POST', `/api/plans/${sessionId}/isolation/merge`);
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Merge failed');
+    }
+    return res.data.outcome;
+  }
+
+  discardRun(sessionId: string): Promise<void> {
+    return this.isolationAction(sessionId, 'discard', 'Discard failed');
+  }
+
+  cleanupRun(sessionId: string): Promise<void> {
+    return this.isolationAction(sessionId, 'cleanup', 'Cleanup failed');
+  }
+
+  continueWithStash(sessionId: string): Promise<void> {
+    return this.isolationAction(sessionId, 'stash-and-continue', 'Could not stash and continue');
+  }
+
+  continueWithoutIsolation(sessionId: string): Promise<void> {
+    return this.isolationAction(sessionId, 'run-without', 'Could not continue without isolation');
+  }
+
+  private async isolationAction(sessionId: string, segment: string, failure: string): Promise<void> {
+    const res = await this.httpRequest<{ ok: boolean } & ErrorResponse>('POST', `/api/plans/${sessionId}/isolation/${segment}`);
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || failure);
+    }
+  }
+
+  async resolveConflictAsTask(sessionId: string, taskId: string): Promise<SerializedPlan> {
+    const res = await this.httpRequest<{ plan: SerializedPlan } & ErrorResponse>('POST', `/api/plans/${sessionId}/tasks/${taskId}/resolve-conflict`);
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Could not add a resolver task');
+    }
+    return res.data.plan;
+  }
+
   async closeSession(sessionId: string): Promise<{ ok: boolean }> {
     const res = await this.httpRequest<{ ok: boolean }>('POST', `/api/sessions/${sessionId}/close`);
     return res.data;
@@ -451,9 +537,13 @@ export class ApiClient {
         try {
           const event: WsEvent = JSON.parse(data.toString());
           onEvent(event);
+          // A blocked run spawns nothing and waits for the user's choice, so
+          // this stream has no completion coming. Ending it here lets the
+          // choice open its own, instead of two streams reporting one run.
           if (
             (event.type === 'execution_complete' ||
-              event.type === 'execution_stopped') &&
+              event.type === 'execution_stopped' ||
+              event.type === 'isolation_blocked') &&
             !resolved
           ) {
             resolved = true;

@@ -40,6 +40,12 @@ function makeRunner(overrides: { hasScript?: boolean } = {}) {
   return { runner, child, spawnImpl: spawnImpl as ReturnType<typeof vi.fn> };
 }
 
+/** A runner whose spawns hand out `children` in order. */
+function runnerSpawning(...children: FakeChildProcess[]): HeadlessRunner {
+  const spawnImpl = children.reduce((fn, child) => fn.mockReturnValueOnce(child), vi.fn()) as unknown as SpawnFn;
+  return new HeadlessRunner({ spawnImpl, hasScriptCmd: () => false, resolvePath: async () => '' });
+}
+
 const baseOpts = (m: RunnerPluginManifest) => ({
   taskId: 'task-1234-abcd',
   runner: m.name,
@@ -151,8 +157,7 @@ describe('HeadlessRunner', () => {
     const m = manifest();
     const child1 = new FakeChildProcess();
     const child2 = new FakeChildProcess();
-    const spawnImpl = vi.fn().mockReturnValueOnce(child1).mockReturnValueOnce(child2) as unknown as SpawnFn;
-    const runner = new HeadlessRunner({ spawnImpl, hasScriptCmd: () => false, resolvePath: async () => '' });
+    const runner = runnerSpawning(child1, child2);
 
     await runner.spawn(baseOpts(m));
     await runner.spawn({ ...baseOpts(m), taskId: 'task-5678-efgh' });
@@ -161,6 +166,41 @@ describe('HeadlessRunner', () => {
     expect(child1.kill).toHaveBeenCalled();
     expect(child2.kill).toHaveBeenCalled();
     expect(runner.activeCount).toBe(0);
+  });
+
+  // A retry respawns the same task id, and task ids often share a prefix
+  // ("task-1234-abcd" / "task-1234-wxyz"), so the old attempt's late exit used
+  // to unregister the new attempt under the shared key.
+  it('keeps a retry registered when the previous attempt of the same task exits', async () => {
+    const m = manifest();
+    const child1 = new FakeChildProcess();
+    const child2 = new FakeChildProcess();
+    const runner = runnerSpawning(child1, child2);
+
+    const first = await runner.spawn(baseOpts(m));
+    const retry = await runner.spawn(baseOpts(m));
+    child1.emit('close', 1);
+
+    expect(retry.id).not.toBe(first.id);
+    expect(runner.activeCount).toBe(1);
+    runner.stop(retry.id);
+    expect(child2.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('gives tasks that share an 8-character id prefix distinct sessions', async () => {
+    const m = manifest();
+    const child1 = new FakeChildProcess();
+    const child2 = new FakeChildProcess();
+    const runner = runnerSpawning(child1, child2);
+
+    const a = await runner.spawn({ ...baseOpts(m), taskId: 'task-1234-abcd' });
+    const b = await runner.spawn({ ...baseOpts(m), taskId: 'task-1234-wxyz' });
+
+    expect(a.id).not.toBe(b.id);
+    expect(runner.activeCount).toBe(2);
+    runner.stop(a.id);
+    expect(child1.kill).toHaveBeenCalled();
+    expect(child2.kill).not.toHaveBeenCalled();
   });
 
   it('forwards write() to the child stdin', async () => {

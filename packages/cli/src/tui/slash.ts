@@ -25,6 +25,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'approve', usage: '/approve', description: 'Approve the drafted plan', category: 'planning' },
   { name: 'run', usage: '/run', description: 'Execute the approved plan', category: 'planning' },
   { name: 'stop', usage: '/stop', description: 'Stop the planner or the running execution, whichever is active', category: 'planning' },
+  { name: 'handoff', usage: '/handoff [review|merge|discard|cleanup]', description: "Land an isolated run's branch: review it, merge it into yours, or discard it", category: 'planning' },
 
   // Tasks
   { name: 'add-task', usage: '/add-task <title>', description: 'Add a task to the current plan', category: 'tasks' },
@@ -58,6 +59,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 
   // Sessions
   { name: 'sessions', usage: '/sessions', description: 'List saved sessions', category: 'session' },
+  { name: 'fork', usage: '/fork', description: 'Continue in a copy of this conversation and its tasks; the original stays as it is', category: 'session' },
+  { name: 'compact', usage: '/compact', description: 'Condense this conversation into a summary; the last two exchanges and all tasks are kept', category: 'session' },
+  { name: 'rewind', usage: '/rewind [<message>]', description: 'Rewind the conversation to just before one of your messages (tasks are kept)', category: 'session' },
   { name: 'new', usage: '/new', description: 'Start a new session', category: 'session' },
   { name: 'save', usage: '/save', description: 'Save the current session', category: 'session' },
   { name: 'load', usage: '/load <id>', description: 'Load a saved session', category: 'session' },

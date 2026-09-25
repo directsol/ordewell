@@ -1,6 +1,8 @@
 import { WebSocket } from 'ws';
 import {
   Session,
+  ConversationBusyError,
+  type ConversationCompaction,
   type SessionMessage,
   type SessionRuntimeSettings,
   ModelResolver,
@@ -58,6 +60,8 @@ export class OrchestratorPool {
   private clients = new Map<string, Set<WebSocket>>();
   /** The in-flight planning turn's abort controller, one per session — see `cancelPlanning`. */
   private planningAborts = new Map<string, AbortController>();
+  /** Sessions whose planning slot a compaction holds; a reply must not take it over. */
+  private compacting = new Set<string>();
   private registry: CoreRunnerRegistry = (() => { const r = new RunnerRegistry(); r.loadUserPlugins(); return r; })();
   private modelResolver: ModelResolver;
   private runnerInstallation = new RunnerInstallation(this.registry);
@@ -476,13 +480,40 @@ export class OrchestratorPool {
     }
   }
 
-  /** Continue the planner dialogue with the user's reply. */
+  /**
+   * Continue the planner dialogue with the user's reply. Refused during a
+   * compaction before the abort slot is touched: the session refuses the reply
+   * too, but by then the compaction's controller would be gone and a stop could
+   * no longer reach its summary turn.
+   */
   async continuePlanning(sessionId: string, message: string): Promise<LegacyPlanState> {
+    if (this.compacting.has(sessionId)) throw new ConversationBusyError('send a message');
     const controller = new AbortController();
     this.planningAborts.set(sessionId, controller);
     try {
       return await this.session(sessionId).continueConversation(message, { signal: controller.signal });
     } finally {
+      this.clearPlanningAbort(sessionId, controller);
+    }
+  }
+
+  /**
+   * Condense a session's conversation. The summary turn is a planning turn as
+   * far as a surface is concerned, so it registers the same abort controller
+   * and `cancelPlanning` stops it — but only when no turn holds that slot
+   * already: taking it over would leave the reply in flight beyond stopping.
+   */
+  async compactConversation(sessionId: string): Promise<ConversationCompaction & { plan: LegacyPlanState }> {
+    const session = this.session(sessionId);
+    if (this.planningAborts.has(sessionId)) throw new ConversationBusyError('condense the conversation');
+    const controller = new AbortController();
+    this.planningAborts.set(sessionId, controller);
+    this.compacting.add(sessionId);
+    try {
+      const compaction = await session.compactConversation(controller.signal);
+      return { ...compaction, plan: session.planState! };
+    } finally {
+      this.compacting.delete(sessionId);
       this.clearPlanningAbort(sessionId, controller);
     }
   }
@@ -533,6 +564,17 @@ export class OrchestratorPool {
     this.sessions.set(sessionId, session);
 
     return session.planState ?? saved.plan;
+  }
+
+  /**
+   * Fork a session's conversation into a new session and adopt it, so the
+   * fork is addressable at once — through the same path a saved session is
+   * adopted by, reading back the file the fork was written to. The original
+   * keeps running, or planning, untouched.
+   */
+  forkConversation(sessionId: string): { sessionId: string; goal: string; plan: LegacyPlanState } {
+    const fork = this.session(sessionId).forkConversation();
+    return { sessionId: fork.sessionId, goal: fork.goal, plan: this.adoptSavedSession(fork.sessionId, fork.workspace) };
   }
 
   /**

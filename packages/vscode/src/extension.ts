@@ -9,6 +9,7 @@ import { VsCodeTerminalRunner } from './adapters/VsCodeTerminalRunner';
 import { registerCommands } from './commands/CommandRegistry';
 import { handleSlashCommand, isKnownSlashCommand } from './commands/SlashParser';
 import { handleStartPlanning, handleContinueConversation, handleModifyPlan, handleApprovePlan, handleSendMessage, handleSystemCommand, handleSessionMessage, findTask, handleMergePlan, handleSplitPlan } from './plan/PlanManager';
+import { handleIsolationAction, replayIsolation } from './plan/isolation';
 import { classifyTaskEdit, parseTaskDraft, removalPrompt } from './plan/taskEdit';
 import { recallPlannerModel } from './plan/PlannerModelSwitch';
 import { saveCurrentSession, restoreState, persistState } from './state/StatePersistence';
@@ -559,6 +560,7 @@ function setupChatListener(context: vscode.ExtensionContext): void {
         if (currentPlan.tasks.length > 0) {
           chatProvider.showPlan(currentPlan);
           if (currentGoal) chatProvider.setGoal(currentGoal);
+          replayIsolation(session, chatProvider);
         } else {
           chatProvider.setState('empty');
         }
@@ -770,6 +772,12 @@ function setupChatListener(context: vscode.ExtensionContext): void {
 
       case 'sendSystemCommand':
         await handleSystemCommand(msg.command, msg.taskId ?? '', planDeps());
+        break;
+
+      // Review / merge / discard / clean up / resolve a conflict. All the domain
+      // work and the host modals live in plan/isolation.ts.
+      case 'isolationAction':
+        await handleIsolationAction(msg.action, msg.taskId, planDeps());
         break;
 
       case 'toggleSkill':

@@ -25,6 +25,8 @@ export interface ConversationRequest {
   runnerModes?: Record<RunnerId, RunnerModeInfo[]>;
   autonomousDefault?: boolean;
   verificationEnabled?: boolean;
+  /** Tasks will each run in their own worktree (ADR-0013), so the prompt drops file-overlap ordering. */
+  isolatedExecution?: boolean;
   signal?: AbortSignal;
   /**
    * Persisted dialogue to seed a resumed conversation (session reload). The
@@ -94,6 +96,14 @@ export interface IAiService {
    * `continueConversation`, restart instead so the new model takes effect.
    */
   conversationMatchesConfig?(): boolean;
+
+  /**
+   * Optional: prune bulky raw tool output out of the live conversation, in
+   * place, keeping subagent digests. Returns the characters removed. Absent
+   * where the backend holds no tool transcript to prune (a harness planner's
+   * agent owns its own context).
+   */
+  pruneContext?(): number;
 
   /**
    * One-shot research + plan for non-conversational surfaces (CLI `plan --goal`,

@@ -46,8 +46,26 @@ export interface TaskView {
     thinkingEffort?: string;
     availableVariants?: string[];
   };
+  /** Absent until the daemon reports a task's isolation; quiet in the pane unless there is a conflict. */
+  isolation?: TaskIsolationView;
   /** Child tasks, recursively shaped the same way; absent until populated by `toTaskView`. */
   subtasks?: TaskView[];
+}
+
+/** Where a task's isolated work stands (ADR-0013); `none` is a task with no worktree in a run that has some. */
+export type TaskIsolationState = 'none' | 'active' | 'integrated' | 'conflict' | 'kept';
+
+export interface TaskIsolationView {
+  state: TaskIsolationState;
+  branch?: string;
+  worktree?: string;
+}
+
+/** What an isolated run left for the user to land: one branch, what is on it, and where it forked. */
+export interface HandoffView {
+  branch: string;
+  baseRef: string;
+  landed: { taskId: string; order: number; title: string }[];
 }
 
 /** One mode a runner's manifest declares, as the mode picker offers it. */
@@ -57,6 +75,13 @@ export interface ModeView {
   description?: string;
   /** Tagged `autonomous: true` on the manifest — runs without permission prompts. */
   autonomous?: boolean;
+}
+
+/** A user message `/rewind` can land just before — `index` is its transcript position. */
+export interface RewindTargetView {
+  index: number;
+  preview: string;
+  timestamp: string;
 }
 
 export interface RunnerView {
@@ -114,6 +139,8 @@ export type PickerAction =
   | { kind: 'set-key' }
   | { kind: 'load-session' }
   | { kind: 'delete-session' }
+  | { kind: 'rewind' }
+  | { kind: 'isolation-blocked' }
   | { kind: 'set-runners' }
   | { kind: 'choose-allowlist-runner' }
   | { kind: 'set-allowlist'; runner: string }
@@ -167,6 +194,11 @@ export type Overlay =
   | { kind: 'help'; scroll?: number }
   | { kind: 'approval'; request: ApprovalRequestView }
   | { kind: 'picker'; picker: PickerState }
+  /**
+   * The end-of-run handoff. `index` is the highlighted action; `diff` replaces
+   * the action list while the integration branch's diff is being read.
+   */
+  | { kind: 'handoff'; index: number; diff: { lines: string[]; scroll: number } | null }
   | { kind: 'prompt'; title: string; hint?: string; value: string; action: PromptAction }
   | { kind: 'confirm'; title: string; message: string; action: ConfirmAction };
 
@@ -179,6 +211,8 @@ export type PromptAction =
 export type ConfirmAction =
   | { kind: 'new-session' }
   | { kind: 'remove-task'; taskId: string }
+  | { kind: 'merge-run' }
+  | { kind: 'discard-run' }
   | { kind: 'init-workspace'; goal: string; workspace: string };
 
 export type Focus = 'chat' | 'plan';
@@ -235,6 +269,8 @@ export interface TuiState {
   skills: Skills;
   runners: RunnerView[];
   sessions: SessionView[];
+  /** The open `/rewind` picker's rows; `null` until the daemon has answered. */
+  rewindTargets: RewindTargetView[] | null;
   models: ModelView[];
   /** Each runner's manifest modes, keyed by runner id — a task's mode picker reads its own runner's list. */
   modesByRunner: Record<string, ModeView[]>;
@@ -272,6 +308,8 @@ export interface TuiState {
    */
   selection: Selection | null;
   workspace: string;
+  /** The isolated run awaiting a decision, if any. Cleared once it is discarded. */
+  handoff: HandoffView | null;
   overlay: Overlay | null;
   /**
    * Approval prompts not yet shown. The planner blocks on each one, so they are
@@ -365,6 +403,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
     skills: noSkills(),
     runners: [],
     sessions: [],
+    rewindTargets: null,
     models: [],
     modesByRunner: {},
     orchestratorModels: [],
@@ -378,6 +417,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
     mouseCapture: true,
     selection: null,
     workspace: process.cwd(),
+    handoff: null,
     overlay: null,
     pendingApprovals: [],
     toast: '',
