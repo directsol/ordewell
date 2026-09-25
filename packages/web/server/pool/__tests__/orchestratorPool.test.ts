@@ -158,6 +158,51 @@ describe('OrchestratorPool.forkConversation', () => {
   });
 });
 
+describe('OrchestratorPool.rewindConversation', () => {
+  let workspace: string;
+  let pool: OrchestratorPool;
+  const conversation = {
+    conversationHistory: [
+      { role: 'user' as const, content: 'Rate limiting', timestamp: '2026-07-21T10:00:00.000Z' },
+      { role: 'assistant' as const, content: 'Plan generated with 2 tasks.', timestamp: '2026-07-21T10:00:01.000Z', kind: 'plan_generated' as const },
+      { role: 'user' as const, content: 'Per user, not per IP\nand burst to 20', timestamp: '2026-07-21T10:00:02.000Z' },
+      { role: 'assistant' as const, content: 'Updated.', timestamp: '2026-07-21T10:00:03.000Z' },
+    ],
+  };
+
+  beforeEach(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'ordewell-pool-'));
+    mkdirSync(join(workspace, '.git'));
+    pool = new OrchestratorPool();
+  });
+
+  afterEach(() => {
+    pool.destroyAll();
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  it('adopts the fork it makes, beside the untouched original, and answers the rewound message', () => {
+    const meta = saveSession(savedPlan(conversation), 'Rate limiting', workspace, 'session-saved');
+    pool.adoptSavedSession(meta.id, workspace);
+
+    const fork = pool.rewindConversation(meta.id, 2);
+
+    expect(fork.sessionId).not.toBe('session-saved');
+    expect(pool.hasSession(fork.sessionId)).toBe(true);
+    expect(pool.session(fork.sessionId).sessionId).toBe(fork.sessionId);
+    expect(fork.goal).toBe('Rate limiting');
+    expect(fork.rewoundMessage).toBe('Per user, not per IP\nand burst to 20');
+    expect(fork.plan.conversationHistory).toEqual(conversation.conversationHistory.slice(0, 2));
+    expect(fork.plan.tasks.map((t) => t.id)).toEqual(['t1', 't2']);
+    expect(pool.session('session-saved').planState!.conversationHistory).toHaveLength(4);
+    expect(listSessions(workspace).map((m) => m.id).sort()).toEqual([fork.sessionId, 'session-saved'].sort());
+  });
+
+  it('refuses a session the pool never adopted', () => {
+    expect(() => pool.rewindConversation('session-nope', 2)).toThrow('Session not found');
+  });
+});
+
 describe('OrchestratorPool.compactConversation', () => {
   let workspace: string;
   let pool: OrchestratorPool;

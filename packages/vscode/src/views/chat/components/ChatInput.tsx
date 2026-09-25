@@ -94,7 +94,7 @@ const COMMAND_SUGGESTIONS: SlashSuggestion[] = [
   { label: '/sessions', detail: 'Browse and load saved sessions', insertText: '/sessions' },
   { label: '/new', detail: 'Start a new session (clears current plan)', insertText: '/new' },
   { label: '/fork', detail: 'Continue in a copy of this conversation and its tasks; the original stays as it is', insertText: '/fork' },
-  { label: '/rewind', detail: 'Rewind the conversation to just before one of your messages (tasks are kept)', insertText: '/rewind' },
+  { label: '/rewind', detail: 'Fork the conversation from just before one of your messages (the original is kept)', insertText: '/rewind' },
   { label: '/compact', detail: 'Condense this conversation into a summary; the last two exchanges and all tasks are kept', insertText: '/compact' },
   { label: '/allowlist', detail: 'Restrict which models the planner may auto-assign per runner', insertText: '/allowlist' },
   { label: '/refresh', detail: 'Re-discover runner models (e.g. after enabling an opencode backend)', insertText: '/refresh' },

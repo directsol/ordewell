@@ -307,7 +307,7 @@ export default function App() {
           break;
         }
 
-        // A rewind or compaction edited the dialogue mid-session. Unlike
+        // A compaction edited the dialogue mid-session. Unlike
         // restoreChat this must not clear the plan or a running task's output.
         case 'conversationReplaced':
           setError('');

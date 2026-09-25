@@ -15,17 +15,17 @@ const HISTORY = [
 ];
 
 function setup(overrides: { generating?: boolean; executing?: boolean } = {}) {
-  const rewound = { status: 'draft', tasks: [], conversationHistory: HISTORY };
+  const current = { status: 'draft', tasks: [], conversationHistory: HISTORY };
   const session = {
     sessionId: 'sess-original',
     isExecuting: overrides.executing ?? false,
-    planState: rewound,
+    planState: current,
     forkConversation: vi.fn(() => ({ sessionId: 'sess-fork', goal: 'the goal', workspace: '/ws' })),
     rewindTargets: vi.fn(() => [
       { index: 2, preview: 'first follow-up', timestamp: 't2' },
       { index: 4, preview: 'second follow-up', timestamp: 't4' },
     ]),
-    rewindConversation: vi.fn(() => rewound),
+    rewindConversation: vi.fn(() => ({ sessionId: 'sess-rewound', goal: 'the goal', workspace: '/ws', rewoundMessage: 'first follow-up\nin full' })),
     compactConversation: vi.fn(async () => ({ summary: 'the summary', keptMessages: 4 })),
   };
   const chatProvider = {
@@ -42,7 +42,7 @@ function setup(overrides: { generating?: boolean; executing?: boolean } = {}) {
     persistState,
     isGeneratingPlan: () => overrides.generating ?? false,
   } as unknown as ConversationDeps;
-  return { deps, session, chatProvider, setCurrentPlan, persistState, rewound };
+  return { deps, session, chatProvider, setCurrentPlan, persistState };
 }
 
 beforeEach(() => {
@@ -100,15 +100,18 @@ describe('rewind', () => {
     expect(items.map((i) => i.label)).toEqual(['4  second follow-up', '2  first follow-up']);
   });
 
-  it('rewinds to the picked message and rehydrates the chat and persisted state', async () => {
+  it('forks from just before the picked message, switches to the fork, and says the original is kept', async () => {
     showQuickPick.mockImplementation(async (items: { index: number }[]) => items.find((i) => i.index === 2));
-    const { deps, session, chatProvider, setCurrentPlan, persistState, rewound } = setup();
+    const { deps, session, chatProvider } = setup();
     await rewindConversation(deps);
 
     expect(session.rewindConversation).toHaveBeenCalledWith(2);
-    expect(setCurrentPlan).toHaveBeenCalledWith(rewound);
-    expect(chatProvider.replaceConversation).toHaveBeenCalledWith(HISTORY, false);
-    expect(persistState).toHaveBeenCalledTimes(1);
+    expect(executeCommand).toHaveBeenCalledWith('ordewell.loadSessionById', 'sess-rewound');
+    expect(chatProvider.replaceConversation).not.toHaveBeenCalled();
+    const notice = showInformationMessage.mock.calls[0][0] as string;
+    expect(notice).toContain('sess-original');
+    expect(notice).toContain('sess-rewound');
+    expect(notice).toMatch(/original.*kept/i);
   });
 
   it('skips the picker when given a number', async () => {
@@ -121,12 +124,11 @@ describe('rewind', () => {
 
   it('changes nothing when the picker is cancelled', async () => {
     showQuickPick.mockResolvedValue(undefined);
-    const { deps, session, chatProvider, persistState } = setup();
+    const { deps, session } = setup();
     await rewindConversation(deps);
 
     expect(session.rewindConversation).not.toHaveBeenCalled();
-    expect(chatProvider.replaceConversation).not.toHaveBeenCalled();
-    expect(persistState).not.toHaveBeenCalled();
+    expect(executeCommand).not.toHaveBeenCalled();
   });
 
   it('says so when the goal is the only message', async () => {
@@ -146,21 +148,32 @@ describe('rewind', () => {
     expect(showWarningMessage.mock.calls[0][0]).toContain('Usage: /rewind');
   });
 
-  it('surfaces a refused rewind through the chat error and leaves the chat alone', async () => {
-    const { deps, session, chatProvider, persistState } = setup();
+  it('surfaces a refused rewind through the chat error and stays in the session', async () => {
+    const { deps, session, chatProvider } = setup();
     session.rewindConversation.mockImplementation(() => { throw new ConversationEditError('No user message at position 9 to rewind to.'); });
     await rewindConversation(deps, '9');
 
     expect(chatProvider.showError).toHaveBeenCalledWith(expect.stringContaining('No user message at position 9'));
-    expect(chatProvider.replaceConversation).not.toHaveBeenCalled();
-    expect(persistState).not.toHaveBeenCalled();
+    expect(executeCommand).not.toHaveBeenCalled();
   });
 
-  it('is allowed while a run is executing', async () => {
+  it('asks before switching away from a run in progress, and forks nothing if declined', async () => {
+    showWarningMessage.mockResolvedValue(undefined);
+    const { deps, session } = setup({ executing: true });
+    await rewindConversation(deps, '2');
+
+    expect(showWarningMessage.mock.calls[0][1]).toMatchObject({ modal: true });
+    expect(session.rewindConversation).not.toHaveBeenCalled();
+    expect(executeCommand).not.toHaveBeenCalled();
+  });
+
+  it('rewinds mid-run when the user accepts stopping the run', async () => {
+    showWarningMessage.mockResolvedValue('Fork and stop the run');
     const { deps, session } = setup({ executing: true });
     await rewindConversation(deps, '2');
 
     expect(session.rewindConversation).toHaveBeenCalledWith(2);
+    expect(executeCommand).toHaveBeenCalledWith('ordewell.loadSessionById', 'sess-rewound');
   });
 });
 

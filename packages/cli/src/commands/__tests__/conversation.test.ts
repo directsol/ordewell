@@ -111,6 +111,7 @@ describe('ordewell rewind', () => {
     expect(stdout).toMatch(/2\s+JSON only/);
     expect(stdout.indexOf('Streaming')).toBeLessThan(stdout.indexOf('JSON only'));
     expect(stdout).toMatch(/ordewell rewind <n>/);
+    expect(stdout).toMatch(/fork/);
   });
 
   it('says so when there is nothing to rewind to', async () => {
@@ -123,8 +124,13 @@ describe('ordewell rewind', () => {
     expect(stdout).toMatch(/Nothing to rewind to/);
   });
 
-  it('rewinds to just before message n', async () => {
-    const srv = await daemon(({ url }) => url.includes('/load') ? { body: adopted } : { body: { plan: { tasks: [], conversationHistory: [] } } });
+  it('forks from just before message n, makes the fork current, and prints the rewound message to resend', async () => {
+    const rewound = {
+      sessionId: 'session-fork', goal: 'build me a parser',
+      plan: { tasks: [], runners: ['claude-code'], conversationHistory: [] },
+      rewoundMessage: 'Streaming\nand resumable after a crash',
+    };
+    const srv = await daemon(({ url }) => url.includes('/load') ? { body: adopted } : { body: rewound });
     const { handleRewind } = await import('../conversation');
 
     const { stdout, exitCode } = await capture(() => handleRewind(['4', '--workspace', '/tmp/ws'], new ApiClient(srv.port)));
@@ -132,8 +138,12 @@ describe('ordewell rewind', () => {
 
     expect(exitCode).toBeNull();
     const rewind = srv.hits.find((h) => h.url.endsWith('/conversation/rewind'))!;
+    expect(rewind.url).toBe('/api/plans/session-1/conversation/rewind');
     expect(JSON.parse(rewind.body)).toEqual({ index: 4 });
-    expect(stdout).toMatch(/Rewound/);
+    expect(saved).toEqual([['session-fork', 'build me a parser', ['claude-code'], '/tmp/ws']]);
+    expect(stdout).toMatch(/Forked session-1 into session-fork from just before message 4/);
+    expect(stdout).toContain('ordewell sessions load session-1');
+    expect(stdout).toContain('Streaming\nand resumable after a crash');
   });
 
   it.each(['abc', '-1', '2.5'])('refuses %s without calling the daemon', async (arg) => {
@@ -159,6 +169,21 @@ describe('ordewell rewind', () => {
 
     expect(exitCode).toBe(1);
     expect(stderr).toMatch(/No user message at position 3/);
+    expect(saved).toEqual([]);
+  });
+
+  it('reports a rewind refused mid-turn and leaves the current session alone', async () => {
+    const srv = await daemon(({ url }) => url.includes('/load')
+      ? { body: adopted }
+      : { status: 409, body: { error: 'Cannot rewind the conversation while the planner is answering' } });
+    const { handleRewind } = await import('../conversation');
+
+    const { stderr, exitCode } = await capture(() => handleRewind(['2', '--workspace', '/tmp/ws'], new ApiClient(srv.port)));
+    srv.close();
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toMatch(/planner is answering/);
+    expect(saved).toEqual([]);
   });
 });
 

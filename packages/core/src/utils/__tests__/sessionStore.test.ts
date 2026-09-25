@@ -54,6 +54,19 @@ describe('sessionStore', () => {
       expect(listSessions(tmpDir).map((m) => m.id).sort()).toEqual(['session-aaaaaaaaaaaaaaaa', 'session-bbbbbbbbbbbbbbbb']);
     });
 
+    // What a fork or a rewind relies on: writing the new session never rewrites the one it came from.
+    it('leaves another session\'s file byte for byte when a session with the same goal is saved beside it', () => {
+      const plan = { ...createEmptyPlan(), runners: ['claude-code'], tasks: [], generatedAt: '2026-01-01T00:00:00.000Z' };
+      const sessionsDir = path.join(tmpDir, '.ordewell', 'sessions');
+      saveSession(plan, 'Same goal', tmpDir, 'session-aaaaaaaaaaaaaaaa');
+      const [original] = fs.readdirSync(sessionsDir);
+      const bytes = fs.readFileSync(path.join(sessionsDir, original));
+
+      saveSession({ ...plan, conversationHistory: [] }, 'Same goal', tmpDir, 'session-bbbbbbbbbbbbbbbb');
+
+      expect(fs.readFileSync(path.join(sessionsDir, original)).equals(bytes)).toBe(true);
+    });
+
     it('rewrites a session saved under the older file name instead of leaving a duplicate', () => {
       const plan = { ...createEmptyPlan(), runners: ['claude-code'], tasks: [], generatedAt: '2026-01-01T00:00:00.000Z' };
       const sessionsDir = path.join(tmpDir, '.ordewell', 'sessions');

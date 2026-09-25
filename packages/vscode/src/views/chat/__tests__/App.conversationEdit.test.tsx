@@ -19,13 +19,13 @@ const plan = {
 
 const textarea = () => document.querySelector('.chat-input-row textarea') as HTMLTextAreaElement;
 
-describe('App — rewind and compact redraw the transcript', () => {
+describe('App — a compaction redraws the transcript', () => {
   beforeEach(() => render(<App />));
 
   it('replaces the transcript but keeps the plan and its task output', () => {
     send({ type: 'restoreChat', hasPlan: true, history: [
       { role: 'user', content: 'the goal', timestamp: '2026-01-01T00:00:00Z' },
-      { role: 'user', content: 'a message about to be rewound', timestamp: '2026-01-01T00:00:01Z' },
+      { role: 'user', content: 'a message about to be condensed', timestamp: '2026-01-01T00:00:01Z' },
     ] });
     send({ type: 'planUpdated', plan });
     send({ type: 'taskOutput', taskId: 't1', text: 'still running output' });
@@ -34,7 +34,7 @@ describe('App — rewind and compact redraw the transcript', () => {
       { role: 'user', content: 'the goal', timestamp: '2026-01-01T00:00:00Z' },
     ] });
 
-    expect(screen.queryByText('a message about to be rewound')).toBeNull();
+    expect(screen.queryByText('a message about to be condensed')).toBeNull();
     expect(screen.getByText('the goal')).toBeTruthy();
     expect(screen.getByText('Only task')).toBeTruthy();
     expect(document.body.textContent).toContain('still running output');

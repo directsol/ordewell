@@ -1,14 +1,16 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { createTask, type ConversationMessage, type LegacyPlanState } from '../../models/Task';
 import * as sessionStore from '../../utils/sessionStore';
 import type { ConversationTurn, IAiService } from '../AiService';
-import type { SessionMessage } from '../SessionMessage';
 import { ConversationBusyError, ConversationEditError } from '../PlannerConversation';
-import { makeSession, testWorkspace } from './sessionTestKit';
+import { makeSession, type SessionOverrides } from './sessionTestKit';
 
 const GOAL = 'build me a parser';
 
-/** Two tasks — the second created by the turn a rewind to index 2 discards. */
+/** Two tasks — the second created by the turn a rewind to index 2 forks from before. */
 function plannedDialogue(): LegacyPlanState {
   return {
     tasks: [
@@ -22,8 +24,12 @@ function plannedDialogue(): LegacyPlanState {
     conversationHistory: [
       { role: 'user', content: GOAL, timestamp: '2026-01-01T00:00:00Z' },
       { role: 'assistant', content: 'Plan generated with 1 task.', timestamp: '2026-01-01T00:00:01Z', kind: 'plan_generated' },
-      { role: 'user', content: 'add streaming', timestamp: '2026-01-01T00:00:02Z' },
+      { role: 'user', content: 'add streaming\nbut keep the reader pull-based', timestamp: '2026-01-01T00:00:02Z' },
       { role: 'assistant', content: 'Tasks updated:\n- added #2', timestamp: '2026-01-01T00:00:03Z' },
+    ],
+    researchLog: [
+      { id: 'up-1', type: 'user_prompt', content: GOAL, timestamp: '2026-01-01T00:00:00Z' },
+      { id: 'up-2', type: 'user_prompt', content: 'add streaming', timestamp: '2026-01-01T00:00:02Z' },
     ],
   };
 }
@@ -55,8 +61,8 @@ function apiStylePlanner() {
 
 /**
  * A harness planner (ADR-0009): a coding agent that resumes its own native
- * session when it still holds an id for one — which would bring the discarded
- * turns back no matter what transcript Ordewell replays.
+ * session when it still holds an id for one — which would bring the turns the
+ * fork left out back no matter what transcript Ordewell replays.
  */
 function harnessStylePlanner() {
   const state = { nativeSessionId: null as string | null, live: false, starts: [] as { resumedNative: string | null; replayed: string[] }[] };
@@ -75,96 +81,130 @@ function harnessStylePlanner() {
 }
 
 describe('Session.rewindConversation', () => {
-  it('truncates the conversation, keeps every task, and persists and broadcasts the result', () => {
-    const broadcast = vi.fn<(msg: SessionMessage) => void>();
-    const session = makeSession({ broadcast });
-    session.loadPlan(plannedDialogue(), GOAL, testWorkspace, { persist: false });
+  let workspace: string;
+
+  beforeEach(() => {
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ordewell-rewind-'));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  });
+
+  const sessionsDir = () => path.join(workspace, '.ordewell', 'sessions');
+
+  /** A session adopted from the real store, so both sides are read back the way a surface reads them. */
+  function adoptedSession(overrides: SessionOverrides = {}) {
+    const session = makeSession(overrides);
+    vi.mocked(sessionStore.saveSession).mockRestore();
+    sessionStore.saveSession(plannedDialogue(), GOAL, workspace, 'session-original');
+    session.loadPlan(sessionStore.loadSession('session-original', workspace)!.plan, GOAL, workspace, { sessionId: 'session-original' });
+    return session;
+  }
+
+  /** A second Session adopting the fork, as a host does. */
+  function adoptFork(sessionId: string, overrides: SessionOverrides = {}) {
+    const adopted = makeSession(overrides);
+    adopted.loadPlan(sessionStore.loadSession(sessionId, workspace)!.plan, GOAL, workspace, { sessionId, persist: false });
+    return adopted;
+  }
+
+  it('persists a fork holding the conversation up to just before the message, and the current tasks', () => {
+    const session = adoptedSession();
+
+    const fork = session.rewindConversation(2);
+
+    expect(fork.sessionId).not.toBe('session-original');
+    expect(fork.goal).toBe(GOAL);
+    const saved = sessionStore.loadSession(fork.sessionId, workspace)!;
+    expect(saved.meta.goal).toBe(GOAL);
+    expect(saved.plan.conversationHistory).toEqual(plannedDialogue().conversationHistory!.slice(0, 2));
+    expect(saved.plan.researchLog!.map((e) => e.id)).toEqual(['up-1']);
+    expect(saved.plan.tasks.map((t) => t.id)).toEqual(['t1', 't2']);
+    expect(sessionStore.listSessions(workspace).map((m) => m.id).sort()).toEqual([fork.sessionId, 'session-original'].sort());
+  });
+
+  it('answers the full text of the message it rewound to', () => {
+    const fork = adoptedSession().rewindConversation(2);
+
+    expect(fork.rewoundMessage).toBe('add streaming\nbut keep the reader pull-based');
+  });
+
+  it('leaves the original session, its file byte for byte, and its live planner context untouched', () => {
+    const reset = vi.fn();
+    const session = adoptedSession({ aiService: { reset, hasActiveConversation: () => true } });
+    reset.mockClear();
+    const [file] = fs.readdirSync(sessionsDir());
+    const bytes = fs.readFileSync(path.join(sessionsDir(), file));
+    const history = structuredClone(session.planState!.conversationHistory);
 
     session.rewindConversation(2);
 
-    expect(session.planState!.conversationHistory!.map((m) => m.content)).toEqual([GOAL, 'Plan generated with 1 task.']);
+    expect(fs.readFileSync(path.join(sessionsDir(), file)).equals(bytes)).toBe(true);
+    expect(session.sessionId).toBe('session-original');
+    expect(session.planState!.conversationHistory).toEqual(history);
     expect(session.planTasks.map((t) => t.id)).toEqual(['t1', 't2']);
-    const saved = vi.mocked(sessionStore.saveSession).mock.calls.at(-1)![0];
-    expect(saved.conversationHistory).toHaveLength(2);
-    expect(saved.tasks.map((t) => t.id)).toEqual(['t1', 't2']);
-    const planEvent = broadcast.mock.calls.map(([m]) => m).filter((m) => m.type === 'plan_generated').at(-1);
-    expect(planEvent?.type === 'plan_generated' && planEvent.plan.conversationHistory).toHaveLength(2);
+    expect(reset).not.toHaveBeenCalled();
   });
 
   it('lists the rewind targets', () => {
-    const session = makeSession();
-    session.loadPlan(plannedDialogue(), GOAL, testWorkspace, { persist: false });
+    const session = adoptedSession();
 
     expect(session.rewindTargets()).toEqual([{ index: 2, preview: 'add streaming', timestamp: '2026-01-01T00:00:02Z' }]);
   });
 
-  it('refuses an index that is not a rewind target', () => {
-    const session = makeSession();
-    session.loadPlan(plannedDialogue(), GOAL, testWorkspace, { persist: false });
+  it('refuses an index that is not a rewind target, forking nothing', () => {
+    const session = adoptedSession();
 
     expect(() => session.rewindConversation(1)).toThrow(ConversationEditError);
-    expect(session.planState!.conversationHistory).toHaveLength(4);
+    expect(sessionStore.listSessions(workspace)).toHaveLength(1);
   });
 
   it('refuses while a planner turn is in flight', async () => {
     let finish: (turn: ConversationTurn) => void = () => {};
-    const session = makeSession({
+    const session = adoptedSession({
       aiService: {
         hasActiveConversation: () => true,
         continueConversation: vi.fn(() => new Promise<ConversationTurn>((resolve) => { finish = resolve; })),
       },
     });
-    session.loadPlan(plannedDialogue(), GOAL, testWorkspace, { persist: false });
 
     const turn = session.continueConversation('and CSV');
     expect(() => session.rewindConversation(2)).toThrow(ConversationBusyError);
 
     finish(reply('Noted'));
     await turn;
+    expect(() => session.rewindConversation(2)).not.toThrow();
   });
 
-  it('is allowed while tasks execute, and touches only the conversation', async () => {
-    const session = makeSession();
-    const plan = plannedDialogue();
-    // A human step keeps the scheduler armed after the AI tasks are handed out.
-    plan.tasks.push(createTask({ id: 't3', order: 3, title: 'Sign off', type: 'user', assignedRunner: 'claude-code' }));
-    session.loadPlan(plan, GOAL, testWorkspace, { persist: false });
-    await session.executePlan();
-    expect(session.isExecuting).toBe(true);
-    const statuses = session.planTasks.map((t) => t.status);
-
-    session.rewindConversation(2);
-
-    expect(session.isExecuting).toBe(true);
-    expect(session.planTasks.map((t) => t.status)).toEqual(statuses);
-    expect(session.planState!.conversationHistory).toHaveLength(2);
-    session.stopExecution();
+  it('refuses with no conversation to rewind', () => {
+    expect(() => makeSession().rewindConversation(2)).toThrow(ConversationEditError);
   });
 
-  it('replays the truncated transcript on the next message for an API planner', async () => {
+  it('replays the fork\'s transcript on its first message for a vendor API planner', async () => {
+    const fork = adoptedSession().rewindConversation(2);
     const { planner, state } = apiStylePlanner();
-    const session = makeSession({ aiService: planner });
-    session.loadPlan(plannedDialogue(), GOAL, testWorkspace, { persist: false });
-    // Live, holding every turn — including the ones the rewind discards.
-    state.context = [GOAL, 'Plan generated with 1 task.', 'add streaming', 'Tasks updated:\n- added #2'];
+    const adopted = adoptFork(fork.sessionId, { aiService: planner });
 
-    session.rewindConversation(2);
-    await session.continueConversation('add CSV instead');
+    await adopted.continueConversation('add CSV instead');
 
     expect(state.context!.slice(0, 2)).toEqual([GOAL, 'Plan generated with 1 task.']);
     expect(state.context).toHaveLength(3);
     expect(state.context![2].endsWith('add CSV instead')).toBe(true);
   });
 
-  it('replays the truncated transcript on the next message for a harness planner, without its native session', async () => {
+  it('replays the fork\'s transcript for a harness planner without resuming the original\'s native session', async () => {
+    const original = harnessStylePlanner();
+    const session = adoptedSession({ aiService: original.planner });
+    Object.assign(original.state, { nativeSessionId: 'native-1', live: true });
+    const fork = session.rewindConversation(2);
     const { planner, state } = harnessStylePlanner();
-    const session = makeSession({ aiService: planner });
-    session.loadPlan(plannedDialogue(), GOAL, testWorkspace, { persist: false });
-    Object.assign(state, { nativeSessionId: 'native-1', live: true });
+    const adopted = adoptFork(fork.sessionId, { aiService: planner });
 
-    session.rewindConversation(2);
-    await session.continueConversation('add CSV instead');
+    await adopted.continueConversation('add CSV instead');
 
     expect(state.starts).toEqual([{ resumedNative: null, replayed: [GOAL, 'Plan generated with 1 task.'] }]);
+    expect(original.state).toMatchObject({ nativeSessionId: 'native-1', live: true });
   });
 });

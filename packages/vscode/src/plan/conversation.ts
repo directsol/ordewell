@@ -56,7 +56,7 @@ export async function forkConversation(deps: ConversationDeps): Promise<void> {
 }
 
 /**
- * Both edits leave the tasks alone, so the webview only needs its transcript
+ * A compaction leaves the tasks alone, so the webview only needs its transcript
  * redrawn — `restoreChat` would also wipe the task output and isolation state
  * of a run that is still going.
  */
@@ -66,6 +66,10 @@ function showConversation(plan: NonNullable<Session['planState']>, deps: Convers
   deps.persistState();
 }
 
+/**
+ * A rewind is a fork from just before the chosen message, so it switches
+ * sessions the way `/fork` does — and asks first for the same reason.
+ */
 export async function rewindConversation(deps: ConversationDeps, arg?: string): Promise<void> {
   if (plannerIsAnswering(deps)) return;
   if (arg !== undefined && !/^\d+$/.test(arg)) {
@@ -84,13 +88,18 @@ export async function rewindConversation(deps: ConversationDeps, arg?: string): 
       }
       const picked = await vscode.window.showQuickPick(
         [...targets].reverse().map((t) => ({ label: `${t.index}  ${t.preview}`, index: t.index })),
-        { placeHolder: 'Rewind to before… (the chosen message and everything after it are discarded; the tasks stay as they are)' },
+        { placeHolder: 'Rewind to before… (forks the conversation from just before the chosen message; the original is kept)' },
       );
       if (!picked) return;
       index = picked.index;
     }
-    showConversation(deps.session.rewindConversation(index), deps);
-    void vscode.window.showInformationMessage('Rewound the conversation. The tasks are unchanged; your next message continues from here.');
+    if (!(await confirmLeavingRun(deps.session))) return;
+    const originalId = deps.session.sessionId;
+    const fork = deps.session.rewindConversation(index);
+    await vscode.commands.executeCommand('ordewell.loadSessionById', fork.sessionId);
+    void vscode.window.showInformationMessage(
+      `Rewound ${originalId} into a fork, ${fork.sessionId} — you are in the fork now, and the original is kept. Use /sessions to go back.`,
+    );
   } catch (err) {
     deps.chatProvider.showError(`Could not rewind the conversation: ${message(err)}`);
   }

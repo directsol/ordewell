@@ -8,6 +8,16 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Rewind forks the conversation instead of cutting it.** `/rewind` and
+  `ordewell rewind <n>` now copy the conversation up to just before the chosen
+  message, together with the current task list, into a new session and switch
+  to it. The original session keeps its whole conversation, so you can go back
+  with `/sessions` or `ordewell sessions load`. The message you rewound to is
+  returned in full — `ordewell rewind` prints it so you can resend or edit it.
+  Still refused while the planner is answering.
+
 ### Fixed
 
 - **The welcome no longer jumps from the top to the bottom at launch.** The chat

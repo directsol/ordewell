@@ -100,7 +100,7 @@ describe('fork, rewind and compact through the VS Code conversation module', () 
     fs.rmSync(workspace, { recursive: true, force: true });
   });
 
-  it('forks, rewinds the fork, then compacts it, leaving the original session file alone', async () => {
+  it('forks, rewinds the fork into a second fork, then compacts that, leaving the sessions it came from alone', async () => {
     const originalBefore = saved('session-original');
 
     await forkConversation(deps());
@@ -110,13 +110,14 @@ describe('fork, rewind and compact through the VS Code conversation module', () 
     expect(contents(saved(forkId))).toEqual(contents(originalBefore));
 
     await rewindConversation(deps(), '6');
-    expect(contents(saved(forkId))).toEqual(contents(originalBefore).slice(0, 6));
-    expect(chat.replaceConversation).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({ content: 'Noted.' })]), true);
-    expect(chat.replaceConversation.mock.lastCall![0]).toHaveLength(6);
-    expect(saved(forkId).tasks.map((t) => t.id)).toEqual(['t1']);
+    const rewoundId = current.sessionId;
+    expect(rewoundId).not.toBe(forkId);
+    expect(contents(saved(rewoundId))).toEqual(contents(originalBefore).slice(0, 6));
+    expect(saved(rewoundId).tasks.map((t) => t.id)).toEqual(['t1']);
+    expect(contents(saved(forkId))).toEqual(contents(originalBefore));
 
     await compactConversation(deps());
-    const condensed = saved(forkId).conversationHistory!;
+    const condensed = saved(rewoundId).conversationHistory!;
     expect(condensed[0]).toMatchObject({ kind: 'compaction' });
     expect(condensed[0].content).toContain(SUMMARY);
     expect(condensed.slice(1).map((m) => m.content)).toEqual(['add streaming', 'Tasks updated.', 'keep it dependency-free', 'Noted.']);
@@ -124,7 +125,8 @@ describe('fork, rewind and compact through the VS Code conversation module', () 
 
     await rewindConversation(deps(), '0');
     expect(chat.showError).toHaveBeenCalledWith(expect.stringMatching(/Could not rewind.*condensed/));
-    expect(saved(forkId).conversationHistory).toEqual(condensed);
+    expect(current.sessionId).toBe(rewoundId);
+    expect(saved(rewoundId).conversationHistory).toEqual(condensed);
 
     expect(saved('session-original')).toEqual(originalBefore);
   });

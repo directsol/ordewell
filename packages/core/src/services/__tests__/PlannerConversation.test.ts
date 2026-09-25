@@ -139,22 +139,28 @@ function threeTurnPlan(): LegacyPlanState {
   };
 }
 
-describe('PlannerConversation rewind', () => {
-  it('truncates to just before the chosen user message, persists once, and drops the live context', async () => {
+describe('PlannerConversation cloneBefore', () => {
+  it('copies the dialogue as it stood just before the chosen user message, with that message in full, touching nothing', () => {
     const ai = fakeAi();
-    const { conversation, state, host } = fakeHost(ai, threeTurnPlan());
+    const plan = threeTurnPlan();
+    plan.conversationHistory![2] = { role: 'user', content: 'JSON only\nand no YAML, ever', timestamp: '2026-01-01T00:00:02Z' };
+    const { conversation, state, host } = fakeHost(ai, plan);
+    const before = structuredClone(plan);
 
-    conversation.rewind(2);
+    const { dialogue, rewoundMessage } = conversation.cloneBefore(2);
+    dialogue.conversationHistory[0].content = 'edited in the copy';
 
-    expect(state.plan!.conversationHistory!.map((m) => m.content)).toEqual(['build me a parser', 'Which file formats?']);
-    expect(state.plan!.researchLog!.map((e) => e.id)).toEqual(['up-1']);
-    expect(state.persists).toBe(1);
-    expect(host.broadcastPlan).toHaveBeenCalled();
-    expect(ai.reset).toHaveBeenCalledTimes(1);
+    expect(dialogue.conversationHistory.map((m) => m.content)).toEqual(['edited in the copy', 'Which file formats?']);
+    expect(dialogue.researchLog.map((e) => e.id)).toEqual(['up-1']);
+    expect(rewoundMessage).toBe('JSON only\nand no YAML, ever');
+    expect(state.plan).toEqual(before);
+    expect(state.persists).toBe(0);
+    expect(host.broadcastPlan).not.toHaveBeenCalled();
+    expect(ai.reset).not.toHaveBeenCalled();
   });
 });
 
-describe('PlannerConversation rewind refusals', () => {
+describe('PlannerConversation cloneBefore refusals', () => {
   it.each([
     ['the opening goal', 0],
     ['an assistant message', 3],
@@ -163,7 +169,7 @@ describe('PlannerConversation rewind refusals', () => {
     const ai = fakeAi();
     const { conversation, state } = fakeHost(ai, threeTurnPlan());
 
-    expect(() => conversation.rewind(index)).toThrow(ConversationEditError);
+    expect(() => conversation.cloneBefore(index)).toThrow(ConversationEditError);
 
     expect(state.plan!.conversationHistory).toHaveLength(6);
     expect(state.persists).toBe(0);
@@ -177,12 +183,12 @@ describe('PlannerConversation rewind refusals', () => {
 
     const turn = conversation.reply('Also CSV');
     expect(conversation.isTurnInFlight).toBe(true);
-    expect(() => conversation.rewind(2)).toThrow(ConversationBusyError);
+    expect(() => conversation.cloneBefore(2)).toThrow(ConversationBusyError);
 
     finish({ kind: 'message', text: 'Noted', researchLog: [] });
     await turn;
     expect(conversation.isTurnInFlight).toBe(false);
-    expect(() => conversation.rewind(2)).not.toThrow();
+    expect(() => conversation.cloneBefore(2)).not.toThrow();
   });
 
   it('clears the in-flight flag when a turn fails', async () => {
@@ -590,7 +596,7 @@ describe('PlannerConversation compact refusals', () => {
     const { conversation } = fakeHost(ai, threeTurnPlan());
 
     const compacting = conversation.compact();
-    expect(() => conversation.rewind(2)).toThrow(ConversationBusyError);
+    expect(() => conversation.cloneBefore(2)).toThrow(ConversationBusyError);
     expect(() => conversation.clone()).toThrow(ConversationBusyError);
 
     finish(summaryTurn('s'));
@@ -623,9 +629,9 @@ describe('PlannerConversation after a compaction', () => {
   it('cannot rewind across the entry', async () => {
     const { conversation, state } = await compacted();
 
-    expect(() => conversation.rewind(0)).toThrow(ConversationEditError);
-    conversation.rewind(1);
-    expect(state.plan!.conversationHistory!.map((m) => m.kind)).toEqual(['compaction']);
+    expect(() => conversation.cloneBefore(0)).toThrow(ConversationEditError);
+    expect(conversation.cloneBefore(1).dialogue.conversationHistory.map((m) => m.kind)).toEqual(['compaction']);
+    expect(state.plan!.conversationHistory).toHaveLength(7);
   });
 
   it('cannot be compacted again until enough has been said since', async () => {

@@ -94,8 +94,9 @@ so a harness planner never resumes its own memory on top of the replayed
 one). A turn that throws before anything was persisted rolls its own writes
 back (`snapshot`/`restore`); once anything has been persisted, memory already
 matches disk and the rollback declines. Transcript edits are whole-array
-operations (`append`, `replace`), so rewinding, forking or compacting a
-conversation is a transcript edit plus a `reset`.
+operations (`append`, `replace`), so compacting a conversation is a
+transcript edit plus a `reset`; forking and rewinding copy it instead
+(`clone`, `cloneBefore`) and leave it as it was.
 *Avoid:* "chat" or "thread" for the module — the conversation is the thing; the
 AI service only holds a disposable copy of it.
 
@@ -216,26 +217,35 @@ into a fresh model context; the tool history is gone. Written only by
 **PlannerConversation**: conversation turns, the one-shot `modifyPlan`
 exchange (request plus a `plan_generated` marker), and queued mid-run edits
 once `processQueuedMessages` applies them (a `system` entry, so the transcript
-and the plan do not drift apart), a **Rewind**, which cuts it short, and a
-**Compaction**, which replaces it with a summary and its last two exchanges. Every
+and the plan do not drift apart), and a **Compaction**, which replaces it with
+a summary and its last two exchanges. A **Rewind** never writes it: the
+shortened copy goes to a new session. Every
 write is persisted and broadcast through Session's `mutatePlan` ritual.
 
-**Rewind** (`Session.rewindConversation(index)`) — cut the conversation back to
-just before one of the user's messages, discarding it and everything after it;
-the planner's `researchLog` goes back to the same point. `index` is the
-message's position in `conversationHistory`, and `rewindTargets()` lists the
-candidates with a one-line preview — every user message except the opening
-goal, since a conversation without its goal is a new session (after a
-**Compaction**, the summary entry stands where the goal did). The task list
-is untouched, including tasks the discarded turns created, and so is any run
-executing it: a rewind moves where the conversation resumes, not what the plan
-is (ADR-0002, update of 2026-09-25). The planner's live context is reset, so
-the next message replays from the shortened transcript on every backend alike.
-Refused while a planner turn is in flight (`ConversationBusyError`), because
-the turn's reply would land on a transcript that no longer holds the message
-it answers. TUI and VS Code `/rewind` (picker) or `/rewind <n>` (VS Code also
-"Ordewell: Rewind Conversation"); CLI `ordewell rewind [n]`.
-*Avoid:* "undo" — nothing about the plan is undone.
+**Rewind** (`Session.rewindConversation(index)`) — fork the conversation from
+just before one of the user's messages: a new persisted session holds the
+transcript up to that message (`conversationHistory.slice(0, index)`), the
+planner's `researchLog` up to the same point, and the current task list, taken
+through the same `forkPlanState` as a **Fork**. The original session, its
+file, its transcript and its live planner context are untouched, so nothing
+said is lost and the user can go back. `index` is the message's position in
+`conversationHistory`, and `rewindTargets()` lists the candidates with a
+one-line preview — every user message except the opening goal, since a
+conversation without its goal is a new session (after a **Compaction**, the
+summary entry stands where the goal did). The task list rides along as it is
+now, including tasks created after that message: a rewind moves where the
+conversation resumes, not what the plan is (ADR-0002, updates of 2026-09-25).
+The rewound message's full text comes back with the fork (`rewoundMessage`) so
+a surface can offer it for resending or editing. The fork has no native
+planner session, so its first message replays the shortened transcript on
+every backend alike. The daemon adopts it at once (see **Adopt**) and answers
+`{ sessionId, goal, plan, rewoundMessage }`. Refused while a planner turn is in
+flight (`ConversationBusyError`, 409), because the copy would hold a message
+without its reply; allowed while the original executes, since the fork carries
+no run. TUI and VS Code `/rewind` (picker) or `/rewind <n>` (VS Code also
+"Ordewell: Rewind Conversation") switch to the fork; CLI `ordewell rewind [n]`
+makes it the current session and prints the rewound message.
+*Avoid:* "undo" — nothing about the plan is undone, and the original is kept.
 
 **Fork** (`Session.forkConversation()`) — copy the conversation and its task
 list into a new persisted session and continue there; the original, its file
@@ -246,8 +256,9 @@ any other per-run record stay behind. What travels is decided in one place,
 `forkPlanState`, which lists fields rather than spreading the plan, so a field
 added to the plan later stays behind until someone decides it should travel.
 The daemon adopts the fork immediately (see **Adopt**); its first message
-replays the copied transcript. Refused mid-turn like a rewind; allowed while
-the original executes. TUI `/fork` switches to the fork; `ordewell fork` makes
+replays the copied transcript. A **Rewind** is a fork made from an earlier
+point in the conversation. Refused mid-turn like a rewind; allowed while the
+original executes. TUI `/fork` switches to the fork; `ordewell fork` makes
 it the current session; VS Code `/fork` ("Ordewell: Fork Conversation") loads
 it like a saved session, which replaces the extension's one in-process
 `Session` — so it asks first when a run is executing, since loading stops it.

@@ -3,6 +3,7 @@ import {
   Session,
   ConversationBusyError,
   type ConversationCompaction,
+  type ConversationFork,
   type SessionMessage,
   type SessionNotice,
   type SessionRuntimeSettings,
@@ -39,6 +40,13 @@ import { scanWorkspaces as scanWorkspacesImpl } from '../utils/workspaceScanner'
 import { PoolFileSystem } from '../adapters/PoolFileSystem';
 import { PoolAwareRunner } from '../adapters/PoolAwareRunner';
 import type { RunnerRegistry as CoreRunnerRegistry, ITerminalRunner } from '@ordewell/core';
+
+/** A fork the pool has adopted: addressable at once, its plan read back from the file it was written to. */
+export interface AdoptedFork {
+  sessionId: string;
+  goal: string;
+  plan: LegacyPlanState;
+}
 
 export interface OrchestratorPoolDeps {
   /**
@@ -575,8 +583,17 @@ export class OrchestratorPool {
    * adopted by, reading back the file the fork was written to. The original
    * keeps running, or planning, untouched.
    */
-  forkConversation(sessionId: string): { sessionId: string; goal: string; plan: LegacyPlanState } {
-    const fork = this.session(sessionId).forkConversation();
+  forkConversation(sessionId: string): AdoptedFork {
+    return this.adoptFork(this.session(sessionId).forkConversation());
+  }
+
+  /** A rewind is a fork from an earlier point, so it is adopted the same way. */
+  rewindConversation(sessionId: string, index: number): AdoptedFork & { rewoundMessage: string } {
+    const fork = this.session(sessionId).rewindConversation(index);
+    return { ...this.adoptFork(fork), rewoundMessage: fork.rewoundMessage };
+  }
+
+  private adoptFork(fork: ConversationFork): AdoptedFork {
     return { sessionId: fork.sessionId, goal: fork.goal, plan: this.adoptSavedSession(fork.sessionId, fork.workspace) };
   }
 
