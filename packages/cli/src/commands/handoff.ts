@@ -69,8 +69,8 @@ export async function handleHandoff(
     }
     case 'merge': {
       await confirmed(group
-        ? `Merge ${branch} into the branch checked out in each of ${reposWithWork(handoff).join(', ')}? Nothing is merged unless every repository can take it.`
-        : `Merge ${branch} into the branch you have checked out?`);
+        ? `Merge ${branch} into the branch checked out in each of ${reposWithWork(handoff).join(', ')}? Nothing is merged unless every repository can take it; once all have, the run's worktrees and branches are removed.`
+        : `Merge ${branch} into the branch you have checked out? Once merged, the run's worktrees and branches are removed.`);
       const { ok, message } = mergeOutcome(await attempt(() => api.mergeRun(sessionId)), branch, group);
       if (ok) console.log(message);
       else fail(message);

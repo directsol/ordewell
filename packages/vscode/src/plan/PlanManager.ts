@@ -532,9 +532,11 @@ export function handleSessionMessage(
       break;
     // What Merge all did, whether this host asked for it or another surface did.
     // The webview shows a blocked or part-landed group per repo; core's notices
-    // already told the user in prose.
+    // already told the user in prose. A full merge is the end of the run: core
+    // has cleared it up, so there is no card left to show.
     case 'isolation_merge':
-      deps.chatProvider.showIsolationMergeResult(msg.result);
+      if (msg.result.outcome === 'merged') deps.chatProvider.clearIsolationHandoff();
+      else deps.chatProvider.showIsolationMergeResult(msg.result);
       break;
     default: {
       const exhaustive: never = msg;

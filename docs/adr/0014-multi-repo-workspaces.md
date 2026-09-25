@@ -161,6 +161,14 @@ under *Atomic integration* is only ever applied to branches Ordewell created.
 cover every repo. The integration branches are plain branches
 (`ordewell/<run-id>/integration` in each repo) that the user can merge by hand.
 
+*Update (2026-09-25), ADR-0013:* whether an integration branch is deleted once
+merged is decided per repo, against that repo's checked-out HEAD. A full Merge
+all merges every repo with work, so all of them go; a run the user merged by hand
+in one repo of three loses its branch in that one only, at the next run's sweep
+or when a new run replaces it. The run's own atomicity is untouched: nothing is
+deleted after a `blocked`, `conflict` or `failed` Merge all, even in the repos a
+part-way merge landed.
+
 - **Rejected: per-repo merge buttons.** They put the atomicity ADR-0014 keeps for
   integration back in the user's hands at the one step where a mistake is
   hardest to undo. They stay available as a later option if the all-or-nothing

@@ -67,7 +67,7 @@ export async function handleIsolationAction(
         return;
       case 'merge': {
         const confirm = await vscode.window.showWarningMessage(
-          'Merge the isolated run into your checked-out branch? This cannot be undone from Ordewell.',
+          'Merge the isolated run into your checked-out branch? This cannot be undone from Ordewell. Once it has merged, the run\'s worktrees and branches are removed.',
           { modal: true },
           'Merge',
         );

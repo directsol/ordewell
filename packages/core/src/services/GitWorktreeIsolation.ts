@@ -16,6 +16,7 @@ import type {
   IsolationRun,
   IsolationTaskRecord,
   IsolationTaskRepo,
+  IntegrationDisposal,
   IWorktreeIsolation,
   PreparedTask,
 } from '../interfaces/IWorktreeIsolation';
@@ -67,6 +68,12 @@ const LINKED_ARTIFACTS = new Set(['node_modules', 'vendor', '.venv', '.claude', 
 const isEnvFile = (name: string) => name.startsWith('.env');
 
 const INTEGRATION_DIR = 'integration';
+
+// The names Ordewell gives its own branches and task workspaces; the run id is
+// the one segment it owns. Greedy, so a workspace that itself sits in a task
+// workspace resolves to the innermost run.
+const RUN_BRANCH = /^ordewell\/([^/]+)\/[^/]+$/;
+const RUN_WORKTREE = /.*[\\/]\.ordewell[\\/]worktrees[\\/]([^\\/]+)[\\/]/;
 
 // How far below the workspace root a repository is looked for. Deeper ones are
 // not scanned for: a walk of the whole tree would visit every dependency folder.
@@ -595,20 +602,70 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     return { outcome: 'merged' };
   }
 
-  discard(run: IsolationRun, opts: { keepIntegration: boolean }): Promise<void> {
+  discard(run: IsolationRun, opts: { integration: IntegrationDisposal }): Promise<void> {
     return this.admin(run.workspaceRoot, async () => {
       await this.removeIntegrationWorktrees(run);
       for (const record of Object.values(run.tasks)) {
         await this.removeTask(run, record, { dropRecord: record.status !== 'merged' });
       }
       await this.removeUnowned(run);
-      if (!opts.keepIntegration) {
-        for (const repo of run.repos) await this.tryGit(repo.root, ['branch', '-D', repo.integrationBranch]);
+      if (opts.integration !== 'keep') {
+        for (const repo of run.repos) {
+          if (opts.integration === 'delete') await this.tryGit(repo.root, ['branch', '-D', repo.integrationBranch]);
+          else await this.deleteIfMerged(repo.root, repo.integrationBranch);
+        }
         run.tasks = {};
         this.removeIfEmpty(this.runRoot(run));
       }
       for (const repo of run.repos) await this.tryGit(repo.root, ['worktree', 'prune']);
     });
+  }
+
+  sweep(run: IsolationRun): Promise<void> {
+    return this.admin(run.workspaceRoot, async () => {
+      const failed: string[] = [];
+      for (const repo of run.repos) {
+        if (!(await this.sweepRepo(run, repo))) failed.push(repo.path);
+      }
+      if (failed.length > 0) throw new Error(`git failed clearing merged branches of earlier runs in ${failed.join(', ')}`);
+    });
+  }
+
+  /** False when git failed anywhere; the other branches are still tried. */
+  private async sweepRepo(run: IsolationRun, repo: IsolationRepo): Promise<boolean> {
+    await this.tryGit(repo.root, ['worktree', 'prune']);
+    const worktrees = await this.tryGit(repo.root, ['worktree', 'list', '--porcelain']);
+    const refs = await this.tryGit(repo.root, ['for-each-ref', '--format=%(refname)', 'refs/heads/ordewell/']);
+    if (!worktrees.ok || !refs.ok) return false;
+
+    const checkedOut = new Set<string>();
+    const liveRuns = new Set<string>();
+    for (const line of worktrees.stdout.split(/\r?\n/)) {
+      if (line.startsWith('branch refs/heads/')) checkedOut.add(line.slice('branch refs/heads/'.length));
+      const runId = line.startsWith('worktree ') ? RUN_WORKTREE.exec(line)?.[1] : undefined;
+      if (runId) liveRuns.add(runId);
+    }
+
+    let ok = true;
+    for (const ref of refs.stdout.split(/\r?\n/).filter(Boolean)) {
+      const branch = ref.slice('refs/heads/'.length);
+      const runId = RUN_BRANCH.exec(branch)?.[1];
+      if (!runId || runId === run.id || liveRuns.has(runId) || checkedOut.has(branch)) continue;
+      if ((await this.deleteIfMerged(repo.root, branch)) === 'failed') ok = false;
+    }
+    return ok;
+  }
+
+  /**
+   * Delete `branch` only if the repo's checked-out HEAD already contains it —
+   * HEAD, not an upstream: what the user has checked out is what they merged
+   * into. `-d` rather than `-D`, so git also refuses a branch a worktree has
+   * checked out.
+   */
+  private async deleteIfMerged(root: string, branch: string): Promise<'deleted' | 'kept' | 'failed'> {
+    const merged = await this.tryGit(root, ['merge-base', '--is-ancestor', branch, 'HEAD']);
+    if (!merged.ok) return merged.code === 1 ? 'kept' : 'failed';
+    return (await this.tryGit(root, ['branch', '-d', branch])).ok ? 'deleted' : 'failed';
   }
 
   private async drain(): Promise<void> {

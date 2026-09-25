@@ -314,6 +314,20 @@ describe('Session with worktree isolation', () => {
       expect(isolation.calls.map((c) => c.op)).toContain('mergeIntoCheckedOut');
     });
 
+    it('drops the run from the saved plan and from every surface once Merge all merged everything', async () => {
+      const { session, messages } = await landed();
+      messages.length = 0;
+
+      await session.mergeRun();
+
+      expect(session.planState!.isolation).toBeUndefined();
+      expect(session.isolationView()).toBeNull();
+      const update = messages.find((m) => m.type === 'status_update');
+      expect(update?.type === 'status_update' && update.tasks.every((t) => t.isolation === undefined)).toBe(true);
+      expect(messages.at(-1)).toEqual({ type: 'isolation_merge', result: { outcome: 'merged' } });
+      await expect(session.cleanupRun()).rejects.toThrow('This plan has no isolated run');
+    });
+
     it('tells every surface what Merge all did, down to each repository that blocked it', async () => {
       const { session, isolation, messages } = await landed();
       const result: IsolationMergeResult = { outcome: 'blocked', blocked: [{ repo: 'web', reason: 'conflict', files: ['web.txt'] }] };
@@ -341,14 +355,14 @@ describe('Session with worktree isolation', () => {
     it('cleans up worktrees but keeps the branch and the record', async () => {
       const { session, isolation } = await landed();
       await session.cleanupRun();
-      expect(isolation.calls).toContainEqual({ op: 'discard', keepIntegration: true });
+      expect(isolation.calls).toContainEqual({ op: 'discard', integration: 'keep' });
       expect(saved()!.isolation).toBeDefined();
     });
 
     it('discards the whole run and forgets it', async () => {
       const { session, isolation } = await landed();
       await session.discardRun();
-      expect(isolation.calls).toContainEqual({ op: 'discard', keepIntegration: false });
+      expect(isolation.calls).toContainEqual({ op: 'discard', integration: 'delete' });
       expect(saved()!.isolation).toBeUndefined();
     });
 

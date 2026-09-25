@@ -500,16 +500,18 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
       return;
 
     // A conflict or a refusal is an answer, not a fault: either way the user's
-    // tree is exactly as it was, and the words say what to do next.
+    // tree is exactly as it was, and the words say what to do next. A full
+    // merge leaves nothing to hand over — the daemon has cleared the run up.
     case 'isolationMerge': {
       const { ok, message } = mergeOutcome(await api.mergeRun(effect.sessionId), effect.branch, effect.group === true);
+      if (ok) dispatch({ type: 'runCleared', sessionId: effect.sessionId });
       dispatch({ type: ok ? 'notice' : 'failed', message });
       return;
     }
 
     case 'isolationDiscard':
       await api.discardRun(effect.sessionId);
-      dispatch({ type: 'handoffDiscarded', sessionId: effect.sessionId });
+      dispatch({ type: 'runCleared', sessionId: effect.sessionId });
       dispatch({ type: 'notice', message: `Discarded the run and ${effect.branch}.` });
       return;
 
@@ -856,8 +858,10 @@ function onExecutionEvent(dispatch: (action: Action) => void, event: WsEvent, se
     case 'approval_settled':
       return;
 
-    // Its asker already has the result, from the merge request itself.
+    // Its asker already has the words, from the merge request itself; a
+    // viewer that did not ask still has to drop a run that is gone.
     case 'isolation_merge':
+      if (event.result.outcome === 'merged') dispatch({ type: 'runCleared', sessionId });
       return;
 
     default: {

@@ -1426,12 +1426,32 @@ describe('worktree isolation', () => {
     expect(h.actions).toEqual([{ type: 'handoffDiff', diff: 'diff --git a/x b/x', sessionId: 's1' }]);
   });
 
-  it('a merged run says where it landed', async () => {
+  it('a merged run says where it landed, and clears the run it no longer has to hand over', async () => {
     const h = harness({ mergeRun: vi.fn().mockResolvedValue({ outcome: 'merged' }) } as Partial<OrdewellApi>);
 
     await runEffect({ type: 'isolationMerge', sessionId: 's1', branch: 'ordewell/r1/integration' }, h.deps);
 
     expect(messageOf(h.actions, 'notice')).toMatch(/Merged ordewell\/r1\/integration into your checked-out branch/);
+    expect(h.actions).toContainEqual({ type: 'runCleared', sessionId: 's1' });
+  });
+
+  it('keeps the run to hand over after a Merge all that did not merge everything', async () => {
+    const h = harness({ mergeRun: vi.fn().mockResolvedValue({ outcome: 'conflict', repo: 'web', files: ['w.txt'], landed: ['api'] }) } as Partial<OrdewellApi>);
+
+    await runEffect({ type: 'isolationMerge', sessionId: 's1', branch: 'ordewell/r1/integration', group: true }, h.deps);
+
+    expect(types(h.actions)).not.toContain('runCleared');
+  });
+
+  it('clears the run when another surface\'s Merge all merged everything, and only then', async () => {
+    const h = running([
+      { type: 'isolation_merge', result: { outcome: 'blocked', blocked: [{ repo: 'web', reason: 'conflict', files: ['w.txt'] }] } },
+      { type: 'isolation_merge', result: { outcome: 'merged' } },
+    ]);
+
+    await runEffect({ type: 'execute', sessionId: 's1' }, h.deps);
+
+    expect(h.actions.filter((a) => a.type === 'runCleared')).toEqual([{ type: 'runCleared', sessionId: 's1' }]);
   });
 
   it.each([
@@ -1451,7 +1471,7 @@ describe('worktree isolation', () => {
 
     await runEffect({ type: 'isolationDiscard', sessionId: 's1', branch: 'ordewell/r1/integration' }, h.deps);
 
-    expect(types(h.actions)).toEqual(['handoffDiscarded', 'notice']);
+    expect(types(h.actions)).toEqual(['runCleared', 'notice']);
   });
 
   it('cleanup refreshes the plan, since the worktrees the marks named are gone', async () => {
