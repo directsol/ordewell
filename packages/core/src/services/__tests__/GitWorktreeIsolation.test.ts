@@ -454,6 +454,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation conflicts', () => {
     expect(branches(root)).toContain(run.repos[0].integrationBranch);
     expect(run.tasks['task-2'].status).toBe('conflict');
     expect(run.tasks['task-2'].conflictRepo).toBe('.');
+    expect(run.tasks['task-2'].conflictFiles).toEqual(['shared.txt']);
     // The runner's work is committed on its branch, ready to resolve by hand.
     expect(git(root, 'show', `${b.branch}:shared.txt`)).toBe('right');
     // No half-finished merge is left in the integration worktree.
@@ -471,6 +472,21 @@ describe.skipIf(!hasGit)('WorktreeIsolation conflicts', () => {
     expect(await iso.integrate(t2, run)).toBe('conflict');
     expect(await iso.integrate(t3, run)).toBe('merged');
     expect(git(root, 'show', `${run.repos[0].integrationBranch}:other.txt`)).toBe('o');
+  });
+
+  it('clears the recorded conflict files once the task lands after being resolved by hand', async () => {
+    const { iso, run, t1, t2, b } = await conflicted();
+    await iso.integrate(t1, run);
+    expect(await iso.integrate(t2, run)).toBe('conflict');
+
+    expect(() => git(b.cwd, 'merge', '--no-edit', run.repos[0].integrationBranch)).toThrow();
+    writeFileSync(join(b.cwd, 'shared.txt'), 'resolved\n');
+    git(b.cwd, 'add', 'shared.txt');
+    git(b.cwd, 'commit', '-q', '--no-edit');
+
+    expect(await iso.integrate(t2, run)).toBe('merged');
+    expect(run.tasks['task-2'].conflictRepo).toBeUndefined();
+    expect(run.tasks['task-2'].conflictFiles).toBeUndefined();
   });
 });
 
@@ -1301,6 +1317,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
       expect(git(join(dir, 'api'), 'show', `${integrationOf(run)}:api.txt`)).toBe('api');
       expect(run.tasks['task-2'].status).toBe('conflict');
       expect(run.tasks['task-2'].conflictRepo).toBe('web');
+      expect(run.tasks['task-2'].conflictFiles).toEqual(['web.txt']);
       expect(run.tasks['task-2'].repos.api.changed).toBe(true);
       expect(run.tasks['task-2'].repos.web.changed).toBe(true);
       expect(run.landing).toBeUndefined();
@@ -1334,6 +1351,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
       expect(git(join(dir, 'web'), 'show', `${integrationOf(run)}:web.txt`)).toBe('first and both');
       expect(run.tasks['task-2']).toMatchObject({ status: 'merged', repos: { api: { changed: true }, web: { changed: true } } });
       expect(run.tasks['task-2'].conflictRepo).toBeUndefined();
+      expect(run.tasks['task-2'].conflictFiles).toBeUndefined();
       for (const repo of ['api', 'web']) {
         expect(branches(join(dir, repo))).not.toContain(b.branch);
         expect(existsSync(join(b.cwd, repo))).toBe(false);

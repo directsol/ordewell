@@ -22,7 +22,7 @@ import type {
 } from '../interfaces/IWorktreeIsolation';
 import { createWorktreeIsolation } from './GitWorktreeIsolation';
 import { describeMergeResult } from './mergeResultNotice';
-import { handoffOf, integrationBranchNameOf, layoutOf, SELF_REPO, taskIsolationOf } from './isolationRecord';
+import { capConflictFiles, handoffOf, integrationBranchNameOf, layoutOf, SELF_REPO, taskIsolationOf } from './isolationRecord';
 import type { IsolatedExecution } from './plannerModes';
 
 /**
@@ -614,16 +614,17 @@ export class TaskOrchestrator {
 
   private landUnmerged(task: Task, landing: Exclude<IsolationOutcome, 'merged'>): void {
     const branch = this.isolationRun ? integrationBranchNameOf(this.isolationRun) : 'the integration branch';
+    const record = this.isolationRun?.tasks[task.id];
     // Named only where there is a repo to name: a group of one reads as it always has.
-    const repo = this.isolationRun?.tasks[task.id]?.conflictRepo;
-    const inRepo = repo && repo !== SELF_REPO ? repo : null;
+    const inRepo = record?.conflictRepo && record.conflictRepo !== SELF_REPO ? record.conflictRepo : null;
     if (landing === 'conflict') {
       // Never resolved here, by a model or otherwise: the task waits on the
       // user, and its dependents wait on it.
       this.store.markAwaitingUser(task.id);
+      const files = record?.conflictFiles?.length ? ` (${capConflictFiles(record.conflictFiles)})` : '';
       this.notifications.warn(inRepo
-        ? `Task "${task.title}" passed, but landing it on ${branch} conflicted in ${inRepo}, so none of it landed. Its worktrees are kept — resolve it by hand, retry it, or resolve it as a task.`
-        : `Task "${task.title}" passed, but merging it into ${branch} conflicted. Its worktree is kept — resolve it by hand, retry it, or resolve it as a task.`);
+        ? `Task "${task.title}" passed, but landing it on ${branch} conflicted in ${inRepo}${files}, so none of it landed. Its worktrees are kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.`
+        : `Task "${task.title}" passed, but merging it into ${branch} conflicted${files}. Its worktree is kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.`);
     } else {
       this.store.markFailed(task.id);
       this.running = false;

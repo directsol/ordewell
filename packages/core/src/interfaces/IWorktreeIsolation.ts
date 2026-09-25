@@ -72,6 +72,8 @@ export interface IsolationTaskRecord {
   repos: Record<string, IsolationTaskRepo>;
   /** The repo whose merge stopped the task from landing, while `status` is `conflict` or `failed`. */
   conflictRepo?: string;
+  /** Repo-relative paths, in `conflictRepo`, that conflicted; set only while `status` is `conflict`. */
+  conflictFiles?: string[];
 }
 
 /**
@@ -163,6 +165,8 @@ export type TaskIsolation =
     /** Paths of the repos the task changed. */
     repos: string[];
     conflictRepo?: string;
+    /** Repo-relative paths, in `conflictRepo`, that conflicted. */
+    conflictFiles?: string[];
   };
 
 export interface IsolationLandedTask {
