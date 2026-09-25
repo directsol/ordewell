@@ -936,9 +936,11 @@ bounds, and clamps every offset where it is written. The bug that produced this
 seam was a dead zone, not a lost keystroke: the offsets grew unbounded (chat) or
 against a deliberate over-estimate (plan) while the renderer clamped to the real
 content, so every notch back the other way was swallowed until the counter fell
-under the bound. `planScroll` is an **absolute** offset with `null` meaning
-"follow the selection" — as a delta on top of the auto-anchor it could never
-scroll *above* the selected task.
+under the bound. `planScroll` is an **absolute** offset that persists across
+arrow presses — the cursor walks inside the viewport and it scrolls only when
+the selected task's lines would leave it (`revealOffset`); `null` just means it
+has not been positioned yet. A page key or wheel notch scrolls first and drags
+the selection along only as far as keeping it on screen needs.
 *Avoid:* estimating rows-per-task, or clamping a scroll offset only at paint time.
 
 **Effect** (TUI) — a description of work the TUI wants done (`setModel`,

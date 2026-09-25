@@ -413,61 +413,130 @@ const STATUS_ICON: Record<string, string> = {
 /** Static marker for a running task whose runner has gone quiet — distinct from both the busy spinner and the awaiting_user '?'. */
 const IDLE_ICON = '~';
 
+/** Inclusive indices into `PlanLayout.lines`. */
+export interface LineSpan {
+  start: number;
+  end: number;
+}
+
 /**
- * The plan pane's content and the two offsets that matter: where the viewport
- * sits when it is following the selection, and the furthest it may be pushed.
- * `lines[0]` is the header, which the pane pins — everything below it scrolls.
+ * The plan pane's content and the geometry the viewport is reasoned about in.
+ * `lines[0]` is the header, which the pane pins — everything below it scrolls,
+ * so at offset `n` the visible body is `lines[1 + n .. n + rows - 1]`.
  */
 export interface PlanLayout {
   lines: string[];
-  /** Offset that keeps the selected task (or the open prompt's caret) on screen. */
-  followOffset: number;
+  /** One span per plan row, in row order — rows are one to many lines tall. */
+  rowSpans: LineSpan[];
+  /** What the viewport must keep on screen: the open prompt's caret line, else the selected row. */
+  anchor: LineSpan;
+  /** Rows the pane is painted at, header included. */
+  rows: number;
   maxScroll: number;
 }
+
+/** `lines[1]` is the spacer under the header, so the first task starts here. */
+const FIRST_ROW_LINE = 2;
 
 export function planLayout(state: TuiState, rows: number, cols: number): PlanLayout {
   const done = state.tasks.filter((t) => t.status === 'completed').length;
   const lines = [style.bold(`Plan ${done}/${state.tasks.length}`), ''];
 
-  // Track where the selected task actually lands — tasks are one line, or two
-  // with an assigned model, so an estimate would scroll it out of view.
-  let selectedLine = 2;
+  const rowSpans: LineSpan[] = [];
   // An expanded task starts its editor at the end of its prompt. For a long
   // prompt, keeping only the task heading visible makes edits appear to do
   // nothing because the caret is below the viewport.
   let editorLine: number | undefined;
   planRows(state).forEach((row, i) => {
     const taskStart = lines.length;
-    if (i === state.selectedTask) selectedLine = taskStart;
     const renderedTask = taskLines(state, row, i, cols);
     if (row.task.id === state.expandedTaskId && renderedTask.editorLine !== undefined) {
       editorLine = taskStart + renderedTask.editorLine;
     }
     lines.push(...renderedTask.lines);
+    rowSpans.push({ start: taskStart, end: lines.length - 1 });
   });
 
-  const maxScroll = Math.max(0, lines.length - rows);
-  const anchorLine = editorLine ?? selectedLine;
-  return { lines, followOffset: Math.min(maxScroll, Math.max(0, anchorLine - rows + 3)), maxScroll };
+  const selected = rowSpans[state.selectedTask] ?? { start: FIRST_ROW_LINE, end: FIRST_ROW_LINE };
+  const anchor = editorLine === undefined ? selected : { start: editorLine, end: editorLine };
+  return { lines, rowSpans, anchor, rows, maxScroll: Math.max(0, lines.length - rows) };
+}
+
+const clampOffset = (layout: PlanLayout, offset: number): number =>
+  Math.max(0, Math.min(layout.maxScroll, offset));
+
+/**
+ * The offset that puts `span` fully on screen, moving `offset` no further than
+ * that takes: one that is already visible stays put, one above lands on the
+ * first body line, one below on the last. A span taller than the body cannot be
+ * both, so its first line wins. Reaching the first row shows the spacer under
+ * the header again rather than stopping one line short of it.
+ */
+export function revealOffset(layout: PlanLayout, offset: number, span: LineSpan): number {
+  const at = clampOffset(layout, offset);
+  const bodyHeight = layout.rows - 1;
+  const first = span.start <= FIRST_ROW_LINE ? 0 : span.start - 1;
+  if (span.start < 1 + at || span.end - span.start + 1 > bodyHeight) return clampOffset(layout, first);
+  if (span.end > at + layout.rows - 1) return clampOffset(layout, span.end - layout.rows + 1);
+  return at;
 }
 
 /**
- * Where the plan pane's viewport actually sits: the user's absolute offset,
- * clamped to what exists, or the follow anchor when they have not taken over.
+ * Where the plan pane's viewport actually sits: the absolute offset, clamped to
+ * what exists. `null` means nothing has positioned it yet, so it is the least
+ * scroll from the top that shows what the pane must keep on screen.
  */
 export function planOffset(layout: PlanLayout, planScroll: number | null): number {
-  if (planScroll === null) return layout.followOffset;
-  return Math.max(0, Math.min(layout.maxScroll, planScroll));
+  if (planScroll === null) return revealOffset(layout, 0, layout.anchor);
+  return clampOffset(layout, planScroll);
 }
 
-/** The plan pane's scroll geometry at the size it is about to be painted. */
-export function planScrollExtent(state: TuiState): { followOffset: number; maxScroll: number } {
+/**
+ * The first row a viewport at `offset` shows in full, else the one covering its
+ * top line — paging forward lands the selection where the reader's eye starts.
+ */
+export function topRowInView(layout: PlanLayout, offset: number): number {
+  const top = 1 + offset;
+  const whole = layout.rowSpans.findIndex((span) => span.start >= top && span.end <= offset + layout.rows - 1);
+  if (whole >= 0) return whole;
+  const covering = layout.rowSpans.findIndex((span) => span.end >= top);
+  return covering >= 0 ? covering : layout.rowSpans.length - 1;
+}
+
+/** The mirror of `topRowInView`, for paging back. */
+export function bottomRowInView(layout: PlanLayout, offset: number): number {
+  const bottom = offset + layout.rows - 1;
+  const spans = layout.rowSpans;
+  for (let i = spans.length - 1; i >= 0; i--) {
+    if (spans[i].start >= 1 + offset && spans[i].end <= bottom) return i;
+  }
+  for (let i = spans.length - 1; i >= 0; i--) {
+    if (spans[i].start <= bottom) return i;
+  }
+  return 0;
+}
+
+/**
+ * The row to keep selected once the viewport has moved to `offset`: the same
+ * one while any of it is still on screen, otherwise the nearest one that is.
+ */
+export function rowNearestView(layout: PlanLayout, offset: number, row: number): number {
+  const span = layout.rowSpans[row];
+  if (!span) return row;
+  if (span.end < 1 + offset) return topRowInView(layout, offset);
+  if (span.start > offset + layout.rows - 1) return bottomRowInView(layout, offset);
+  return row;
+}
+
+/** The plan pane's geometry at the size it is about to be painted. */
+export function planScrollExtent(state: TuiState): PlanLayout {
   const cols = planPaneWidth(state);
   // A pane too narrow to show has nothing to scroll; measuring it anyway would
   // wrap every title to a column and invent an offset the user can never see.
-  if (cols === 0) return { followOffset: 0, maxScroll: 0 };
-  const { followOffset, maxScroll } = planLayout(state, bodyRows(state), cols);
-  return { followOffset, maxScroll };
+  if (cols === 0) {
+    return { lines: [], rowSpans: [], anchor: { start: FIRST_ROW_LINE, end: FIRST_ROW_LINE }, rows: 0, maxScroll: 0 };
+  }
+  return planLayout(state, bodyRows(state), cols);
 }
 
 interface TaskLines {

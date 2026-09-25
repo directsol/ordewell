@@ -462,9 +462,10 @@ describe('plan pane', () => {
   it('pageup/pagedown scroll the collapsed plan pane, the keyboard route now that the wheel is opt-in', () => {
     const down = press(tallPlan({ planScroll: 0 }), 'pagedown').state;
     expect(down.planScroll!).toBeGreaterThan(0);
-    expect(down.selectedTask).toBe(0);
+    expect(down.selectedTask, 'the selection comes along to the pane\'s new top').toBeGreaterThan(0);
     const up = press(down, 'pageup').state;
     expect(up.planScroll).toBe(0);
+    expect(up.selectedTask).toBeLessThan(down.selectedTask + 6);
   });
 
   it('a plan shorter than the pane has nothing to scroll, so every notch is a no-op', () => {
@@ -473,9 +474,10 @@ describe('plan pane', () => {
     expect(press(short, 'scrolldown').state.planScroll).toBe(0);
   });
 
-  it('arrow key up hands the pane back to follow mode', () => {
+  it('arrow key up moves the cursor and leaves the viewport where it is while the cursor stays on screen', () => {
     const moved = press(tallPlan({ planScroll: 9, selectedTask: 5 }), 'up').state;
-    expect(moved.planScroll).toBeNull();
+    expect(moved.selectedTask).toBe(4);
+    expect(moved.planScroll).toBe(9);
   });
 
   it('o opens a runner-compatible model picker for the selected task', () => {

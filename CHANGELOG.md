@@ -8,6 +8,23 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The plan pane no longer scrolls the whole list when you press up.** After
+  moving the cursor down past the bottom of the pane, pressing up used to
+  scroll everything with the cursor stuck to the bottom row. The pane now keeps
+  its place: the cursor walks up to the top visible task, and only then does
+  the list scroll — by exactly that task's height, at whatever height each task
+  has.
+
+### Changed
+
+- **Page keys and the mouse wheel keep the plan selection on screen.** PgDn
+  selects the first task fully visible at the top of the new page, PgUp the
+  last at the bottom, and at either end they select the last or first task. The
+  wheel scrolls freely and moves the selection only if it would leave the pane.
+  The `↑↓ to follow` hint is gone, since the selected task is always visible.
+
 ## [0.5.0] — 2026-09-25
 
 ### Added

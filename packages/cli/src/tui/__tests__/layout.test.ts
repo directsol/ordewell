@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce, type Step } from '../reducer';
 import { render } from '../render';
-import { bodyRows, chatBodyLines, chatScrollMax, planScrollExtent } from '../layout';
+import { bodyRows, chatBodyLines, chatScrollMax, planOffset, planScrollExtent } from '../layout';
 import type { ChatMessage, TaskView, TuiState } from '../state';
 
 /**
@@ -39,6 +39,13 @@ const tasks = (n: number): TaskView[] =>
 
 const planState = (over: Partial<TuiState> = {}): TuiState =>
   initialState({ sessionId: 's1', rows: 20, cols: 80, tasks: tasks(30), focus: 'plan', ...over });
+
+/** The first task whose every line is inside the pane's viewport. */
+function firstFullyVisibleRow(state: TuiState): number {
+  const layout = planScrollExtent(state);
+  const offset = planOffset(layout, state.planScroll);
+  return layout.rowSpans.findIndex((span) => span.start >= 1 + offset && span.end <= offset + layout.rows - 1);
+}
 
 const chatState = (lines: number, over: Partial<TuiState> = {}): TuiState => {
   const messages: ChatMessage[] = Array.from({ length: lines }, (_, i) => ({
@@ -89,12 +96,12 @@ describe('plan pane — an absolute offset that follows the selection by default
 
   it('seeds the first manual notch from where the view already is, so nothing jumps', () => {
     const following = planState({ selectedTask: 29 });
-    const { followOffset } = planScrollExtent(following);
-    expect(followOffset, 'the plan must overflow the pane for this to mean anything').toBeGreaterThan(0);
+    const seen = planOffset(planScrollExtent(following), following.planScroll);
+    expect(seen, 'the plan must overflow the pane for this to mean anything').toBeGreaterThan(0);
 
     const nudged = press(following, 'scrollup').state;
 
-    expect(nudged.planScroll).toBe(followOffset - 3);
+    expect(nudged.planScroll).toBe(seen - 3);
   });
 
   it('stops at the end of the plan, and one notch back up moves immediately', () => {
@@ -105,14 +112,26 @@ describe('plan pane — an absolute offset that follows the selection by default
     expect(frame(press(bottom, 'scrollup').state)).not.toBe(frame(bottom));
   });
 
-  it('hands the viewport back to the selection when the arrows move it', () => {
-    const scrolled = repeat(planState({ selectedTask: 20 }), 'pageup', 20);
-    expect(scrolled.planScroll).toBe(0);
+  it('keeps the viewport still while the cursor walks back up through it', () => {
+    const start = planState({ selectedTask: 0 });
+    // Rows are three lines tall, so a 20-row pane holds six of them.
+    const down = repeat(start, 'down', 9);
+    const offset = down.planScroll!;
+    expect(offset, 'the cursor must have run past the bottom for this to mean anything').toBeGreaterThan(0);
 
-    const moved = press(scrolled, 'down').state;
+    const top = firstFullyVisibleRow(down);
+    const walked = repeat(down, 'up', down.selectedTask - top);
+    expect(walked.selectedTask).toBe(top);
+    expect(walked.planScroll).toBe(offset);
 
-    expect(moved.planScroll).toBeNull();
-    expect(plain(moved)).toContain('Task 22');
+    const scrolled = press(walked, 'up').state;
+    expect(scrolled.selectedTask).toBe(top - 1);
+    // The bottom-aligned viewport had shown the tail of the task above, so the
+    // step is however far that task's first line sits from the pane's top.
+    expect(scrolled.planScroll).toBe(planScrollExtent(scrolled).rowSpans[top - 1].start - 1);
+    expect(firstFullyVisibleRow(scrolled)).toBe(top - 1);
+    const shown = plain(scrolled).split('\n');
+    expect(shown[shown.findIndex((line) => line.includes('Plan 0/30')) + 1]).toContain(`Task ${top}`);
   });
 });
 
@@ -155,9 +174,8 @@ describe('scrolled-back marker', () => {
     expect(plain(chatState(40))).not.toContain('↑ scrolled back');
   });
 
-  it('says so once the plan pane stops following the selection', () => {
-    expect(plain(press(planState(), 'pagedown').state)).toContain('↑ scrolled back');
-    expect(plain(planState())).not.toContain('↑ scrolled back');
+  it('stays quiet in the plan pane, where the selection is always on screen', () => {
+    expect(plain(press(planState(), 'pagedown').state)).not.toContain('↑ scrolled back');
   });
 
   it('does not change the body height, so a page up and a page down are the same size', () => {

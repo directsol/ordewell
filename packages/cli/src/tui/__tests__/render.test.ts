@@ -731,7 +731,7 @@ describe('plan pane scrolling', () => {
     expect(out).not.toContain('Task number 30');
   });
 
-  it('follows the selection again once planScroll goes back to null', () => {
+  it('shows the selection when nothing has positioned the viewport yet', () => {
     const out = text({ rows: 15, cols: 80, tasks: manyTasks(30), focus: 'plan', selectedTask: 29, planScroll: null });
     expect(out).toContain('Task number 30');
   });

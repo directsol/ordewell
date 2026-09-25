@@ -9,7 +9,10 @@ import {
 import { isolationOfPlan } from '../isolation';
 import { applyKey, commit, emptyEditor, type EditorState } from './editor';
 import { chatEditorRoom, chatPaneWidth, paneColumns, planPaneWidth, taskEditorRoom } from './geometry';
-import { bodyRows, chatScrollMax, helpScrollMax, planScrollExtent } from './layout';
+import {
+  bodyRows, bottomRowInView, chatScrollMax, helpScrollMax, planOffset, planScrollExtent, revealOffset, rowNearestView,
+  topRowInView,
+} from './layout';
 import { selectedText } from './render';
 import { activeToken, findCommand, parseSlash, tokenCompletions, type ParsedCommand } from './slash';
 import {
@@ -273,7 +276,10 @@ export function reduce(state: TuiState, action: Action): Step {
         expandedTaskId,
         taskEditor: expandedTaskId !== null ? state.taskEditor : null,
       };
-      return step({ ...next, selectedTask: Math.min(state.selectedTask, Math.max(0, planRows(next).length - 1)) });
+      return step(settlePlan({
+        ...next,
+        selectedTask: Math.min(state.selectedTask, Math.max(0, planRows(next).length - 1)),
+      }));
     }
 
     case 'plannerMessage': {
@@ -505,13 +511,7 @@ export function reduce(state: TuiState, action: Action): Step {
       // span anchored where the plan pane used to begin would end up straddling
       // the new one, which is exactly the splice pinning a pane prevents.
       const resized = { ...state, rows: action.rows, cols: action.cols, selection: null };
-      return step({
-        ...resized,
-        scroll: clamp(resized.scroll, chatScrollMax(resized)),
-        planScroll: resized.planScroll === null
-          ? null
-          : clamp(resized.planScroll, planScrollExtent(resized).maxScroll),
-      });
+      return step(settlePlan({ ...resized, scroll: clamp(resized.scroll, chatScrollMax(resized)) }));
     }
 
     // Whether there is anything to animate is the app loop's call (it owns the
@@ -867,7 +867,7 @@ function pointerPane(state: TuiState, key: Key): Focus {
 
 function scrollPointed(state: TuiState, key: Key): Step {
   const delta = key.name === 'scrollup' ? WHEEL_NOTCH : -WHEEL_NOTCH;
-  return pointerPane(state, key) === 'plan' ? scrollPlan(state, delta) : scrollChat(state, delta);
+  return pointerPane(state, key) === 'plan' ? scrollPlan(state, delta, false) : scrollChat(state, delta);
 }
 
 // ── Selection ────────────────────────────────────────────────────────────────
@@ -930,14 +930,38 @@ function scrollChat(state: TuiState, delta: number): Step {
 }
 
 /**
- * The plan pane's offset is absolute, so the first manual notch takes over from
- * follow mode exactly where the view already is — otherwise the pane would jump
- * to the top of the plan the moment the user touched the wheel.
+ * Puts the plan pane's viewport where the selection (or the open prompt's
+ * caret) is on screen, moving it no further than that takes — so anything that
+ * changes what the pane holds or how tall it is can call this without the view
+ * jumping when the selection is still visible.
  */
-function scrollPlan(state: TuiState, delta: number): Step {
-  const { followOffset, maxScroll } = planScrollExtent(state);
-  const from = state.planScroll ?? followOffset;
-  return step({ ...state, planScroll: clamp(from - delta, maxScroll) });
+function settlePlan(state: TuiState): TuiState {
+  if (planPaneWidth(state) === 0) return state;
+  const layout = planScrollExtent(state);
+  return { ...state, planScroll: revealOffset(layout, planOffset(layout, state.planScroll), layout.anchor) };
+}
+
+/**
+ * The plan pane's offset is absolute and independent of the selection, so the
+ * cursor can walk inside the viewport without it scrolling. Scrolling instead
+ * drags the selection along only as far as keeping it on screen needs: a page
+ * key lands it on the row at the edge the reader is heading for, a wheel notch
+ * leaves it be while any of it is still visible. An open prompt editor keeps
+ * its selection — moving that would collapse the task under the caret.
+ */
+function scrollPlan(state: TuiState, delta: number, paged: boolean): Step {
+  const layout = planScrollExtent(state);
+  const from = planOffset(layout, state.planScroll);
+  const to = clamp(from - delta, layout.maxScroll);
+  const scrolled = { ...state, planScroll: to };
+  if (state.taskEditor || layout.rowSpans.length === 0) return step(scrolled);
+
+  const back = delta > 0;
+  if (!paged) {
+    return step({ ...scrolled, selectedTask: rowNearestView(layout, to, state.selectedTask) });
+  }
+  if (to === from) return step({ ...scrolled, selectedTask: back ? 0 : layout.rowSpans.length - 1 });
+  return step({ ...scrolled, selectedTask: back ? bottomRowInView(layout, to) : topRowInView(layout, to) });
 }
 
 /** A planner turn the user can still call off — research rounds included. */
@@ -1065,28 +1089,23 @@ function handlePlanKey(state: TuiState, key: Key): Step {
   // revealed subtask rows. Escape backs out of that one step at a time,
   // rather than leaving the plan pane entirely.
   if (key.name === 'escape') {
-    if (state.expandedTaskId) return step({ ...state, expandedTaskId: null, planScroll: null });
+    if (state.expandedTaskId) return step(settlePlan({ ...state, expandedTaskId: null }));
     return step({ ...state, focus: 'chat' });
   }
-  // Moving the selection hands the viewport back to follow mode: the user is
-  // navigating the list again, so the pane should chase the cursor. The cursor
-  // walks the visible rows, subtasks included, and an expanded parent stays
-  // open so its rows do not vanish under the step.
+  // The cursor walks the visible rows, subtasks included, and an expanded
+  // parent stays open so its rows do not vanish under the step. The viewport
+  // only follows once the cursor would leave it.
   if (key.name === 'up') {
-    return step({ ...state, selectedTask: Math.max(0, state.selectedTask - 1), planScroll: null });
+    return step(settlePlan({ ...state, selectedTask: Math.max(0, state.selectedTask - 1) }));
   }
   if (key.name === 'down') {
-    return step({
-      ...state,
-      selectedTask: Math.min(planRows(state).length - 1, state.selectedTask + 1),
-      planScroll: null,
-    });
+    return step(settlePlan({ ...state, selectedTask: Math.min(planRows(state).length - 1, state.selectedTask + 1) }));
   }
 
   // pageup/pagedown only — a wheel notch is routed by the pointer well above
   // this, and never reaches the focused pane's handler.
   const scroll = scrollDelta(key, state);
-  if (scroll !== null) return scrollPlan(state, scroll);
+  if (scroll !== null) return scrollPlan(state, scroll, true);
 
   const row = selectedPlanRow(state);
   if (!row) return step(state);
@@ -1098,14 +1117,14 @@ function handlePlanKey(state: TuiState, key: Key): Step {
     // opens the editor as before.
     const hasSubtasks = (task.subtasks?.length ?? 0) > 0;
     if (hasSubtasks && state.expandedTaskId !== task.id) {
-      return step({ ...state, expandedTaskId: task.id, taskEditor: null, planScroll: null });
+      return step(settlePlan({ ...state, expandedTaskId: task.id, taskEditor: null }));
     }
     const text = task.prompt ?? task.description ?? task.title;
-    return step({
+    return step(settlePlan({
       ...state,
       expandedTaskId: task.id,
       taskEditor: { ...emptyEditor(), text, cursor: text.length },
-    });
+    }));
   }
   if (!state.sessionId || key.name !== 'char') return step(state);
 
@@ -1137,16 +1156,16 @@ function handlePlanKey(state: TuiState, key: Key): Step {
 /** Enter commits the prompt edit and collapses; escape discards it and collapses. */
 function handleTaskEditKey(state: TuiState, task: TaskView, editor: EditorState, key: Key): Step {
   if (key.name === 'enter') return commitTaskEdit(state, task, editor);
-  if (key.name === 'escape') return step({ ...state, expandedTaskId: null, taskEditor: null });
+  if (key.name === 'escape') return step(settlePlan({ ...state, expandedTaskId: null, taskEditor: null }));
   // The page keys still scroll the pane rather than move through the text,
   // same as when nothing is expanded.
   const scroll = scrollDelta(key, state);
-  if (scroll !== null) return scrollPlan(state, scroll);
-  return step({ ...state, taskEditor: applyKey(editor, key, taskEditorRoom(state)) });
+  if (scroll !== null) return scrollPlan(state, scroll, true);
+  return step(settlePlan({ ...state, taskEditor: applyKey(editor, key, taskEditorRoom(state)) }));
 }
 
 function commitTaskEdit(state: TuiState, task: TaskView, editor: EditorState): Step {
-  const collapsed = { ...state, expandedTaskId: null, taskEditor: null };
+  const collapsed = settlePlan({ ...state, expandedTaskId: null, taskEditor: null });
   const prompt = editor.text.trim();
   const original = task.prompt ?? task.description ?? task.title;
   if (!prompt || prompt === original || !state.sessionId) return step(collapsed);
@@ -1685,6 +1704,7 @@ function newSession(state: TuiState): Step {
     expandedTaskId: null,
     taskEditor: null,
     scroll: 0,
+    planScroll: null,
     status: 'idle',
     busyLabel: '',
     thinkingLine: '',

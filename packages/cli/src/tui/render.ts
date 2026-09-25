@@ -198,8 +198,7 @@ function renderSkills(state: TuiState, cols: number): string {
  * and a page notch measured from it would differ going up and coming back.
  */
 function scrolledBackMark(state: TuiState): string {
-  if (state.focus === 'plan') return state.planScroll === null ? '' : '↑ scrolled back · ↑↓ to follow';
-  return state.scroll > 0 ? '↑ scrolled back · pgdn for live' : '';
+  return state.focus !== 'plan' && state.scroll > 0 ? '↑ scrolled back · pgdn for live' : '';
 }
 
 function renderStatus(state: TuiState, cols: number): string {
