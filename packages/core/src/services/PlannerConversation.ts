@@ -114,12 +114,18 @@ export class ConversationBusyError extends ConversationEditError {
 /** Width of a rewind target's preview — one picker row, not the whole message. */
 const REWIND_PREVIEW_WIDTH = 80;
 
-/** A user message the conversation can be rewound to just before. */
+/** A user message a rewind can fork the conversation from just before. */
 export interface RewindTarget {
-  /** Position in the transcript — what {@link PlannerConversation.rewind} takes. */
+  /** Position in the transcript — what {@link PlannerConversation.cloneBefore} takes. */
   index: number;
   preview: string;
   timestamp: string;
+}
+
+/** What a rewind forks from, and the message it lands just before. */
+export interface RewoundDialogue {
+  dialogue: ForkedDialogue;
+  rewoundMessage: string;
 }
 
 /** What a compaction left behind. */
@@ -156,8 +162,8 @@ export interface ReplyOptions {
  * The live model context (a vendor service's message list, a harness planner's
  * process and native session id) is disposable: {@link reset} drops it and the
  * next turn is replayed from the transcript. That is what lets the transcript
- * be edited in place — truncated, replaced by a summary, cloned — without the
- * model's memory drifting from it.
+ * be replaced by a summary, or copied into a fork, without the model's memory
+ * drifting from it.
  */
 export class PlannerConversation {
   /** Bumped on every persist, so a rollback can tell whether its writes already reached disk. */
@@ -245,33 +251,6 @@ export class PlannerConversation {
   }
 
   /**
-   * Cut the dialogue back to just before the user message at `index` (a
-   * position in the transcript), discarding it and everything after. The task
-   * list is the host's and rides along untouched — rewinding moves where the
-   * conversation resumes, not what the plan is. The planner's research trace
-   * goes back to the same point, by time: its entries carry no link to the
-   * message that caused them.
-   */
-  rewind(index: number): LegacyPlanState {
-    this.assertIdle('rewind the conversation');
-    const plan = this.requirePlan();
-    if (!this.rewindTargets().some((t) => t.index === index)) {
-      if (index > 0) throw new ConversationEditError(`No user message at position ${index} to rewind to.`);
-      throw new ConversationEditError(this.transcript[0]?.kind === 'compaction'
-        ? 'The conversation was condensed there — a rewind cannot reach back past the summary.'
-        : 'The first message is the goal — start a new session to change it.');
-    }
-    const cutoff = this.transcript[index].timestamp;
-    const rewound = this.host.mutate(() => {
-      plan.conversationHistory = this.transcript.slice(0, index);
-      plan.researchLog = (plan.researchLog ?? []).filter((e) => e.timestamp < cutoff);
-      return true;
-    }, () => this.host.broadcastPlan());
-    this.reset();
-    return rewound!;
-  }
-
-  /**
    * Replace the transcript with a summary of it, keeping the last two
    * exchanges as they were, and drop the live context so the next message
    * replays from the shorter record.
@@ -349,6 +328,31 @@ export class PlannerConversation {
       conversationHistory: plan?.conversationHistory ?? [],
       researchLog: plan?.researchLog ?? [],
     });
+  }
+
+  /**
+   * A copy of the dialogue as it stood just before the user message at
+   * `index` (a position from {@link rewindTargets}) — what a rewind forks
+   * from — plus that message's full text, for a surface to offer back. This
+   * conversation is not touched. The research trace is cut at the same point
+   * by time: its entries carry no link to the message that caused them.
+   */
+  cloneBefore(index: number): RewoundDialogue {
+    this.assertIdle('rewind the conversation');
+    if (!this.rewindTargets().some((t) => t.index === index)) {
+      if (index > 0) throw new ConversationEditError(`No user message at position ${index} to rewind to.`);
+      throw new ConversationEditError(this.transcript[0]?.kind === 'compaction'
+        ? 'The conversation was condensed there — a rewind cannot reach back past the summary.'
+        : 'The first message is the goal — start a new session to change it.');
+    }
+    const { content: rewoundMessage, timestamp: cutoff } = this.transcript[index];
+    return {
+      dialogue: structuredClone({
+        conversationHistory: this.transcript.slice(0, index),
+        researchLog: (this.host.plan()?.researchLog ?? []).filter((e) => e.timestamp < cutoff),
+      }),
+      rewoundMessage,
+    };
   }
 
   /** A one-shot `modifyPlan` exchange. Call inside the host's mutation ritual. */

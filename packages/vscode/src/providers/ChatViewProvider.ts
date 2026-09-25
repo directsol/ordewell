@@ -174,9 +174,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Redraw only the transcript, after a rewind or compaction edited it. Unlike
+   * Redraw only the transcript, after a compaction edited it. Unlike
    * `restoreChat` this leaves the plan, task output and isolation state alone,
-   * because both edits are allowed while a run is executing.
+   * because a compaction is allowed while a run is executing.
    */
   replaceConversation(history: ConversationMessage[], hasPlan: boolean): void {
     this.postMessage({ type: 'conversationReplaced', history, hasPlan });

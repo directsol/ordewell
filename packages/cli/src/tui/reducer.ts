@@ -1630,7 +1630,7 @@ function rewind(state: TuiState, arg: string | undefined): Step {
   return withIdlePlanner(state, (sessionId) => {
     if (arg === undefined) {
       return step(
-        { ...state, rewindTargets: null, overlay: { kind: 'picker', picker: picker('Rewind to before…', [], { kind: 'rewind' }, { hint: 'The chosen message and everything after it are discarded; the tasks stay as they are.' }) } },
+        { ...state, rewindTargets: null, overlay: { kind: 'picker', picker: picker('Rewind to before…', [], { kind: 'rewind' }, { hint: 'Forks the conversation from just before the chosen message; the original is kept and the tasks ride along.' }) } },
         [{ type: 'loadRewindTargets', sessionId }],
       );
     }

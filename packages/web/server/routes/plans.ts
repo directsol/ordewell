@@ -296,7 +296,8 @@ export function plansRoute(pool: OrchestratorPool) {
   });
 
   // Fork and rewind act on the conversation, never on the plan: the task list
-  // rides along as-is (ADR-0002, update of 2026-09-25).
+  // rides along as-is (ADR-0002, update of 2026-09-25). A rewind is a fork from
+  // just before a user message; the original session is left as it was.
   router.post('/:sessionId/conversation/fork', (c) => {
     try {
       return c.json(pool.forkConversation(c.req.param('sessionId')));
@@ -317,7 +318,7 @@ export function plansRoute(pool: OrchestratorPool) {
     try {
       const { index } = await c.req.json();
       if (!Number.isInteger(index) || index < 0) return c.json({ error: 'index must be a non-negative integer' }, 400);
-      return c.json({ plan: pool.session(c.req.param('sessionId')).rewindConversation(index) });
+      return c.json(pool.rewindConversation(c.req.param('sessionId'), index));
     } catch (err) {
       return conversationFailure(c, err);
     }

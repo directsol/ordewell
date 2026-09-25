@@ -225,6 +225,35 @@ as-is makes the result obvious — the conversation moved, the plan did not — 
 the planner sees the real current plan in its per-turn block on the next
 message, so it can reconcile anything the user wants changed.
 
+## Update (2026-09-25) — rewind forks from a point instead of cutting the line
+
+The rewind above cut `conversationHistory` in place, so the discarded turns
+were gone for good: a user who rewound to try another direction could not go
+back to the one they left. A rewind is now a **fork from a point**. It copies
+the transcript up to just before the chosen user message, with the
+`researchLog` cut at the same point and the current task list taken through
+`forkPlanState`, into a new persisted session, and the daemon adopts it the way
+it adopts a fork. The original session — its file, its transcript and its live
+planner context — is not touched. There is one meaning of Rewind: the in-place
+cut is removed from core, the daemon, the CLI and the VS Code extension rather
+than kept beside it.
+
+What stays the same: the opening goal and a compaction summary are floors a
+rewind cannot cross, the task list rides along as-is, and a rewind is refused
+while a planner turn is in flight and allowed while a run executes. What
+changes about the live context: the original keeps its own, and the fork has
+none, so its first message replays the shortened transcript on every backend
+— no `reset` is needed to keep a harness planner from resuming the turns the
+fork left out. The rewound message's full text comes back with the fork, so a
+surface can offer it again for editing and resending.
+
+**Why:** rewinding no longer discards history. The copy costs a session file;
+the in-place cut cost the conversation the user rewound away from.
+
+**Rejected: keeping both, an in-place rewind and a fork-from-point.** Two
+operations under one name, differing only in whether history survives, is the
+kind of distinction users learn by losing work.
+
 ## Update (2026-09-25) — the conversation line can be condensed on request
 
 Issue #10. The line only grew: reactive and proactive compaction
@@ -271,3 +300,5 @@ rewind or compaction redraws only the webview's transcript, never the plan or a
 running task's output, because both are allowed mid-run. A fork is loaded as a
 saved session, and loading replaces the extension's single `Session` and stops
 its run, so the extension asks before forking while one is executing.
+(Since the rewind-as-fork update above, a rewind is loaded as a saved session
+like a fork, and asks the same way; only a compaction redraws in place.)

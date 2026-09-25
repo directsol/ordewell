@@ -2,7 +2,7 @@ import { createAiService, type IAiService } from './AiService';
 import { applyTaskOps, canMergeTasks, canSplitTask } from './TaskOps';
 import { validateTaskEdit, type EditCatalog } from './TaskEditValidator';
 import { ConversationEditError, PlannerConversation, type ConversationCompaction, type ConversationOpening, type RewindTarget } from './PlannerConversation';
-import { forkPlanState } from './conversationFork';
+import { forkPlanState, type ForkedDialogue } from './conversationFork';
 import { Planner } from './Planner';
 import { TaskOrchestrator } from './TaskOrchestrator';
 import type { OrchestratorObserver } from './TaskOrchestrator';
@@ -147,6 +147,11 @@ export interface ConversationFork {
   sessionId: string;
   goal: string;
   workspace: string;
+}
+
+/** A fork made by a rewind, and the full text of the message it was made just before. */
+export interface ConversationRewind extends ConversationFork {
+  rewoundMessage: string;
 }
 
 export interface SessionDeps {
@@ -734,28 +739,33 @@ export class Session {
    */
   forkConversation(): ConversationFork {
     if (!this.plan) throw new ConversationEditError('No planning conversation to fork');
-    const dialogue = this.conversation.clone();
+    return this.saveFork(this.conversation.clone());
+  }
+
+  /**
+   * Fork the conversation from just before a user message (a transcript
+   * position from {@link rewindTargets}): the fork holds everything said
+   * before it and the current task list, like {@link forkConversation}, and
+   * this session keeps its whole history. The message's full text comes back
+   * so a surface can offer it for resending.
+   */
+  rewindConversation(userMessageIndex: number): ConversationRewind {
+    if (!this.plan) throw new ConversationEditError('No planning conversation to rewind');
+    const { dialogue, rewoundMessage } = this.conversation.cloneBefore(userMessageIndex);
+    return { ...this.saveFork(dialogue), rewoundMessage };
+  }
+
+  private saveFork(dialogue: ForkedDialogue): ConversationFork {
     const sessionId = mintSessionId();
-    const plan = forkPlanState(this.plan, this.store.planTasks, dialogue, new Date().toISOString());
+    const plan = forkPlanState(this.plan!, this.store.planTasks, dialogue, new Date().toISOString());
     saveSession(plan, this.goal, this.workspace, sessionId);
     return { sessionId, goal: this.goal, workspace: this.workspace };
   }
 
   /**
-   * Cut the conversation back to just before a user message (a transcript
-   * position from {@link rewindTargets}). Conversation only: the task list,
-   * and any run executing it, carry on as they are. The planner's live context
-   * is dropped, so the next message replays from the shortened transcript.
-   */
-  rewindConversation(userMessageIndex: number): LegacyPlanState {
-    if (!this.plan) throw new ConversationEditError('No planning conversation to rewind');
-    return this.conversation.rewind(userMessageIndex);
-  }
-
-  /**
    * Condense the conversation on the user's say-so: a hidden planner turn
    * summarises it, and the summary replaces everything but the last two
-   * exchanges. Conversation only, like a rewind — the tasks, and any run
+   * exchanges. Conversation only — the tasks, and any run
    * executing them, are untouched. Atomic: a failed or stopped turn changes
    * nothing.
    */

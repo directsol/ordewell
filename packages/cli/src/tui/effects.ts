@@ -30,7 +30,7 @@ export interface OrdewellApi {
   deleteSession(sessionId: string, workspace?: string): Promise<{ ok: boolean }>;
   forkConversation(sessionId: string): Promise<{ sessionId: string; goal: string; plan: unknown }>;
   rewindTargets(sessionId: string): Promise<RewindTargetView[]>;
-  rewindConversation(sessionId: string, index: number): Promise<unknown>;
+  rewindConversation(sessionId: string, index: number): Promise<{ sessionId: string; goal: string; plan: unknown; rewoundMessage: string }>;
   compactConversation(sessionId: string): Promise<{ plan: unknown; summary: string; keptMessages: number }>;
   closeSession(sessionId: string): Promise<{ ok: boolean }>;
   reviewRunDiff(sessionId: string): Promise<string>;
@@ -468,11 +468,14 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
       dispatch({ type: 'rewindTargetsLoaded', targets: await api.rewindTargets(effect.sessionId), sessionId: effect.sessionId });
       return;
 
+    // A rewind is a fork from an earlier point, so the TUI follows it the way
+    // it follows `/fork`; the original keeps its whole conversation.
     case 'rewindConversation': {
-      const plan = await api.rewindConversation(effect.sessionId, effect.index);
-      dispatch({ type: 'chatRestored', history: (plan as { conversationHistory?: ConversationMessage[] }).conversationHistory ?? [], sessionId: effect.sessionId });
-      dispatch({ type: 'planUpdated', plan, sessionId: effect.sessionId });
-      dispatch({ type: 'notice', message: 'Rewound the conversation. The tasks are unchanged; your next message continues from here.' });
+      const fork = await api.rewindConversation(effect.sessionId, effect.index);
+      dispatch({ type: 'sessionForked', sessionId: fork.sessionId, goal: fork.goal });
+      dispatch({ type: 'chatRestored', history: (fork.plan as { conversationHistory?: ConversationMessage[] }).conversationHistory ?? [], sessionId: fork.sessionId });
+      dispatch({ type: 'planUpdated', plan: fork.plan, sessionId: fork.sessionId });
+      dispatch({ type: 'notice', message: `Rewound ${effect.sessionId} into a fork, ${fork.sessionId} — the original is kept. /sessions to go back.` });
       return;
     }
 

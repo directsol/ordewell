@@ -109,6 +109,24 @@ describe('Session.forkConversation', () => {
     expect(session.planTasks.map((t) => t.status)).toEqual(['completed', 'in_progress', 'awaiting_user', 'failed', 'pending']);
   });
 
+  it('is what a rewind forks through: mid-run, the rewound fork carries no run either', () => {
+    const session = makeSession();
+    const plan = runningPlan();
+    plan.conversationHistory!.push({ role: 'assistant', content: 'Renamed.', timestamp: '2026-01-01T00:00:03Z' });
+    session.loadPlan(plan, GOAL, workspace, { sessionId: 'session-original', persist: false });
+    vi.mocked(sessionStore.saveSession).mockRestore();
+
+    const fork = session.rewindConversation(2);
+
+    const saved = sessionStore.loadSession(fork.sessionId, workspace)!.plan;
+    expect(saved.conversationHistory!.map((m) => m.content)).toEqual([GOAL, 'Plan generated with 5 tasks.']);
+    expect(saved.tasks.map((t) => [t.id, t.status])).toEqual([
+      ['done', 'completed'], ['running', 'pending'], ['checkpoint', 'pending'], ['broken', 'pending'], ['later', 'pending'],
+    ]);
+    expect(saved.queuedMessages).toBeUndefined();
+    expect(session.planState!.conversationHistory).toHaveLength(4);
+  });
+
   it('leaves the isolation run and its branches with the original plan', async () => {
     const session = makeSession({ isolation: new FakeWorktreeIsolation() });
     const plan = runningPlan();

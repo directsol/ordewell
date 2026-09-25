@@ -254,7 +254,7 @@ export async function handleSlashCommand(text: string, deps: SlashDeps): Promise
     vscode.window.showInformationMessage(
       'Commands: /planner, /model, /model set, /planner-effort, /key set, /sessions, /new, /refresh, /auto, /allowlist, /help. Type / after a command to see model suggestions.\n'
       + '/fork — continue in a copy of this conversation and its tasks; the original stays as it is. '
-      + '/rewind [<message>] — rewind the conversation to just before one of your messages (tasks are kept). '
+      + '/rewind [<message>] — fork the conversation from just before one of your messages; the original stays as it is. '
       + '/compact — condense this conversation into a summary; the last two exchanges and all tasks are kept.',
     );
     return;

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Rewind forks the conversation instead of cutting it.** `/rewind` ("Ordewell:
+  Rewind Conversation") copies the conversation up to just before the chosen
+  message, with the current tasks, into a new session and loads it. The
+  original keeps its whole conversation; use `/sessions` to go back. Like
+  `/fork`, it asks first while a run is executing, since loading stops it.
+
 ## [0.5.0] — 2026-09-25
 
 ### Added

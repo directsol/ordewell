@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Hono } from 'hono';
-import { ConversationBusyError, ConversationEditError, loadSession, saveSession, type LegacyPlanState } from '@ordewell/core';
+import { ConversationBusyError, ConversationEditError, listSessions, loadSession, saveSession, type LegacyPlanState } from '@ordewell/core';
 import { OrchestratorPool } from '../../pool/orchestratorPool';
 import { plansRoute } from '../plans';
 
@@ -80,20 +80,21 @@ describe('GET /:sessionId/conversation/rewind-targets', () => {
 });
 
 describe('POST /:sessionId/conversation/rewind', () => {
-  it('rewinds to just before the given user message and answers the plan', async () => {
-    const rewindConversation = vi.fn().mockReturnValue({ tasks: [], conversationHistory: [] });
-    const app = appFor(poolWith({ rewindConversation }));
+  it('forks from just before the given user message and answers the fork and the rewound message', async () => {
+    const fork = { sessionId: 'session-fork', goal: 'goal', plan: { tasks: [], conversationHistory: [] }, rewoundMessage: 'the long way\nround' };
+    const rewindConversation = vi.fn().mockReturnValue(fork);
+    const app = appFor(poolWith({}, { rewindConversation }));
 
     const res = await post(app, 'conversation/rewind', { index: 2 });
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ plan: { tasks: [], conversationHistory: [] } });
-    expect(rewindConversation).toHaveBeenCalledWith(2);
+    expect(await res.json()).toEqual(fork);
+    expect(rewindConversation).toHaveBeenCalledWith('s1', 2);
   });
 
   it.each([[{}], [{ index: '2' }], [{ index: 1.5 }], [{ index: -1 }]])('refuses %j without touching the session', async (body) => {
     const rewindConversation = vi.fn();
-    const app = appFor(poolWith({ rewindConversation }));
+    const app = appFor(poolWith({}, { rewindConversation }));
 
     const res = await post(app, 'conversation/rewind', body);
 
@@ -102,7 +103,7 @@ describe('POST /:sessionId/conversation/rewind', () => {
   });
 
   it('is a 400 for an index that is not a rewind target', async () => {
-    const app = appFor(poolWith({ rewindConversation: () => { throw new ConversationEditError('No user message at position 3 to rewind to.'); } }));
+    const app = appFor(poolWith({}, { rewindConversation: () => { throw new ConversationEditError('No user message at position 3 to rewind to.'); } }));
 
     const res = await post(app, 'conversation/rewind', { index: 3 });
 
@@ -111,9 +112,15 @@ describe('POST /:sessionId/conversation/rewind', () => {
   });
 
   it('is a conflict while the planner is answering', async () => {
-    const app = appFor(poolWith({ rewindConversation: () => { throw new ConversationBusyError('rewind the conversation'); } }));
+    const app = appFor(poolWith({}, { rewindConversation: () => { throw new ConversationBusyError('rewind the conversation'); } }));
 
     expect((await post(app, 'conversation/rewind', { index: 2 })).status).toBe(409);
+  });
+
+  it('is a 404 for a session the daemon does not hold', async () => {
+    const app = appFor(poolWith({}, { rewindConversation: () => { throw new Error('Session not found'); } }));
+
+    expect((await post(app, 'conversation/rewind', { index: 2 })).status).toBe(404);
   });
 });
 
@@ -178,7 +185,7 @@ describe('POST /:sessionId/converse/message', () => {
 });
 
 describe('conversation routes — real daemon wiring', () => {
-  it('rewinds a saved session and persists it, then forks it into a second addressable session', async () => {
+  it('rewinds a saved session into an adopted fork, leaving the original\'s file byte for byte, then forks the fork', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'ordewell-conv-'));
     mkdirSync(join(workspace, '.git'));
     const pool = new OrchestratorPool();
@@ -188,21 +195,33 @@ describe('conversation routes — real daemon wiring', () => {
         conversationHistory: [
           { role: 'user', content: 'goal', timestamp: '2026-01-01T00:00:00.000Z' },
           { role: 'assistant', content: 'which way?', timestamp: '2026-01-01T00:00:01.000Z' },
-          { role: 'user', content: 'the long way', timestamp: '2026-01-01T00:00:02.000Z' },
+          { role: 'user', content: 'the long way\nround the hill', timestamp: '2026-01-01T00:00:02.000Z' },
           { role: 'assistant', content: 'ok', timestamp: '2026-01-01T00:00:03.000Z' },
         ],
       } as LegacyPlanState;
       saveSession(plan, 'goal', workspace, 's1');
       pool.adoptSavedSession('s1', workspace);
+      const sessionsDir = join(workspace, '.ordewell', 'sessions');
+      const [originalFile] = readdirSync(sessionsDir);
+      const originalBytes = readFileSync(join(sessionsDir, originalFile));
       const app = appFor(pool);
 
       const targets = (await (await app.request('/api/plans/s1/conversation/rewind-targets')).json()) as { targets: { index: number }[] };
       expect(targets.targets.map((t) => t.index)).toEqual([2]);
 
-      expect((await post(app, 'conversation/rewind', { index: 2 })).status).toBe(200);
-      expect(loadSession('s1', workspace)!.plan.conversationHistory!.map((m) => m.content)).toEqual(['goal', 'which way?']);
+      const res = await post(app, 'conversation/rewind', { index: 2 });
+      expect(res.status).toBe(200);
+      const rewound = (await res.json()) as { sessionId: string; goal: string; plan: LegacyPlanState; rewoundMessage: string };
+      expect(Object.keys(rewound).sort()).toEqual(['goal', 'plan', 'rewoundMessage', 'sessionId']);
+      expect(rewound.goal).toBe('goal');
+      expect(rewound.rewoundMessage).toBe('the long way\nround the hill');
+      expect(rewound.plan.conversationHistory).toEqual(plan.conversationHistory!.slice(0, 2));
+      expect(pool.hasSession(rewound.sessionId)).toBe(true);
+      expect(listSessions(workspace).map((m) => m.id).sort()).toEqual([rewound.sessionId, 's1'].sort());
+      expect(readFileSync(join(sessionsDir, originalFile)).equals(originalBytes)).toBe(true);
+      expect(pool.session('s1').planState!.conversationHistory).toHaveLength(4);
 
-      const fork = (await (await post(app, 'conversation/fork')).json()) as { sessionId: string };
+      const fork = (await (await app.request(`/api/plans/${rewound.sessionId}/conversation/fork`, { method: 'POST' })).json()) as { sessionId: string };
       expect(pool.hasSession(fork.sessionId)).toBe(true);
       expect(loadSession(fork.sessionId, workspace)!.plan.conversationHistory).toHaveLength(2);
     } finally {

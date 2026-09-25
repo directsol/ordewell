@@ -1215,32 +1215,34 @@ describe('conversation fork and rewind effects', () => {
     expect(h.actions).toEqual([{ type: 'rewindTargetsLoaded', targets, sessionId: 'session-1' }]);
   });
 
-  it('rewinds, then redraws the transcript from what the daemon kept', async () => {
+  it('rewinds into a fork, then switches the TUI to it with its conversation and tasks', async () => {
     const plan = { tasks: [{ id: 't1' }], conversationHistory: history };
-    const h = harness({ rewindConversation: vi.fn().mockResolvedValue(plan) });
+    const h = harness({ rewindConversation: vi.fn().mockResolvedValue({ sessionId: 'session-fork', goal: 'build me a parser', plan, rewoundMessage: 'JSON only' }) });
 
     await runEffect({ type: 'rewindConversation', sessionId: 'session-1', index: 2 }, h.deps);
 
     expect(h.api.rewindConversation).toHaveBeenCalledWith('session-1', 2);
     expect(h.actions).toEqual([
-      { type: 'chatRestored', history, sessionId: 'session-1' },
-      { type: 'planUpdated', plan, sessionId: 'session-1' },
-      { type: 'notice', message: expect.stringMatching(/Rewound/) },
+      { type: 'sessionForked', sessionId: 'session-fork', goal: 'build me a parser' },
+      { type: 'chatRestored', history, sessionId: 'session-fork' },
+      { type: 'planUpdated', plan, sessionId: 'session-fork' },
+      { type: 'notice', message: expect.stringMatching(/session-1.*session-fork/) },
     ]);
   });
 
-  it('a rewound transcript replaces the one on screen', async () => {
+  it('shows the fork\'s shorter transcript in place of the original\'s', async () => {
     const plan = { tasks: [], conversationHistory: history };
-    const h = harness({ rewindConversation: vi.fn().mockResolvedValue(plan) });
+    const h = harness({ rewindConversation: vi.fn().mockResolvedValue({ sessionId: 'session-fork', goal: 'build me a parser', plan, rewoundMessage: 'left behind' }) });
     let state: TuiState = initialState({
       sessionId: 'session-1',
-      messages: [...history, { role: 'user', content: 'discarded', timestamp: '2026-01-01T00:00:02Z' }],
+      messages: [...history, { role: 'user', content: 'left behind', timestamp: '2026-01-01T00:00:02Z' }],
     });
 
     await runEffect({ type: 'rewindConversation', sessionId: 'session-1', index: 2 }, h.deps);
     for (const action of h.actions) state = reduce(state, action).state;
 
-    expect(state.messages.map((m) => m.content)).not.toContain('discarded');
+    expect(state.sessionId).toBe('session-fork');
+    expect(state.messages.map((m) => m.content)).not.toContain('left behind');
     expect(state.messages.map((m) => m.content)).toEqual(expect.arrayContaining(['build me a parser', 'Which formats?']));
   });
 });

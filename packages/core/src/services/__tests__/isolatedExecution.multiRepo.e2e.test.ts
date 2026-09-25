@@ -393,7 +393,7 @@ describe.skipIf(!hasGit)('isolated execution over a folder of three repositories
     expect(env.agent.errors).toEqual([]);
   }, 60_000);
 
-  it('never forks the run, and leaves it where it is through a rewind and a compaction', async () => {
+  it('never forks the run, and leaves it where it is through a fork, a rewind and a compaction', async () => {
     const continueConversation = vi.fn().mockResolvedValue(say('<conversation_summary>A group, a rename and a conflict.</conversation_summary>'));
     const env = envFor({ aiService: { continueConversation, hasActiveConversation: () => true } });
     const session = env.session();
@@ -406,7 +406,14 @@ describe.skipIf(!hasGit)('isolated execution over a folder of three repositories
     expect(forked.isolation).toBeUndefined();
     expect(JSON.stringify(forked)).not.toContain(env.run().id);
 
-    session.rewindConversation(6);
+    const rewound = session.rewindConversation(6);
+    const [rewoundFork] = vi.mocked(sessionStore.saveSession).mock.calls.find((call) => call[3] === rewound.sessionId)!;
+    expect(rewoundFork.conversationHistory).toHaveLength(6);
+    expect(rewoundFork.isolation).toBeUndefined();
+    expect(session.planState!.conversationHistory).toHaveLength(8);
+    expect(session.planState!.isolation).toEqual(record);
+    expect(gitState(env.roots)).toEqual(before);
+
     await session.compactConversation();
 
     expect(session.planState!.conversationHistory![0].kind).toBe('compaction');

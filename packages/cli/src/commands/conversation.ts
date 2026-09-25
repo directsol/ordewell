@@ -60,14 +60,17 @@ export async function handleCompact(subArgs: string[], injectedApi?: ApiClient):
 }
 
 /**
- * Cut the conversation back to just before message <n>. With no <n>, print the
- * messages the TUI's picker would offer — the same numbers `rewind <n>` takes.
+ * Fork the conversation from just before message <n> and make the fork the
+ * current session, as `fork` does; the original keeps its whole history. With
+ * no <n>, print the messages the TUI's picker would offer — the same numbers
+ * `rewind <n>` takes. The rewound message is printed in full so it can be
+ * resent, or edited and sent, in the fork.
  */
 export async function handleRewind(subArgs: string[], injectedApi?: ApiClient): Promise<void> {
   const arg = positionals(subArgs)[0];
   if (arg !== undefined && !/^\d+$/.test(arg)) fail(REWIND_USAGE);
 
-  const { api, sessionId } = await adopted(subArgs, injectedApi);
+  const { api, sessionId, workspace } = await adopted(subArgs, injectedApi);
 
   if (arg === undefined) {
     let targets;
@@ -82,14 +85,19 @@ export async function handleRewind(subArgs: string[], injectedApi?: ApiClient): 
     }
     console.log('Your messages, most recent first:\n');
     for (const t of [...targets].reverse()) console.log(`  ${String(t.index).padStart(4)}  ${t.preview}`);
-    console.log('\n  `ordewell rewind <n>` discards message <n> and everything after it. The tasks stay as they are.');
+    console.log('\n  `ordewell rewind <n>` forks the conversation from just before message <n>. The original is kept, and the tasks ride along.');
     return;
   }
 
+  let fork;
   try {
-    await api.rewindConversation(sessionId, Number(arg));
+    fork = await api.rewindConversation(sessionId, Number(arg));
   } catch (err) {
     fail(`Failed to rewind: ${(err as Error).message}`);
   }
-  console.log(`Rewound ${sessionId} to just before message ${arg}. The tasks are unchanged; the next message continues from there.`);
+  saveLastSession(fork.sessionId, fork.goal, fork.plan.runners ?? [], workspace);
+  console.log(`Forked ${sessionId} into ${fork.sessionId} from just before message ${arg} — the fork is now the current session.`);
+  console.log(`  \`ordewell sessions load ${sessionId}\` to go back to the original.`);
+  console.log('\nThe message you rewound to, to resend or edit:\n');
+  console.log(fork.rewoundMessage);
 }

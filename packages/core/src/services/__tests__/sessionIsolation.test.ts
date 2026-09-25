@@ -437,9 +437,17 @@ describe('Session with worktree isolation', () => {
       const marks = lastStatus()!.tasks.map((t) => [t.id, t.status, t.isolation]);
       expect(marks.map(([, , i]) => (i as { state: string }).state)).toEqual(['integrated', 'conflict']);
 
-      session.rewindConversation(6);
-      expect(saved()!.conversationHistory).toHaveLength(6);
-      expect(saved()!.isolation).toEqual(record);
+      const saves = vi.mocked(sessionStore.saveSession).mock.calls;
+      const before = saves.length;
+      const fork = session.rewindConversation(6);
+      // The only write is the fork's: the original's record is not rewritten.
+      expect(saves).toHaveLength(before + 1);
+      const [forked, , , forkedId] = saves.at(-1)!;
+      expect(forkedId).toBe(fork.sessionId);
+      expect(forked.conversationHistory).toHaveLength(6);
+      expect(forked.isolation).toBeUndefined();
+      expect(session.planState!.conversationHistory).toHaveLength(8);
+      expect(session.planState!.isolation).toEqual(record);
 
       await session.compactConversation();
       expect(saved()!.conversationHistory![0].kind).toBe('compaction');

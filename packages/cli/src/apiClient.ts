@@ -16,6 +16,18 @@ export interface PlanResult {
 /** How a merge of the run into the user's checkout went, and on anything but `merged`, which repo stopped it. */
 export type MergeRunResult = IsolationMergeResult;
 
+/** A fork the daemon has already adopted. */
+export interface ConversationForkResult {
+  sessionId: string;
+  goal: string;
+  plan: SerializedPlan;
+}
+
+/** A fork made by a rewind, with the full text of the message it was made just before. */
+export interface ConversationRewindResult extends ConversationForkResult {
+  rewoundMessage: string;
+}
+
 interface ErrorResponse {
   error?: string;
   code?: string;
@@ -352,8 +364,8 @@ export class ApiClient {
   }
 
   /** Copy the conversation and its tasks into a new session the daemon has already adopted. */
-  async forkConversation(sessionId: string): Promise<{ sessionId: string; goal: string; plan: SerializedPlan }> {
-    const res = await this.httpRequest<{ sessionId: string; goal: string; plan: SerializedPlan } & ErrorResponse>('POST', `/api/plans/${sessionId}/conversation/fork`);
+  async forkConversation(sessionId: string): Promise<ConversationForkResult> {
+    const res = await this.httpRequest<ConversationForkResult & ErrorResponse>('POST', `/api/plans/${sessionId}/conversation/fork`);
     if (res.status !== 200) {
       throw new Error(res.data?.error || 'Fork failed');
     }
@@ -368,13 +380,17 @@ export class ApiClient {
     return res.data.targets;
   }
 
-  /** Cut the conversation back to just before the user message at `index` (a transcript position). */
-  async rewindConversation(sessionId: string, index: number): Promise<SerializedPlan> {
-    const res = await this.httpRequest<{ plan: SerializedPlan } & ErrorResponse>('POST', `/api/plans/${sessionId}/conversation/rewind`, { index });
+  /**
+   * Fork the conversation from just before the user message at `index` (a
+   * transcript position) into a session the daemon has already adopted. The
+   * original is left as it was; `rewoundMessage` is that message in full.
+   */
+  async rewindConversation(sessionId: string, index: number): Promise<ConversationRewindResult> {
+    const res = await this.httpRequest<ConversationRewindResult & ErrorResponse>('POST', `/api/plans/${sessionId}/conversation/rewind`, { index });
     if (res.status !== 200) {
       throw new Error(res.data?.error || 'Rewind failed');
     }
-    return res.data.plan;
+    return { sessionId: res.data.sessionId, goal: res.data.goal, plan: res.data.plan, rewoundMessage: res.data.rewoundMessage };
   }
 
   /**
