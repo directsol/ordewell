@@ -8,6 +8,13 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The welcome no longer jumps from the top to the bottom at launch.** The chat
+  pane now hangs off the top while its content fits and shows the newest lines
+  only once it overflows. The startup refresh no longer posts a "Refreshed…"
+  notice; a typed `/refresh` still does.
+
 ## [0.5.0] — 2026-09-25
 
 ### Added

@@ -31,6 +31,12 @@ describe('createApp', () => {
     expect(h.performed).toContainEqual({ type: 'refresh' });
   });
 
+  it('startup refresh posts no notice', async () => {
+    const h = harness();
+    h.app.start();
+    expect(h.app.getState().messages).toEqual([]);
+  });
+
   it('redraws after every action', async () => {
     const h = harness();
     h.app.start();
@@ -49,7 +55,7 @@ describe('createApp', () => {
     for (const char of '/refresh') h.app.dispatch({ type: 'key', key: { name: 'char', char } });
     h.app.dispatch({ type: 'key', key: { name: 'enter' } });
 
-    expect(h.performed).toEqual([{ type: 'refresh' }]);
+    expect(h.performed).toEqual([{ type: 'refresh', announce: true }]);
   });
 
   it('exposes the current state', () => {

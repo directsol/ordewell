@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce, type Step } from '../reducer';
 import { render } from '../render';
-import { bodyRows, chatBodyLines, chatScrollMax, planScrollExtent } from '../layout';
+import { bodyRows, chatBodyLines, chatLayout, chatScrollMax, planScrollExtent } from '../layout';
 import type { ChatMessage, TaskView, TuiState } from '../state';
 
 /**
@@ -186,5 +186,17 @@ describe('chat body memo', () => {
     chatScrollMax(state);
 
     expect(chatBodyLines(state.messages, state.cols)).toBe(painted);
+  });
+});
+
+describe('chat anchor', () => {
+  it('top-anchors content that fits and bottom-anchors what overflows', () => {
+    expect(chatLayout(chatState(1, { tasks: tasks(2) }), 12, 60).anchor).toBe('top');
+    expect(chatLayout(chatState(40, { tasks: tasks(2) }), 12, 60).anchor).toBe('bottom');
+  });
+
+  it('top-anchors the welcome with or without messages while it fits', () => {
+    expect(chatLayout(chatState(0, { rows: 60 }), 60, 80).anchor).toBe('top');
+    expect(chatLayout(chatState(1, { rows: 60 }), 60, 80).anchor).toBe('top');
   });
 });

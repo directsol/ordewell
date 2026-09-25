@@ -70,7 +70,8 @@ export type Effect =
   | { type: 'removeTask'; sessionId: string; taskId: string }
   | { type: 'openTaskTerminal'; sessionId: string; taskId: string }
   | { type: 'respondApproval'; sessionId: string; approvalId: string; granted: boolean }
-  | { type: 'refresh' }
+  /** Startup refreshes silently; only a typed `/refresh` sets `announce`. */
+  | { type: 'refresh'; announce?: boolean }
   | { type: 'exit' };
 
 export type TaskAction = 'complete' | 'uncomplete' | 'skip' | 'retry' | 'cancel' | 'force-start';
@@ -1493,7 +1494,7 @@ function runCommand(state: TuiState, { name, args }: ParsedCommand): Step {
     case 'quit':
       return step({ ...state, exiting: true }, [{ type: 'exit' }]);
     case 'refresh':
-      return step(state, [{ type: 'refresh' }]);
+      return step(state, [{ type: 'refresh', announce: true }]);
 
     case 'run':
       return withSession(state, (sessionId) => step(state, [{ type: 'execute', sessionId }]));

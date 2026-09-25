@@ -223,6 +223,30 @@ describe('transcript', () => {
     expect(out).toContain('Which database?');
   });
 
+  it('keeps the welcome on the top body row with zero or one message', () => {
+    const none = screen({ rows: 40 }).map(stripAnsi);
+    const one = screen({ rows: 40, messages: [{ role: 'system', content: 'hello there', timestamp: '' }] }).map(stripAnsi);
+    const firstRow = none.findIndex((l, i) => i > 0 && /\S/.test(l));
+    expect(firstRow).toBeLessThan(4);
+    expect(one[firstRow]).toBe(none[firstRow]);
+  });
+
+  it('puts the newest message on the last body row once the chat overflows', () => {
+    const messages: ChatMessage[] = Array.from({ length: 60 }, (_, i) => ({
+      role: 'user' as const, content: `message ${i + 1}`, timestamp: '',
+    }));
+    const rows = screen({ rows: 24, messages }).map(stripAnsi);
+    const last = rows.map((l, i) => (l.includes('message 60') ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
+    expect(last).toBeGreaterThan(rows.length - 8);
+  });
+
+  it('top-anchors the remaining messages once a plan replaces the welcome', () => {
+    const rows = screen({ rows: 24, tasks, messages: [{ role: 'assistant', content: 'Which database?', timestamp: '' }] }).map(stripAnsi);
+    const at = rows.findIndex((l) => l.includes('Which database?'));
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(at).toBeLessThan(6);
+  });
+
   it('drops the welcome once a plan is produced', () => {
     const out = text({ tasks, messages: [{ role: 'assistant', content: 'Which database?', timestamp: '' }] });
     expect(out).not.toMatch(/Describe a goal/i);

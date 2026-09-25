@@ -907,6 +907,18 @@ describe('catalogs and sessions', () => {
     await runEffect({ type: 'refresh' }, h.deps);
     expect(types(h.actions)).toEqual(expect.arrayContaining(['runnersLoaded', 'settingsLoaded', 'modelsLoaded']));
   });
+
+  it('refresh stays silent unless announced', async () => {
+    const h = harness();
+    await runEffect({ type: 'refresh' }, h.deps);
+    expect(types(h.actions)).not.toContain('notice');
+  });
+
+  it('an announced refresh posts the notice', async () => {
+    const h = harness();
+    await runEffect({ type: 'refresh', announce: true }, h.deps);
+    expect(h.actions).toContainEqual({ type: 'notice', message: 'Refreshed runners, settings and models.' });
+  });
 });
 
 describe('failures', () => {
