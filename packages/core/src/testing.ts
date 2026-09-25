@@ -120,6 +120,8 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
   changes = new Map<string, string[]>();
   /** Per task id, the repo its landing stops in when its outcome is not `merged`; its first changed repo when not listed. */
   stopsIn = new Map<string, string>();
+  /** Per task id, the files a `conflict` outcome names; empty when not listed. */
+  conflictFiles = new Map<string, string[]>();
   /** What `mergeIntoCheckedOut` answers. */
   mergeResult: IsolationMergeResult = { outcome: 'merged' };
   /** What `startRun` shares and `prepare` copies, to exercise their notices. */
@@ -205,8 +207,15 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
     delete run.landing;
     const outcome = this.outcomes.get(task.id) ?? 'merged';
     record.status = outcome;
-    if (outcome === 'merged') delete record.conflictRepo;
-    else record.conflictRepo = this.stopsIn.get(task.id) ?? changed[0] ?? SELF_REPO;
+    if (outcome === 'merged') {
+      delete record.conflictRepo;
+      delete record.conflictFiles;
+    } else {
+      record.conflictRepo = this.stopsIn.get(task.id) ?? changed[0] ?? SELF_REPO;
+      const files = this.conflictFiles.get(task.id);
+      if (files) record.conflictFiles = files;
+      else delete record.conflictFiles;
+    }
     return outcome;
   }
 

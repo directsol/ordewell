@@ -3,7 +3,7 @@ import SubTaskCard from './SubTaskCard';
 import ModelSelector, { getModelClass, providerLabel } from './ModelSelector';
 import DependencyPicker from './DependencyPicker';
 import { lastLine } from '../taskOutput';
-import { dependencyCandidates } from '@ordewell/core/plan-utils';
+import { dependencyCandidates, capConflictFiles } from '@ordewell/core/plan-utils';
 import { Task, DiscoveredModel, TaskModelAssignment, TaskIsolation } from '@ordewell/core';
 
 export interface RunnerMode {
@@ -152,6 +152,7 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
   // reads exactly as it did before repo groups existed.
   const changedRepos = isolatedWork ? (isolatedWork.repos ?? []).filter((r) => r !== '.') : [];
   const conflictRepo = isolatedWork?.conflictRepo && isolatedWork.conflictRepo !== '.' ? isolatedWork.conflictRepo : null;
+  const conflictFiles = isolatedWork?.conflictFiles ?? [];
 
   // A live tail is only useful pinned to its newest line; left alone the pane
   // holds the top of the buffer and the incoming output scrolls out of sight.
@@ -214,7 +215,7 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
             collapsed card, since it is the one isolation state that needs a
             decision, not just inspection. */}
         {hasConflict && (
-          <span className="task-isolation-badge conflict" title={`Integrating this task conflicted${conflictRepo ? ` in ${conflictRepo}` : ''}. Its worktree and branch are kept.`}>
+          <span className="task-isolation-badge conflict" title={`Integrating this task conflicted${conflictRepo ? ` in ${conflictRepo}` : ''}${conflictFiles.length > 0 ? `: ${capConflictFiles(conflictFiles)}` : ''}. Its worktree and branch are kept.`}>
             Conflict{conflictRepo ? ` in ${conflictRepo}` : ''}
           </span>
         )}
@@ -305,6 +306,9 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
               )}
               {conflictRepo && (
                 <div className="task-isolation-row task-isolation-conflict-repo"><span className="task-isolation-label">Conflict</span><code>{conflictRepo}</code></div>
+              )}
+              {conflictFiles.length > 0 && (
+                <div className="task-isolation-row task-isolation-conflict-files"><span className="task-isolation-label">Files</span><code>{capConflictFiles(conflictFiles)}</code></div>
               )}
               {hasConflict && onResolveConflict && (
                 offeringResolve ? (

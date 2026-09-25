@@ -63,6 +63,8 @@ export interface TaskIsolationView {
   /** Paths of the repos the task changed. */
   repos?: string[];
   conflictRepo?: string;
+  /** Repo-relative paths, in `conflictRepo`, that conflicted. */
+  conflictFiles?: string[];
 }
 
 export interface LandedTaskView {

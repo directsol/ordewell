@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { capConflictFiles } from '@ordewell/core';
 import { initialState, reduce, type Step } from '../reducer';
 import { render } from '../render';
 import { bodyRows, chatBodyLines, chatLayout, chatScrollMax, planOffset, planScrollExtent } from '../layout';
@@ -216,5 +217,31 @@ describe('chat anchor', () => {
   it('top-anchors the welcome with or without messages while it fits', () => {
     expect(chatLayout(chatState(0, { rows: 60 }), 60, 80).anchor).toBe('top');
     expect(chatLayout(chatState(1, { rows: 60 }), 60, 80).anchor).toBe('top');
+  });
+});
+
+describe('plan pane — conflict row', () => {
+  const conflictTask = (isolation: Partial<NonNullable<TaskView['isolation']>>): TaskView => ({
+    id: 't1', order: 1, title: 'Task 1', type: 'ai', status: 'awaiting_user', dependencies: [],
+    isolation: { state: 'conflict', branch: 'ordewell/run1/1-t1', worktree: '/wt', repos: ['.'], ...isolation },
+  });
+
+  it('names the conflicting files', () => {
+    const state = initialState({ sessionId: 's1', rows: 20, cols: 200, tasks: [conflictTask({ conflictFiles: ['a.ts', 'b.ts'] })], focus: 'plan' });
+
+    expect(plain(state)).toContain('⚠ merge conflict (a.ts, b.ts)');
+  });
+
+  it('caps a long list of conflicting files', () => {
+    const files = ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts', 'f.ts'];
+    const state = initialState({ sessionId: 's1', rows: 20, cols: 200, tasks: [conflictTask({ conflictFiles: files })], focus: 'plan' });
+
+    expect(plain(state)).toContain(`⚠ merge conflict (${capConflictFiles(files)})`);
+  });
+
+  it('names no files when the record has none', () => {
+    const state = initialState({ sessionId: 's1', rows: 20, cols: 200, tasks: [conflictTask({})], focus: 'plan' });
+
+    expect(plain(state)).toContain('⚠ merge conflict — its work is kept on its own branch');
   });
 });

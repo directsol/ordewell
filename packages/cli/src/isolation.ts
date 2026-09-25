@@ -34,6 +34,7 @@ interface RunRecord {
   status?: unknown;
   repos?: Record<string, { changed?: unknown }>;
   conflictRepo?: unknown;
+  conflictFiles?: unknown;
 }
 
 type RepoFields = Omit<HandoffRepoView, 'landed'>;
@@ -82,6 +83,7 @@ export function isolationOfPlan(plan: unknown): PlanIsolationView | null {
       worktree: String(record.workspace ?? record.worktree ?? ''),
       repos: changed,
       ...(typeof record.conflictRepo === 'string' ? { conflictRepo: record.conflictRepo } : legacy && state === 'conflict' ? { conflictRepo: '.' } : {}),
+      ...(Array.isArray(record.conflictFiles) && record.conflictFiles.length > 0 ? { conflictFiles: record.conflictFiles.map(String) } : {}),
     };
     if (state === 'integrated') {
       landed.push({ taskId, order: Number(record.order ?? 0), title: String(record.title ?? taskId), changed });

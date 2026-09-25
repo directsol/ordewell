@@ -747,9 +747,9 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
         return this.stopLanding(record, 'failed');
       }
       for (const repo of changed) {
-        const outcome = await this.mergeTask(run, repo, record);
+        const { outcome, files } = await this.mergeTask(run, repo, record);
         if (outcome === 'merged') continue;
-        return (await this.settleLanding(run)).length === 0 ? this.stopLanding(record, outcome, repo) : this.stopLanding(record, 'failed', repo);
+        return (await this.settleLanding(run)).length === 0 ? this.stopLanding(record, outcome, repo, files) : this.stopLanding(record, 'failed', repo);
       }
     }
 
@@ -757,33 +757,36 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     delete run.landing;
     record.status = 'merged';
     delete record.conflictRepo;
+    delete record.conflictFiles;
     // The work is on the integration branches already; a stuck cleanup must
     // not turn that into a failure. `pruneOrphans` sweeps up whatever it leaves.
     await this.admin(run.workspaceRoot, () => this.removeTask(run, record, { dropRecord: false })).catch(() => undefined);
     return 'merged';
   }
 
-  private stopLanding(record: IsolationTaskRecord, outcome: Exclude<IsolationOutcome, 'merged'>, repo?: IsolationRepo): IsolationOutcome {
+  private stopLanding(record: IsolationTaskRecord, outcome: Exclude<IsolationOutcome, 'merged'>, repo?: IsolationRepo, files?: string[]): IsolationOutcome {
     record.status = outcome;
     if (repo) record.conflictRepo = repo.path;
     else delete record.conflictRepo;
+    if (files && files.length > 0) record.conflictFiles = files;
+    else delete record.conflictFiles;
     return outcome;
   }
 
   /** Merge the task branch into one repo's integration branch. A merge that does not complete is aborted: it is Ordewell's own. */
-  private async mergeTask(run: IsolationRun, repo: IsolationRepo, record: IsolationTaskRecord): Promise<IsolationOutcome> {
+  private async mergeTask(run: IsolationRun, repo: IsolationRepo, record: IsolationTaskRecord): Promise<{ outcome: IsolationOutcome; files: string[] }> {
     let dir: string;
     try {
       dir = await this.ensureIntegrationWorktree(run, repo);
     } catch {
-      return 'failed';
+      return { outcome: 'failed', files: [] };
     }
     const merge = await this.tryGit(dir, ['merge', '--no-ff', '--no-edit', '-m', `Merge task ${record.order}: ${firstLine(record.title)}`, record.branch]);
-    if (merge.ok) return 'merged';
+    if (merge.ok) return { outcome: 'merged', files: [] };
     // A hook that refuses the merge commit leaves a merge in progress with nothing unmerged: a failure, not a conflict.
-    const conflicted = (await this.unmergedPaths(dir)).length > 0;
+    const files = await this.unmergedPaths(dir);
     if (await this.mergeInProgress(dir)) await this.abortMerge(dir);
-    return conflicted ? 'conflict' : 'failed';
+    return { outcome: files.length > 0 ? 'conflict' : 'failed', files };
   }
 
   /**

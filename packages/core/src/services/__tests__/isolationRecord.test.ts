@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { handoffOf, migratePlanIsolation, type Adr0013PlanIsolation, type Adr0013TaskRecord } from '../isolationRecord';
-import type { IsolationTaskStatus, PlanIsolation } from '../../interfaces/IWorktreeIsolation';
+import { capConflictFiles, handoffOf, migratePlanIsolation, taskIsolationOf, type Adr0013PlanIsolation, type Adr0013TaskRecord } from '../isolationRecord';
+import type { IsolationTaskRecord, IsolationTaskStatus, PlanIsolation } from '../../interfaces/IWorktreeIsolation';
 
 const legacyTask = (taskId: string, order: number, status: IsolationTaskStatus, linked: string[] = []): Adr0013TaskRecord => ({
   taskId, order, title: `Task ${taskId}`, branch: `ordewell/r1/${order}-${taskId}`, worktree: `/work/app/.ordewell/worktrees/r1/${order}-${taskId}`, status, linked,
@@ -112,5 +112,31 @@ describe('migratePlanIsolation', () => {
     };
 
     expect(migratePlanIsolation(structuredClone(current))).toEqual(current);
+  });
+});
+
+describe('taskIsolationOf', () => {
+  const base: IsolationTaskRecord = {
+    taskId: 'c', order: 1, title: 'Task c', branch: 'ordewell/r1/1-c', workspace: '/work/app/.ordewell/worktrees/r1/1-c',
+    status: 'conflict', repos: { '.': { worktree: '/work/app/.ordewell/worktrees/r1/1-c', linked: [] } }, conflictRepo: '.',
+  };
+
+  it('carries the conflicting files onto the surface view', () => {
+    expect(taskIsolationOf({ ...base, conflictFiles: ['a.ts', 'b.ts'] })).toMatchObject({ conflictFiles: ['a.ts', 'b.ts'] });
+  });
+
+  it('leaves conflictFiles out when the record has none', () => {
+    expect(taskIsolationOf(base)).not.toHaveProperty('conflictFiles');
+  });
+});
+
+describe('capConflictFiles', () => {
+  it('joins every file when there are no more than the cap', () => {
+    expect(capConflictFiles(['a.ts', 'b.ts'])).toBe('a.ts, b.ts');
+  });
+
+  it('caps the list and counts the rest', () => {
+    const files = ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts', 'f.ts', 'g.ts'];
+    expect(capConflictFiles(files)).toBe('a.ts, b.ts, c.ts, d.ts, e.ts, +2 more');
   });
 });
