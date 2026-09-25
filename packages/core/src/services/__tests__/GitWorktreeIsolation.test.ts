@@ -472,6 +472,27 @@ describe.skipIf(!hasGit)('WorktreeIsolation conflicts', () => {
     expect(await iso.integrate(t3, run)).toBe('merged');
     expect(git(root, 'show', `${run.repos[0].integrationBranch}:other.txt`)).toBe('o');
   });
+
+  it('respects a repo-level .gitattributes union merge, landing two tasks that each append to CHANGELOG.md without a conflict', async () => {
+    const root = repo({
+      'CHANGELOG.md': '# Changelog\n\n## [Unreleased]\n',
+      '.gitattributes': 'CHANGELOG.md merge=union\n',
+    });
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const [t1, t2] = [task(1, 'Left entry'), task(2, 'Right entry')];
+    const a = await iso.prepare(t1, run);
+    const b = await iso.prepare(t2, run);
+    writeFileSync(join(a.cwd, 'CHANGELOG.md'), '# Changelog\n\n## [Unreleased]\n- Left change\n');
+    writeFileSync(join(b.cwd, 'CHANGELOG.md'), '# Changelog\n\n## [Unreleased]\n- Right change\n');
+
+    expect(await iso.integrate(t1, run)).toBe('merged');
+    expect(await iso.integrate(t2, run)).toBe('merged');
+
+    const changelog = git(root, 'show', `${run.repos[0].integrationBranch}:CHANGELOG.md`);
+    expect(changelog).toContain('- Left change');
+    expect(changelog).toContain('- Right change');
+  });
 });
 
 describe.skipIf(!hasGit)('WorktreeIsolation.release', () => {

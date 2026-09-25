@@ -233,6 +233,15 @@ describe('planner parallelism rules under worktree isolation (ADR-0013)', () => 
     expect(p).toContain(OVERLAP_RULE);
   });
 
+  const SHARED_APPEND_FILE_RULE =
+    '- Tasks that run in parallel must not each append to the same shared file (changelogs, registries, index lists) — give that edit to the final task, or to one task the others depend on.';
+
+  it('tells the planner not to give parallel tasks the same shared append file', () => {
+    for (const p of [conversation(false), conversation(LONE_REPO), oneShot(false), oneShot(LONE_REPO)]) {
+      expect(p).toContain(SHARED_APPEND_FILE_RULE);
+    }
+  });
+
   it('stops asking for different files or file-overlap dependencies when every task gets its own worktree', () => {
     for (const p of [conversation(LONE_REPO), oneShot(LONE_REPO)]) {
       expect(p).not.toContain(OVERLAP_RULE);

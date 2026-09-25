@@ -1,0 +1,4 @@
+# Parallel task branches each append an entry under [Unreleased]; union-merge
+# so two independent appends land together instead of conflicting.
+CHANGELOG.md merge=union
+packages/*/CHANGELOG.md merge=union
