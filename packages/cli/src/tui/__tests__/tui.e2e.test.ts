@@ -4,6 +4,7 @@ import { createApp, type App } from '../app';
 import { openTerminal, type Terminal } from '../terminal';
 import { ConversationQueue, runEffect, type OrdewellApi } from '../effects';
 import { stripAnsi } from '../ansi';
+import type { RewindTargetView } from '../state';
 
 /**
  * End-to-end: raw stdin bytes → terminal key decoding → reducer → real
@@ -84,6 +85,10 @@ function fakeDaemon() {
     getSession: vi.fn(async () => ({ meta: {}, plan: planPayload() })),
     adoptSession: vi.fn(async () => ({ plan: planPayload(), goal: 'Earlier goal' })),
     deleteSession: vi.fn(async () => ({ ok: true })),
+    forkConversation: vi.fn(async () => ({ sessionId: 'session-fork', goal: 'goal', plan: planPayload() })),
+    rewindTargets: vi.fn(async (): Promise<RewindTargetView[]> => []),
+    rewindConversation: vi.fn(async () => ({ sessionId: 'session-rewound', goal: 'goal', plan: planPayload(), rewoundMessage: '' })),
+    compactConversation: vi.fn(async () => ({ plan: planPayload(), summary: '', keptMessages: 0 })),
     closeSession: vi.fn(async () => ({ ok: true })),
     getSettings: vi.fn(async () => ({ orchestratorModel: 'deepseek/deepseek-v4-flash', aiProvider: 'openrouter' })),
     updateSettings: vi.fn(async (changes: Record<string, unknown>) => changes),
@@ -696,5 +701,122 @@ describe('TUI end to end', () => {
     expect(restore).toContain('\x1b[?25h');
     expect(h.input.pause).toHaveBeenCalled();
     expect(h.input.setRawMode).toHaveBeenLastCalledWith(false);
+  });
+
+  it('welcome stays top-anchored across the startup refresh, then a goal, a manual first task and a rewind through the popup carry the plan forward', async () => {
+    const h = harness();
+    // The banner (or its narrow lockup) is always the welcome's first line —
+    // one row under the skills bar, whatever "Setup" happens to say. Either
+    // form carries the bold "≫" icon or the braille banner art.
+    const topBodyRow = (frame: string) => frame.split('\n')[1];
+    const isBanner = (row: string) => /≫|[⠀-⣿]/.test(row);
+
+    // A: the welcome's first line is on the top body row from the very first painted frame.
+    const firstFrame = h.frames()[0];
+    expect(firstFrame).toBeDefined();
+    expect(isBanner(topBodyRow(firstFrame!))).toBe(true);
+
+    // The startup refresh (runners/settings/models) completes silently — no notice —
+    // and the welcome's first line is still on that same top body row.
+    await vi.waitFor(() => {
+      expect(h.daemon.mocks.getRunners).toHaveBeenCalled();
+      expect(h.daemon.mocks.getSettings).toHaveBeenCalled();
+      expect(h.daemon.mocks.getModels).toHaveBeenCalled();
+    });
+    expect(h.screen()).not.toContain('Refreshed runners, settings and models.');
+    expect(isBanner(topBodyRow(h.screen()))).toBe(true);
+
+    // A goal starts a conversation that asks a clarifying question before any
+    // plan exists — the welcome stays, with the reply hanging under it.
+    h.daemon.mocks.startConversation.mockImplementationOnce(async () => ({
+      conversationHistory: [
+        { role: 'user', content: 'Build the login flow' },
+        { role: 'assistant', content: 'Which auth provider?' },
+      ],
+      pendingTasks: [],
+    }));
+    h.type('Build the login flow');
+    h.type('\r');
+    await vi.waitFor(() => expect(h.screen()).toContain('Which auth provider?'));
+    expect(isBanner(topBodyRow(h.screen()))).toBe(true);
+    expect(h.app.getState().tasks).toEqual([]);
+
+    // C: `/add-task` on the still-empty plan adds the first task, and its
+    // pane replaces the welcome with that task selected.
+    const manualTask = { id: 'manual-1', order: 1, title: 'Confirm setup', type: 'ai', status: 'pending', dependencies: [] };
+    h.daemon.mocks.getSession.mockImplementationOnce(async () => ({
+      meta: {},
+      plan: {
+        conversationHistory: [
+          { role: 'user', content: 'Build the login flow' },
+          { role: 'assistant', content: 'Which auth provider?' },
+        ],
+        pendingTasks: [manualTask],
+      },
+    }));
+    h.type('/add-task Confirm setup');
+    h.type('\r');
+    await vi.waitFor(() => expect(h.screen()).toContain('Confirm setup'));
+    expect(h.daemon.mocks.addTask).toHaveBeenCalledWith('session-1', expect.objectContaining({ title: 'Confirm setup' }));
+    expect(h.app.getState().tasks.map((t) => t.id)).toEqual(['manual-1']);
+    expect(h.app.getState().selectedTask).not.toBe(-1);
+
+    // A follow-up message continues the same conversation, kept tasks intact.
+    h.daemon.mocks.sendConversationMessage.mockImplementationOnce(async () => ({
+      conversationHistory: [
+        { role: 'user', content: 'Build the login flow' },
+        { role: 'assistant', content: 'Which auth provider?' },
+        { role: 'user', content: 'Use email based auth' },
+      ],
+      pendingTasks: [manualTask],
+    }));
+    h.type('Use email based auth');
+    h.type('\r');
+    await vi.waitFor(() => expect(h.app.getState().messages.map((m) => m.content)).toContain('Use email based auth'));
+    await vi.waitFor(() => expect(h.app.getState().status).toBe('idle'));
+
+    // D/E: `/rewind` picks that follow-up message and, through the popup,
+    // forks into a new session — the fork keeps the task, prefills the input
+    // with the full rewound message, and truncates the chat before it.
+    h.daemon.mocks.rewindTargets.mockResolvedValueOnce([
+      { index: 2, preview: 'Use email based auth', content: 'Use email based auth', timestamp: '2026-01-01T00:00:00Z' },
+    ]);
+    h.daemon.mocks.rewindConversation.mockResolvedValueOnce({
+      sessionId: 'session-rewound',
+      goal: 'Build the login flow',
+      plan: {
+        conversationHistory: [
+          { role: 'user', content: 'Build the login flow' },
+          { role: 'assistant', content: 'Which auth provider?' },
+        ],
+        pendingTasks: [manualTask],
+      },
+      rewoundMessage: 'Use email based auth',
+    });
+
+    h.type('/rewind');
+    h.type('\r');
+    await vi.waitFor(() => expect(h.screen()).toContain('Use email based auth'));
+
+    // Choose the (only) picked message; the confirmation popup opens.
+    h.type('\r');
+    await vi.waitFor(() => expect(h.screen()).toContain('Restore Conversation'));
+    expect(h.screen()).toContain('Never mind');
+
+    // Confirm the restore.
+    h.type('\r');
+    await vi.waitFor(() => expect(h.app.getState().sessionId).toBe('session-rewound'));
+
+    expect(h.daemon.mocks.rewindConversation).toHaveBeenCalledWith('session-1', 2);
+    expect(h.app.getState().tasks.map((t) => t.id)).toEqual(['manual-1']);
+    expect(h.app.getState().editor.text).toBe('Use email based auth');
+    // The chat is truncated to just before the rewound message — the follow-up
+    // itself is gone from the restored transcript, kept only in the prefilled input.
+    // (A trailing notice about the fork follows the two restored messages.)
+    expect(h.app.getState().messages.map((m) => m.content).slice(0, 2)).toEqual([
+      'Build the login flow',
+      'Which auth provider?',
+    ]);
+    expect(h.app.getState().messages.some((m) => m.content === 'Use email based auth')).toBe(false);
   });
 });
