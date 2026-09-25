@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **A fully merged run is cleared up.** Once Merge all has merged everything,
+  the run's worktrees and branches are removed and the handoff card and task
+  marks close. A new run also deletes earlier runs' branches your checked-out
+  branch already contains.
+
 ## [0.5.0] — 2026-09-25
 
 ### Added

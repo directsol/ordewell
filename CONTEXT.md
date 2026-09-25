@@ -421,7 +421,14 @@ atomic across the repos it changed). Each task that passes its Verdict is merged
 waiting, so the history is reproducible and each task is attributable to a merge
 commit. A merge conflict is aborted and reported, never resolved for the user
 and never by a model; in a group, it undoes the task's whole *landing*. It is never merged into the checked-out branch until the
-user asks; it survives a discarded run until it is explicitly given up.
+user asks. It outlives its run's worktrees (clean-up keeps it) and is deleted
+only when given up (discard), or once it is merged into the checked-out branch:
+right after a *Merge all* that merged everything, or at a later run's start,
+which sweeps each repo for other runs' `ordewell/<run-id>/…` branches that HEAD
+contains (`git merge-base --is-ancestor`), leaving any run that still has a
+worktree. The decision is per repo: in a group, one repo's may go while
+another's stays. One that holds work the user has not merged is never deleted
+unasked.
 *Avoid:* "result branch", "staging branch".
 
 **Landing** — integrating one task under ADR-0014: its branch merged into the
@@ -451,7 +458,9 @@ aborted where it failed, and the answer names the repos that landed before it,
 which stay merged. On git older than 2.38 there is no preflight: repo by repo,
 stopping at the first failure. A group of one needs none either, since its one
 merge lands or is aborted whole, so it answers `merged`, `conflict` or `failed`
-as it always has.
+as it always has. `merged` ends the run: it is cleared up like a discard, except
+that each integration branch goes only where HEAD contains it, and the plan
+forgets it; any other answer deletes nothing.
 *Avoid:* per-repo merge — there is none, by design (ADR-0014).
 
 **Base ref** — the commit the user's checked-out branch pointed at when a run
@@ -474,7 +483,8 @@ replaced while anything has landed on it — a resumed plan's dependents need
 their predecessors' work, which a fresh branch from the checked-out commit does
 not have — and a record with nothing landed is discarded whole when the next run
 mints its own. One with landed work that cannot be continued (it ran from another
-workspace path) loses its worktrees but keeps its integration branch. A run closes
+workspace path) loses its worktrees, and its integration branch in each repo
+whose HEAD already contains it; it keeps the others. A run closes
 when its last attempt ends, however it ends — verdict, cancel, Mark complete or a
 failed spawn — so the next one decides its own mode. The field belongs to one
 plan: a fork must not copy it.
@@ -485,7 +495,8 @@ saved by 0.4.23 resumes and hands off as it would have.
 **Isolation handoff** — the end of an isolated run: for each repo, its integration
 branch and base ref, and the tasks that landed, broadcast as `isolation_handoff`. What
 follows is the user's: `reviewRunDiff`, `mergeRun` (a normal `git merge` into the
-checked-out branch, only ever on that explicit call), `cleanupRun` (worktrees and
+checked-out branch, only ever on that explicit call; once everything merged, the
+run is cleared up and forgotten, so no surface offers its handoff again), `cleanupRun` (worktrees and
 task branches go, the integration branch stays) and `discardRun` (everything
 goes, and the plan forgets the run; task statuses are left as they are). A
 conflicted task leaves by a hand resolution plus Mark complete, a retry, or

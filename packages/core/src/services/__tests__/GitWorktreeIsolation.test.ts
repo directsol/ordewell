@@ -816,6 +816,100 @@ describe.skipIf(!hasGit)('WorktreeIsolation end-of-run handoff', () => {
     expect(existsSync(join(root, 'alpha.txt'))).toBe(false);
   });
 
+  it('after Merge all, discarding what is merged leaves no branch, worktree or directory of the run, and the work on the user\'s branch', async () => {
+    const { root, iso, run } = await finishedRun();
+    await iso.handoff(run);
+    expect(await iso.mergeIntoCheckedOut(run)).toEqual({ outcome: 'merged' });
+
+    await iso.discard(run, { integration: 'delete-merged' });
+
+    expect(branches(root)).toEqual([]);
+    expect(worktreePaths(root)).toEqual([root]);
+    expect(existsSync(join(root, '.ordewell', 'worktrees', run.id))).toBe(false);
+    expect(run.tasks).toEqual({});
+    expect(git(root, 'branch', '--show-current')).toBe('main');
+    expect(git(root, 'show', 'HEAD:alpha.txt')).toBe('alpha');
+    expect(git(root, 'show', 'HEAD:beta.txt')).toBe('beta');
+  });
+
+  it('discarding what is merged keeps an integration branch the user has not merged, and its work', async () => {
+    const { root, iso, run } = await finishedRun();
+    await iso.handoff(run);
+    const integration = run.repos[0].integrationBranch;
+    const tip = git(root, 'rev-parse', integration);
+
+    await iso.discard(run, { integration: 'delete-merged' });
+
+    expect(branches(root)).toEqual([integration]);
+    expect(git(root, 'rev-parse', integration)).toBe(tip);
+    expect(worktreePaths(root)).toEqual([root]);
+  });
+
+  describe('sweep', () => {
+    /** A handed-off run that landed one task writing `file`. */
+    async function landedRun(iso: ReturnType<typeof create>, root: string, file: string): Promise<IsolationRun> {
+      const run = await iso.startRun(root);
+      const t = task(1, `Write ${file}`);
+      const { cwd } = await iso.prepare(t, run);
+      writeFileSync(join(cwd, file), `${file}\n`);
+      expect(await iso.integrate(t, run)).toBe('merged');
+      await iso.handoff(run);
+      return run;
+    }
+
+    it('deletes the integration branches of other runs the checked-out branch holds, and nothing else', async () => {
+      const root = repo();
+      const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+      const merged = await landedRun(iso, root, 'merged.txt');
+      const unmerged = await landedRun(iso, root, 'unmerged.txt');
+      git(root, 'merge', '-q', '--no-edit', merged.repos[0].integrationBranch);
+      git(root, 'branch', 'ordewell-notes');
+      const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'ordewell-user-wt-')));
+      roots.push(elsewhere);
+      git(root, 'worktree', 'add', '-q', '-b', 'ordewell/cafe0000/integration', join(elsewhere, 'wt'), 'HEAD');
+      const current = await iso.startRun(root);
+
+      await iso.sweep(current);
+
+      expect(branches(root).sort()).toEqual([
+        'ordewell/cafe0000/integration',
+        current.repos[0].integrationBranch,
+        unmerged.repos[0].integrationBranch,
+      ].sort());
+      expect(branches(root, 'ordewell-*')).toEqual(['ordewell-notes']);
+      expect(git(root, 'show', `${unmerged.repos[0].integrationBranch}:unmerged.txt`)).toBe('unmerged.txt');
+      expect(worktreePaths(root)).toContain(realpathSafe(join(elsewhere, 'wt')));
+    });
+
+    it('takes an idle run\'s merged task branches with it, keeps its unmerged ones, and leaves a run with a worktree alone', async () => {
+      const root = repo();
+      const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+      const idle = await landedRun(iso, root, 'idle.txt');
+      git(root, 'merge', '-q', '--no-edit', idle.repos[0].integrationBranch);
+      git(root, 'branch', `ordewell/${idle.id}/7-leftover`, idle.repos[0].integrationBranch);
+      git(root, 'checkout', '-q', '-b', 'side');
+      writeFileSync(join(root, 'side.txt'), 'side\n');
+      git(root, 'add', 'side.txt');
+      git(root, 'commit', '-q', '-m', 'side work');
+      git(root, 'checkout', '-q', 'main');
+      git(root, 'branch', '-m', 'side', `ordewell/${idle.id}/8-unmerged`);
+      // Another plan's run, mid-task: its branch still sits at HEAD, so only its worktree says it is live.
+      const live = await iso.startRun(root);
+      const running = await iso.prepare(task(1, 'Still running'), live);
+      const current = await iso.startRun(root);
+
+      await iso.sweep(current);
+
+      expect(branches(root).sort()).toEqual([
+        `ordewell/${idle.id}/8-unmerged`,
+        running.branch,
+        live.repos[0].integrationBranch,
+        current.repos[0].integrationBranch,
+      ].sort());
+      expect(worktreePaths(root)).toContain(running.cwd);
+    });
+  });
+
   it('discard removes worktrees and task branches but can keep the integration branch', async () => {
     const root = repo();
     const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
@@ -826,7 +920,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation end-of-run handoff', () => {
     writeFileSync(join(a.cwd, 'landed.txt'), 'l\n');
     await iso.integrate(t1, run);
 
-    await iso.discard(run, { keepIntegration: true });
+    await iso.discard(run, { integration: 'keep' });
 
     expect(worktreePaths(root)).toEqual([root]);
     expect(existsSync(b.cwd)).toBe(false);
@@ -840,7 +934,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation end-of-run handoff', () => {
     const run = await iso.startRun(root);
     await iso.prepare(task(1, 'Abandoned'), run);
 
-    await iso.discard(run, { keepIntegration: false });
+    await iso.discard(run, { integration: 'delete' });
 
     expect(worktreePaths(root)).toEqual([root]);
     expect(branches(root)).toEqual([]);
@@ -1426,14 +1520,14 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
       const { dir, iso, run, b } = await secondConflicts();
       expect(await iso.integrate(task(2, 'Edit both'), run)).toBe('conflict');
 
-      await iso.discard(run, { keepIntegration: true });
+      await iso.discard(run, { integration: 'keep' });
       for (const repo of ['api', 'web']) {
         expect(worktreePaths(join(dir, repo))).toEqual([join(dir, repo)]);
         expect(branches(join(dir, repo))).toEqual([integrationOf(run)]);
       }
       expect(existsSync(b.cwd)).toBe(false);
 
-      await iso.discard(run, { keepIntegration: false });
+      await iso.discard(run, { integration: 'delete' });
       for (const repo of ['api', 'web']) expect(branches(join(dir, repo))).toEqual([]);
       expect(existsSync(join(dir, '.ordewell', 'worktrees', run.id))).toBe(false);
     });
@@ -1663,7 +1757,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
       const run = await iso.startRun(dir);
       await iso.prepare(task(1, 'Abandoned'), run);
 
-      await iso.discard(run, { keepIntegration: false });
+      await iso.discard(run, { integration: 'delete' });
 
       for (const repo of GROUP) {
         expect(worktreePaths(join(dir, repo))).toEqual([join(dir, repo)]);
@@ -1671,6 +1765,67 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
       }
       expect(existsSync(join(dir, '.ordewell', 'worktrees', run.id))).toBe(false);
       expect(readFileSync(join(dir, 'NOTES.md'), 'utf8')).toBe('notes\n');
+    });
+  });
+
+  describe('merged branches', () => {
+    /** A handed-off run whose one task changed every repository of the group. */
+    async function landedEverywhere() {
+      const dir = group();
+      const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+      const run = await iso.startRun(dir);
+      const t = task(1, 'Touch every repo');
+      const { cwd } = await iso.prepare(t, run);
+      for (const repo of GROUP) writeFileSync(join(cwd, repo, 'landed.txt'), `${repo}\n`);
+      expect(await iso.integrate(t, run)).toBe('merged');
+      await iso.handoff(run);
+      return { dir, iso, run, integration: `ordewell/${run.id}/integration` };
+    }
+
+    it('decides per repository: only the one whose checked-out branch took the work loses its integration branch', async () => {
+      const { dir, iso, run, integration } = await landedEverywhere();
+      git(join(dir, 'api'), 'merge', '-q', '--no-edit', integration);
+
+      await iso.discard(run, { integration: 'delete-merged' });
+
+      expect(branches(join(dir, 'api'))).toEqual([]);
+      expect(branches(join(dir, 'infra'))).toEqual([integration]);
+      expect(branches(join(dir, 'web'))).toEqual([integration]);
+      for (const repo of GROUP) expect(worktreePaths(join(dir, repo))).toEqual([join(dir, repo)]);
+    });
+
+    it('sweeps an earlier run out of only the repository that merged it by hand', async () => {
+      const { dir, iso, integration } = await landedEverywhere();
+      git(join(dir, 'web'), 'merge', '-q', '--no-edit', integration);
+      const current = await iso.startRun(dir);
+
+      await iso.sweep(current);
+
+      expect(branches(join(dir, 'web'))).toEqual([current.repos[2].integrationBranch]);
+      for (const repo of ['api', 'infra']) {
+        expect(branches(join(dir, repo)).sort()).toEqual([integration, `ordewell/${current.id}/integration`].sort());
+      }
+    });
+
+    it('sweeps every repository it can, then names the one where git failed', async () => {
+      const dir = group();
+      const failing = join(dir, 'api');
+      const exec: GitExecFn = async (file, args, opts) => {
+        if (args[0] === 'branch' && args[1] === '-d' && opts.cwd === failing) {
+          throw Object.assign(new Error('fatal: cannot lock ref'), { stderr: 'fatal: cannot lock ref', code: 128 });
+        }
+        const { stdout, stderr } = await execFileAsync(file, args, { cwd: opts.cwd, env: opts.env });
+        return { stdout: String(stdout), stderr: String(stderr) };
+      };
+      const iso = create({ config: fakeConfig({ worktreeIsolation: true }), execFileImpl: exec });
+      const earlier = await iso.startRun(dir);
+      await iso.discard(earlier, { integration: 'keep' });
+      const current = await iso.startRun(dir);
+
+      await expect(iso.sweep(current)).rejects.toThrow(/in api$/);
+
+      expect(branches(failing)).toContain(`ordewell/${earlier.id}/integration`);
+      for (const repo of ['infra', 'web']) expect(branches(join(dir, repo))).toEqual([`ordewell/${current.id}/integration`]);
     });
   });
 });

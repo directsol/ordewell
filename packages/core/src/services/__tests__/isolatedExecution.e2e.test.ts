@@ -157,7 +157,43 @@ describe.skipIf(!hasGit)('isolated execution against a real repository', () => {
     expect(await orchestrator.mergeRun()).toEqual({ outcome: 'merged' });
     expect(readFileSync(join(api, 'endpoint.txt'), 'utf8')).toBe('written by t1\n');
     expect(readFileSync(join(web, 'usage.txt'), 'utf8')).toBe('written by t2\n');
+    // Nothing left to hand over: every branch and worktree of the run is gone, and the work is on the user's branch.
+    for (const root of [api, web]) {
+      expect(git(root, 'branch', '--list', 'ordewell/*')).toBe('');
+      expect(git(root, 'worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree '))).toEqual([`worktree ${root}`]);
+      expect(git(root, 'symbolic-ref', '--short', 'HEAD')).toBe('main');
+    }
+    expect(git(web, 'show', 'main:page.txt')).toBe('written by t3');
+    expect(orchestrator.isolationView()).toBeNull();
   }, 30_000);
+
+  it('a later run clears an earlier one the user merged by hand, and keeps one they have not', async () => {
+    const root = repo();
+    const isolation = createWorktreeIsolation({ config: fakeConfig({ worktreeIsolation: true }), resolvePath: async () => process.env.PATH ?? '' });
+    /** One plan with one task writing `file`, run to its handoff on the shared repository. */
+    const runPlan = async (id: string, file: string) => {
+      const tasks = [createTask({ id, order: 1, title: `Write ${file}`, prompt: `write ${file}` })];
+      const { runner } = writingRunner({ [id]: { write: [file] } }, tasks);
+      const output = new BufferedTaskOutputSource({ transcripts: { finalAssistantText: async () => null } });
+      const orchestrator = new TaskOrchestrator(fakeConfig(), fakeNotification(), runner, undefined, output, isolation);
+      orchestrator.setWorkspaceRoot(() => root);
+      let handoff: IsolationHandoff | undefined;
+      orchestrator.subscribe({ onIsolationHandoff: (h) => { handoff = h; } });
+      orchestrator.loadPlan(tasks);
+      await orchestrator.approveReview();
+      await vi.waitFor(() => expect(handoff).toBeDefined(), { timeout: 20_000 });
+      return handoff!.repos[0].integrationBranch;
+    };
+
+    const mergedByHand = await runPlan('m1', 'merged.txt');
+    git(root, 'merge', '-q', '--no-edit', mergedByHand);
+    const unmerged = await runPlan('u1', 'unmerged.txt');
+    const later = await runPlan('l1', 'later.txt');
+
+    expect(git(root, 'branch', '--list', 'ordewell/*', '--format=%(refname:short)').split('\n').sort()).toEqual([later, unmerged].sort());
+    expect(git(root, 'show', `${unmerged}:unmerged.txt`)).toBe('written by u1');
+    expect(readFileSync(join(root, 'merged.txt'), 'utf8')).toBe('written by m1\n');
+  }, 60_000);
 
   it('resumes a session 0.4.23 saved mid-run: drops the attempt the crash cut off, continues the run, and hands it off whole', async () => {
     const root = repo();

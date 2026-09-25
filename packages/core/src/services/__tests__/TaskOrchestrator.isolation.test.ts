@@ -78,7 +78,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
     openMerge();
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
     expect(isolation.calls.map((c) => c.op + ('taskId' in c ? `:${c.taskId}` : ''))).toEqual([
-      'isActive', 'startRun', 'prepare:t1', 'integrate:t1', 'prepare:t2',
+      'isActive', 'startRun', 'sweep', 'prepare:t1', 'integrate:t1', 'prepare:t2',
     ]);
   });
 
@@ -145,7 +145,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
     expect(spawn).toHaveBeenCalledTimes(3);
     const afterFailure = isolation.calls.slice(isolation.calls.findIndex((c) => c.op === 'release' && c.keep));
     expect(afterFailure.map((c) => c.op + ('taskId' in c ? `:${c.taskId}` : ''))).toEqual([
-      'release:t1', 'handoff', 'release:t1', 'isActive', 'prepare:t1',
+      'release:t1', 'handoff', 'release:t1', 'isActive', 'sweep', 'prepare:t1',
     ]);
     expect(afterFailure[2]).toEqual({ op: 'release', taskId: 't1', keep: false });
     expect(spawn.mock.calls[2][0].cwd).toBe('/fake-worktrees/run1/1-t1');
@@ -718,7 +718,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
     await orchestrator.start();
 
     expect(spawn).toHaveBeenCalledTimes(2);
-    expect(isolation.calls).toContainEqual({ op: 'discard', keepIntegration: false });
+    expect(isolation.calls).toContainEqual({ op: 'discard', integration: 'delete' });
     expect(spawn.mock.calls[1][0].cwd).toBe('/fake-worktrees/run2/1-t1');
     expect(spawnedCwd('t1')).toBe('/fake-worktrees/run1/1-t1');
   });
@@ -828,6 +828,84 @@ describe('TaskOrchestrator with worktree isolation', () => {
     });
   });
 
+  describe('the branches runs leave behind', () => {
+    async function landed(configure: (isolation: FakeWorktreeIsolation) => void = () => undefined) {
+      const isolation = new FakeWorktreeIsolation();
+      configure(isolation);
+      const env = setup({ isolation });
+      const t1 = task('t1', 1);
+      env.orchestrator.loadPlan([t1]);
+      await env.orchestrator.approveReview();
+      env.pass(t1);
+      await vi.waitFor(() => expect(env.orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
+      return env;
+    }
+
+    it('clears the whole run up after a Merge all that merged everything, and forgets it', async () => {
+      const { orchestrator, isolation } = await landed();
+      let changed = 0;
+      orchestrator.subscribe({ onIsolationChanged: () => { changed++; } });
+
+      expect(await orchestrator.mergeRun()).toEqual({ outcome: 'merged' });
+
+      expect(isolation.calls.slice(-2)).toEqual([{ op: 'mergeIntoCheckedOut' }, { op: 'discard', integration: 'delete-merged' }]);
+      expect(orchestrator.isolationRecord).toBeNull();
+      expect(orchestrator.isolationView()).toBeNull();
+      expect(orchestrator.getTaskIsolation('t1')).toBeNull();
+      expect(changed).toBe(1);
+      expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed');
+    });
+
+    it.each<[string, IsolationMergeResult]>([
+      ['was blocked', { outcome: 'blocked', blocked: [{ repo: '.', reason: 'partial-landing', files: [] }] }],
+      ['conflicted', { outcome: 'conflict', repo: '.', files: ['a.txt'] }],
+      ['stopped part-way', { outcome: 'failed', repo: 'web', landed: ['api'] }],
+    ])('deletes nothing and keeps the run after a Merge all that %s', async (_, result) => {
+      const { orchestrator, isolation } = await landed((iso) => { iso.mergeResult = result; });
+
+      await orchestrator.mergeRun();
+
+      expect(isolation.calls.map((c) => c.op)).not.toContain('discard');
+      expect(orchestrator.isolationView()?.handoff.landed).toEqual([{ taskId: 't1', order: 1, title: 'Task t1' }]);
+    });
+
+    it('keeps the run, and says why, when clearing it up after Merge all fails', async () => {
+      const { orchestrator, notifications } = await landed((iso) => { iso.discardError = new Error('disk full'); });
+
+      expect(await orchestrator.mergeRun()).toEqual({ outcome: 'merged' });
+
+      expect(orchestrator.isolationRecord).not.toBeNull();
+      expect(vi.mocked(notifications.warn).mock.calls.map((c) => String(c[0]))).toContain(
+        'Merged, but could not clean up the run\'s worktrees and branches: disk full',
+      );
+    });
+
+    it('starts the next run afresh once the last one is merged and cleared up', async () => {
+      const { orchestrator, isolation, spawn } = await landed();
+      await orchestrator.mergeRun();
+
+      await orchestrator.retryTask('t1');
+      await orchestrator.start();
+
+      expect(spawn.mock.calls[1][0].cwd).toBe('/fake-worktrees/run2/1-t1');
+      expect(isolation.calls.filter((c) => c.op === 'discard')).toEqual([{ op: 'discard', integration: 'delete-merged' }]);
+    });
+
+    it('warns when the sweep fails, and runs anyway', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.sweepError = new Error('git failed clearing merged branches of earlier runs in api');
+      const { orchestrator, notifications, spawnedCwd } = setup({ isolation });
+      orchestrator.loadPlan([task('t1', 1)]);
+
+      await orchestrator.approveReview();
+
+      expect(spawnedCwd('t1')).toBe('/fake-worktrees/run1/1-t1');
+      expect(vi.mocked(notifications.warn).mock.calls.map((c) => String(c[0]))).toContain(
+        'Could not clear merged branches of earlier runs: git failed clearing merged branches of earlier runs in api',
+      );
+    });
+  });
+
   describe('a resumed plan', () => {
     it('adopts its persisted run, prunes what a crash left behind, and continues it', async () => {
       const { orchestrator, isolation, spawnedCwd } = setup();
@@ -844,10 +922,11 @@ describe('TaskOrchestrator with worktree isolation', () => {
       await orchestrator.approveReview();
       expect(spawnedCwd('t2')).toBe('/fake-worktrees/old/2-t2');
       expect(isolation.calls.map((c) => c.op)).not.toContain('startRun');
+      expect(isolation.calls.map((c) => c.op)).toContain('sweep');
       expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'integrated' });
     });
 
-    it('keeps the integration branch of a run it cannot continue while that branch holds landed work', async () => {
+    it('gives up the integration branch of a run it cannot continue only where the user has merged it', async () => {
       const { orchestrator, isolation, spawnedCwd } = setup({ workspace: '/repo' });
       const run = {
         id: 'old', workspaceRoot: '/elsewhere/repo', shared: [], sharedRepos: [],
@@ -860,8 +939,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
       await orchestrator.approveReview();
 
       expect(spawnedCwd('t2')).toBe('/fake-worktrees/run1/2-t2');
-      expect(isolation.calls).toContainEqual({ op: 'discard', keepIntegration: true });
-      expect(isolation.calls).not.toContainEqual({ op: 'discard', keepIntegration: false });
+      expect(isolation.calls.filter((c) => c.op === 'discard')).toEqual([{ op: 'discard', integration: 'delete-merged' }]);
     });
   });
 

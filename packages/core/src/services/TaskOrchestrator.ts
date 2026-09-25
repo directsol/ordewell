@@ -361,7 +361,12 @@ export class TaskOrchestrator {
     return this.isolation.reviewDiff(this.requireRun());
   }
 
-  /** "Merge all": the run's integration branches into whatever the user has checked out, in every repo or none. */
+  /**
+   * "Merge all": the run's integration branches into whatever the user has
+   * checked out, in every repo or none. Once everything merged, the run has
+   * nothing left to hand over, so it is cleared up and forgotten; a branch
+   * the user's HEAD somehow does not contain stays for the next run's sweep.
+   */
   async mergeRun(): Promise<IsolationMergeResult> {
     const run = this.requireRun();
     const result = await this.isolation.mergeIntoCheckedOut(run);
@@ -369,18 +374,33 @@ export class TaskOrchestrator {
     const group = run.repos.some((r) => r.path !== SELF_REPO);
     const { level, message } = describeMergeResult(result, branch, group);
     this.notifications[level](message);
+    if (result.outcome === 'merged') await this.clearMergedRun(run);
     return result;
+  }
+
+  private async clearMergedRun(run: IsolationRun): Promise<void> {
+    try {
+      await this.isolation.discard(run, { integration: 'delete-merged' });
+    } catch (err) {
+      this.tell('warn', `Merged, but could not clean up the run's worktrees and branches: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    this.forgetRun();
   }
 
   /** Worktrees and task branches go; the integration branch and the record stay for review and merge. */
   async cleanupRun(): Promise<void> {
-    await this.isolation.discard(this.requireRun(), { keepIntegration: true });
+    await this.isolation.discard(this.requireRun(), { integration: 'keep' });
     this.emit('onIsolationChanged');
   }
 
   /** The run and everything it made go, and the plan forgets it; the next run starts afresh. */
   async discardRun(): Promise<void> {
-    await this.isolation.discard(this.requireRun(), { keepIntegration: false });
+    await this.isolation.discard(this.requireRun(), { integration: 'delete' });
+    this.forgetRun();
+  }
+
+  private forgetRun(): void {
     this.isolationRun = null;
     this.resolvers = {};
     this.emit('onIsolationChanged');
@@ -1124,7 +1144,18 @@ export class TaskOrchestrator {
       }
     }
     this.runMode = 'isolated';
+    await this.sweep();
     return true;
+  }
+
+  /** What earlier runs left merged in the group goes; a failure here is worth a word, never a stopped run. */
+  private async sweep(): Promise<void> {
+    if (!this.isolationRun) return;
+    try {
+      await this.isolation.sweep(this.isolationRun);
+    } catch (err) {
+      this.tell('warn', `Could not clear merged branches of earlier runs: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -1140,14 +1171,14 @@ export class TaskOrchestrator {
   /**
    * A run with nothing landed holds only superseded attempts, so it goes whole.
    * One that cannot be continued for another reason — it ran from a different
-   * workspace path — keeps its integration branch: only the user gives landed
-   * work up.
+   * workspace path — keeps its integration branch in each repo that has not
+   * merged it: only the user gives landed work up.
    */
   private async mintRun(root: string): Promise<void> {
     const previous = this.isolationRun;
     if (previous) {
       const landed = Object.values(previous.tasks).some((r) => r.status === 'merged');
-      await this.isolation.discard(previous, { keepIntegration: landed }).catch(() => undefined);
+      await this.isolation.discard(previous, { integration: landed ? 'delete-merged' : 'delete' }).catch(() => undefined);
       this.isolationRun = null;
     }
     this.isolationRun = await this.isolation.startRun(root);

@@ -320,25 +320,28 @@ describe.skipIf(!hasGit)('isolated execution over a folder of three repositories
     expect(existsSync(join(roots.infra, 'docs.tf'))).toBe(false);
     for (const r of REPOS) expect(() => git(roots[r], 'rev-parse', '-q', '--verify', 'MERGE_HEAD'), r).toThrow();
     expect(env.messages).toContainEqual({ type: 'isolation_merge', result: blocked });
+    // Nor did it give anything up: every integration branch is still there to merge.
+    for (const r of REPOS) expect(git(roots[r], 'branch', '--list', 'ordewell/*', '--format=%(refname:short)'), r).toBe(integration);
+    expect(session.isolationView()).not.toBeNull();
 
-    // Once the user takes their commit back, every repository takes its merge.
+    // Once the user takes their commit back, every repository takes its merge,
+    // and with nothing left to hand over the run is cleared up in every repository.
     git(roots.web, 'reset', '-q', '--hard', 'HEAD~1');
+    const runId = env.run().id;
+    const merged = { api: git(roots.api, 'rev-parse', integration), infra: git(roots.infra, 'rev-parse', integration), web: git(roots.web, 'rev-parse', integration) };
     expect(await session.mergeRun()).toEqual({ outcome: 'merged' });
-    for (const r of REPOS) expect(isAncestor(roots[r], integration, 'HEAD'), r).toBe(true);
+    for (const r of REPOS) {
+      expect(isAncestor(roots[r], merged[r], 'HEAD'), r).toBe(true);
+      expect(git(roots[r], 'branch', '--list', 'ordewell/*'), r).toBe('');
+      expect(git(roots[r], 'worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree '))).toEqual([`worktree ${roots[r]}`]);
+      expect(git(roots[r], 'symbolic-ref', '--short', 'HEAD'), r).toBe('main');
+    }
     expect(readFileSync(join(roots.api, 'endpoint.txt'), 'utf8')).toBe('endpoint\n');
     expect(readFileSync(join(roots.web, 'web.txt'), 'utf8')).toBe('web by t2 and t3\n');
     expect(readFileSync(join(roots.infra, 'docs.tf'), 'utf8')).toBe('docs\n');
-
-    // Discard gives the run up in every repository; what was merged stays merged.
-    const runId = env.run().id;
-    await session.discardRun();
-    for (const r of REPOS) {
-      expect(git(roots[r], 'branch', '--list', 'ordewell/*'), r).toBe('');
-      expect(git(roots[r], 'worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree '))).toEqual([`worktree ${roots[r]}`]);
-    }
     expect(existsSync(join(dir, '.ordewell', 'worktrees', runId))).toBe(false);
     expect(session.isolationView()).toBeNull();
-    expect(readFileSync(join(roots.api, 'endpoint.txt'), 'utf8')).toBe('endpoint\n');
+    expect(session.planState!.isolation).toBeUndefined();
   }, 60_000);
 
   it('discards a run with a conflicted task, leaving every repository as it was before the run', async () => {

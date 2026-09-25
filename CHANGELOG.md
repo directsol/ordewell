@@ -8,6 +8,18 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Integration branches no longer pile up once their work is merged.** After a
+  Merge all that merges everything, the run is cleared up: its worktrees, task
+  branches and `ordewell/<run-id>/integration` branches go in every repository,
+  and the handoff closes on every surface. When a run starts, it also deletes
+  other runs' `ordewell/…` branches that your checked-out branch already
+  contains — never one a worktree has checked out, one of a run that still has
+  a worktree, or one holding work you have not merged. In a folder of
+  repositories each repository is decided on its own. A blocked, conflicting or
+  failed Merge all deletes nothing, and a sweep that fails only warns.
+
 ### Fixed
 
 - **The welcome no longer jumps from the top to the bottom at launch.** The chat

@@ -274,3 +274,43 @@ Reviewing the branches together changed five things:
   reconnects or a session is loaded (the card waits while a run executes), and
   the TUI and CLI read the same record from the saved plan.
 
+
+## Update (2026-09-25) — integration branches go once their work is merged
+
+"Discarding … can keep the integration branch until it is explicitly given up"
+left one behind for every run that landed anything — in every repo of a group,
+and even after Merge all had put all of it on the user's branch. Nothing ever
+reclaimed them. The rule that stands is narrower than "until given up": Ordewell
+never deletes landed work the user has not merged, and never touches a branch
+it does not own. Within that:
+
+- **A full Merge all ends the run.** When `mergeRun` answers `merged`, the run is
+  discarded as clean-up does — worktrees and task branches, a kept or
+  conflicted attempt's included — and each repo's integration branch is deleted
+  where the repo's checked-out HEAD contains it. The orchestrator then forgets
+  the run as `discardRun` does, so the plan's record, every surface's handoff
+  and every task mark go with it, and the next run starts afresh from a HEAD
+  that now holds the work. `blocked`, `conflict` and `failed` — part-way or not —
+  delete nothing.
+- **"Merged" means `git merge-base --is-ancestor <branch> HEAD`**, then
+  `git branch -d`. HEAD, not an upstream: what the user has checked out is what
+  they merged into. `-d` adds git's own refusal for a branch a worktree has
+  checked out. `discard` takes `integration: 'keep' | 'delete' | 'delete-merged'`
+  in place of `keepIntegration`; `delete-merged` is the only mode that decides
+  per branch.
+- **A replaced run keeps only what is unmerged.** A run that cannot be continued
+  but holds landed work used to keep its integration branch whatever had become
+  of it; it is now discarded with `delete-merged`.
+- **Every run start sweeps.** Once a run is minted or continued, `sweep` deletes,
+  in each repo of the group, every `ordewell/<run-id>/…` branch of another run
+  that HEAD contains, after a `git worktree prune`. It never touches the current
+  run, a branch checked out in any worktree, or anything outside the
+  `ordewell/<run-id>/<name>` shape. It also leaves alone every branch of a run
+  that still has a worktree under `.ordewell/worktrees/<run-id>/`: a run with
+  nothing landed yet has its integration branch at HEAD, and only its worktree
+  says it may be live in another plan. A sweep that fails is a warning notice;
+  the run starts regardless.
+
+Rejected: deleting the integration branch whenever its run is forgotten.
+`cleanupRun` exists to keep that branch for a user who has not decided, and a
+branch that holds unmerged work is the one thing never given up unasked.

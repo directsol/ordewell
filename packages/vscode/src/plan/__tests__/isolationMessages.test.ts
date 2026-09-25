@@ -10,6 +10,7 @@ function deps() {
     sendTaskIsolation: vi.fn(),
     showIsolationHandoff: vi.fn(),
     showIsolationMergeResult: vi.fn(),
+    clearIsolationHandoff: vi.fn(),
     showPlan: vi.fn(),
   };
   const plan = { status: 'draft', tasks: [] };
@@ -82,6 +83,18 @@ describe('worktree isolation messages (ADR-0013)', () => {
     handleSessionMessage({ type: 'isolation_merge', result }, d);
 
     expect(chatProvider.showIsolationMergeResult).toHaveBeenCalledWith(result);
+    expect(chatProvider.clearIsolationHandoff).not.toHaveBeenCalled();
+  });
+
+  // Core clears a fully merged run up and forgets it: the card and every mark
+  // would otherwise offer a merge of branches that no longer exist.
+  it('drops the handoff card and the marks once Merge all merged everything', () => {
+    const { d, chatProvider } = deps();
+
+    handleSessionMessage({ type: 'isolation_merge', result: { outcome: 'merged' } }, d);
+
+    expect(chatProvider.clearIsolationHandoff).toHaveBeenCalled();
+    expect(chatProvider.showIsolationMergeResult).not.toHaveBeenCalled();
   });
 });
 

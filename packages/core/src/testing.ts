@@ -7,6 +7,7 @@ import type {
   IsolationMergeResult,
   IsolationOutcome,
   IsolationRun,
+  IntegrationDisposal,
   PreparedTask,
   IWorktreeIsolation,
 } from './interfaces/IWorktreeIsolation';
@@ -99,8 +100,8 @@ export type FakeIsolationCall =
   | { op: 'prepare'; taskId: string }
   | { op: 'integrate'; taskId: string }
   | { op: 'release'; taskId: string; keep: boolean }
-  | { op: 'handoff' | 'pruneOrphans' | 'reviewDiff' | 'mergeIntoCheckedOut' }
-  | { op: 'discard'; keepIntegration: boolean };
+  | { op: 'handoff' | 'pruneOrphans' | 'reviewDiff' | 'mergeIntoCheckedOut' | 'sweep' }
+  | { op: 'discard'; integration: IntegrationDisposal };
 
 /**
  * An in-memory {@link IWorktreeIsolation} for scheduling tests: no git, no
@@ -127,6 +128,9 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
   copied: string[] = [];
   /** Set to make `startRun` throw, as git does when no repo of the group can be isolated. */
   startRunError: Error | null = null;
+  /** Set to make `discard` / `sweep` throw after logging the call. */
+  discardError: Error | null = null;
+  sweepError: Error | null = null;
   /** Per task id; a task not listed integrates as `merged`. */
   outcomes = new Map<string, IsolationOutcome>();
   calls: FakeIsolationCall[] = [];
@@ -221,7 +225,12 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
   async pruneOrphans(): Promise<void> { this.log({ op: 'pruneOrphans' }); }
   async reviewDiff(): Promise<string> { this.log({ op: 'reviewDiff' }); return ''; }
   async mergeIntoCheckedOut(): Promise<IsolationMergeResult> { this.log({ op: 'mergeIntoCheckedOut' }); return this.mergeResult; }
-  async discard(_run: IsolationRun, opts: { keepIntegration: boolean }): Promise<void> {
-    this.log({ op: 'discard', keepIntegration: opts.keepIntegration });
+  async discard(_run: IsolationRun, opts: { integration: IntegrationDisposal }): Promise<void> {
+    this.log({ op: 'discard', integration: opts.integration });
+    if (this.discardError) throw this.discardError;
+  }
+  async sweep(): Promise<void> {
+    this.log({ op: 'sweep' });
+    if (this.sweepError) throw this.sweepError;
   }
 }

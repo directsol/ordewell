@@ -223,6 +223,14 @@ export type IsolationMergeResult =
   | { outcome: 'blocked'; blocked: IsolationMergeBlock[] }
   | { outcome: 'conflict' | 'failed'; repo: string; files?: string[]; landed?: string[] };
 
+/**
+ * What `discard` does with each repo's integration branch: `keep` it for review
+ * or merge, `delete` it, or delete it only in the repos whose checked-out HEAD
+ * already contains it (`delete-merged`) — the one way that can never give up
+ * landed work the user has not merged.
+ */
+export type IntegrationDisposal = 'keep' | 'delete' | 'delete-merged';
+
 export interface PreparedTask {
   cwd: string;
   branch: string;
@@ -313,9 +321,18 @@ export interface IWorktreeIsolation {
   mergeIntoCheckedOut(run: IsolationRun): Promise<IsolationMergeResult>;
 
   /**
-   * Remove every worktree and task branch of the run, and the integration
-   * branch too unless `keepIntegration` — the branch outlives a discarded run
-   * until the user explicitly gives it up.
+   * Remove every worktree and task branch of the run, and settle each repo's
+   * integration branch as `integration` says. Anything but `keep` also clears
+   * the run's task records.
    */
-  discard(run: IsolationRun, opts: { keepIntegration: boolean }): Promise<void>;
+  discard(run: IsolationRun, opts: { integration: IntegrationDisposal }): Promise<void>;
+
+  /**
+   * Clear what other runs left in each repo of `run`'s group: every
+   * `ordewell/<run-id>/…` branch the repo's checked-out HEAD already contains.
+   * Never a branch of `run` itself, one a worktree has checked out, or any
+   * branch of a run that still has a worktree — that run may be live in
+   * another plan. Tries every repo, then throws naming those where git failed.
+   */
+  sweep(run: IsolationRun): Promise<void>;
 }

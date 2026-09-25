@@ -95,7 +95,7 @@ export type Action =
   | { type: 'isolationHandoff'; handoff: HandoffView; sessionId?: string }
   | { type: 'handoffDiff'; diff: string; sessionId?: string }
   /** The run and its record are gone; nothing is left to hand off or to mark. */
-  | { type: 'handoffDiscarded'; sessionId?: string }
+  | { type: 'runCleared'; sessionId?: string }
   | { type: 'queueReady'; sessionId?: string }
   | { type: 'executionComplete'; summary?: { total: number; completed: number; failed: number }; stopped?: boolean; sessionId?: string }
   | { type: 'settingsLoaded'; settings: Record<string, unknown> }
@@ -399,9 +399,9 @@ export function reduce(state: TuiState, action: Action): Step {
       return step(showDiff(state, action.diff));
     }
 
-    case 'handoffDiscarded': {
+    case 'runCleared': {
       if (stale(state, action.sessionId)) return step(state);
-      // Whatever overlay the discard was confirmed from is already closed; one
+      // Whatever overlay the discard or merge was confirmed from is already closed; one
       // opened since (a picker, help) has nothing to do with the run and stays.
       const overlay = state.overlay?.kind === 'handoff' ? null : state.overlay;
       return step({ ...clearIsolation(state), overlay });
