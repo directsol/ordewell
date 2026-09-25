@@ -157,6 +157,10 @@ const ISOLATED_PARALLELISM_RULE =
 
 const OVERLAP_AVOIDANCE_RULE = '- For parallel tasks, specify different target files to avoid merge conflicts.';
 
+/** Even under worktree isolation, tasks appending to one shared file still race each other's merges. */
+const SHARED_APPEND_FILE_RULE =
+  '- Tasks that run in parallel must not each append to the same shared file (changelogs, registries, index lists) — give that edit to the final task, or to one task the others depend on.';
+
 /**
  * What a planner must know about a repo group (ADR-0014), as a section of its
  * own; nothing for tasks in the shared root or a lone repository, whose
@@ -276,6 +280,7 @@ function buildConversationBody(
     'DEPENDENCY & PARALLELISM:',
     '- Independent slices should have NO dependencies — they run in parallel.',
     '- Only add dependencies when a slice truly depends on artifacts another slice creates.',
+    SHARED_APPEND_FILE_RULE,
     ...(variant.isolatedExecution ? [ISOLATED_PARALLELISM_RULE] : []),
     ...repoGroupSection(variant.isolatedExecution),
     '',
@@ -380,6 +385,7 @@ function corePlannerPrompt(isolatedExecution: IsolatedExecution): string {
     : '- Independent vertical slices (no shared files/modules) should have NO dependencies between them — they can run in parallel.',
   '- Only add dependencies when the second slice truly depends on artifacts (files, APIs) that the first slice creates.',
   '- Prefer parallelism over serial chains. A plan with 3 independent slices running in parallel is better than 3 sequential tasks.',
+  SHARED_APPEND_FILE_RULE,
   isolatedExecution ? ISOLATED_PARALLELISM_RULE : '- Slices that touch different areas of the codebase are naturally parallel.',
   ...repoGroupSection(isolatedExecution),
   '',
