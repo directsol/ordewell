@@ -25,7 +25,7 @@ import { augmentedPath, withPath } from '../utils/shellPath';
 import { ensureStateDirIgnored, STATE_DIR } from '../utils/fsHelpers';
 import { sanitizeSlug } from '../utils/prdStore';
 import { handoffOf, integrationBranchFor, repoRootOf, SELF_REPO } from './isolationRecord';
-import { linkPath } from './worktreeLink';
+import { linkPath, mirrorDir } from './worktreeLink';
 
 export type GitExecFn = (
   file: string,
@@ -173,6 +173,26 @@ function segmentMatches(root: string, base: string, segment: string): string[] {
   if (!/[*?]/.test(segment)) return lexists(path.join(root, base, segment)) ? [under(segment)] : [];
   const pattern = new RegExp(`^${segment.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
   return listDir(path.join(root, base)).filter((name) => !NEVER_SCANNED.has(name) && pattern.test(name)).map(under);
+}
+
+/**
+ * The `node_modules` directories under `root`, relative to it: its own and
+ * those of the workspace packages its package.json lists.
+ */
+function installDirs(root: string): string[] {
+  const packages = matchLinks(root, workspaceGlobs(root)).map((pkg) => `${pkg}/node_modules`);
+  return ['node_modules', ...packages].filter((dir) => lexists(path.join(root, dir)));
+}
+
+function workspaceGlobs(root: string): string[] {
+  let manifest: unknown;
+  try { manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')); } catch { return []; }
+  if (typeof manifest !== 'object' || manifest === null || !('workspaces' in manifest)) return [];
+  // An array (npm, yarn) or yarn classic's `{ packages: [...] }`.
+  const { workspaces } = manifest;
+  const listed: unknown = typeof workspaces === 'object' && workspaces !== null && 'packages' in workspaces ? workspaces.packages : workspaces;
+  if (!Array.isArray(listed)) return [];
+  return listed.filter((glob): glob is string => typeof glob === 'string' && !glob.startsWith('!'));
 }
 
 class GitWorktreeIsolation implements IWorktreeIsolation {
@@ -918,8 +938,13 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
 
   private async removeWorktreeDir(run: IsolationRun, repo: IsolationRepo, dir: string, linked: string[]): Promise<void> {
     // Links first, so no removal path can ever walk through one into the main
-    // worktree's node_modules.
-    for (const name of linked) this.unlinkIfLink(path.join(dir, name));
+    // worktree's node_modules. A mirrored install is a real directory of links;
+    // it is found again from package.json when no record names it.
+    for (const name of new Set([...linked, ...installDirs(dir)])) {
+      const target = path.join(dir, name);
+      this.unlinkIfLink(target);
+      this.unlinkLinksUnder(target);
+    }
     for (const name of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
       if (LINKED_ARTIFACTS.has(name) || isEnvFile(name)) this.unlinkIfLink(path.join(dir, name));
     }
@@ -971,10 +996,25 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
       linked.push(name);
     };
 
+    // A whole-folder link would resolve a workspace link such as
+    // node_modules/@scope/pkg -> ../../packages/pkg from the main checkout,
+    // so the task would build against the main checkout's copy of the code it
+    // is changing. Mirroring entry by entry lets those links land in the worktree.
+    const mirror = (name: string): void => {
+      const target = path.join(cwd, name);
+      if (lexists(target) || !fs.existsSync(path.dirname(target))) return;
+      const source = path.join(repo.root, name);
+      if (!fs.lstatSync(source).isDirectory()) return link(name);
+      const mirrored = mirrorDir(source, target, { platform: this.platform, from: repo.root, to: cwd });
+      copied.push(...mirrored.map((entry) => path.join(name, entry)));
+      linked.push(name);
+    };
+
     if (!setup) {
       for (const name of fs.readdirSync(repo.root)) {
-        if (name !== STATE_DIR && (LINKED_ARTIFACTS.has(name) || isEnvFile(name))) link(name);
+        if (name !== STATE_DIR && name !== 'node_modules' && (LINKED_ARTIFACTS.has(name) || isEnvFile(name))) link(name);
       }
+      for (const dir of installDirs(repo.root)) mirror(dir);
     }
     for (const name of matchLinks(repo.root, this.deps.config.worktreeLinks)) link(name);
     if (setup) await this.runSetup(setup, repo, cwd);
