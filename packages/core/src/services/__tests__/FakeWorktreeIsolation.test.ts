@@ -54,6 +54,27 @@ describe('FakeWorktreeIsolation', () => {
     expect(run.tasks['task-2']).toBeUndefined();
   });
 
+  it('reopens a conflicted task for a repair the way git does, and settles it back on release', async () => {
+    const iso = new FakeWorktreeIsolation();
+    const run = await iso.startRun('/ws');
+    const { cwd } = await iso.prepare(task(1), run);
+    await expect(iso.reopen(task(1), run)).rejects.toThrow(/no conflict/);
+    iso.outcomes.set('task-1', 'conflict');
+    iso.conflictFiles.set('task-1', ['a.ts']);
+    await iso.integrate(task(1), run);
+
+    expect(await iso.reopen(task(1), run)).toEqual({ cwd, branch: 'ordewell/run1/1-task-1', copied: [] });
+    expect(run.tasks['task-1']).toMatchObject({ status: 'repairing', repairs: 1, repairBase: { '.': 'tip-.' }, repairedFiles: ['a.ts'] });
+    expect(await iso.verifyRepair(task(1), run)).toEqual({ ok: true });
+    iso.repairEvidence.set('task-1', { ok: false, reason: 'not-merged', repo: '.' });
+    expect(await iso.verifyRepair(task(1), run)).toEqual({ ok: false, reason: 'not-merged', repo: '.' });
+
+    await iso.release(run, 'task-1', { keep: true });
+    expect(run.tasks['task-1']).toMatchObject({ status: 'conflict', repairs: 1 });
+    expect(run.tasks['task-1'].repairBase).toBeUndefined();
+    expect(iso.taskIdsFor('reopen')).toEqual(['task-1', 'task-1']);
+  });
+
   it('reports the availability it is given', async () => {
     const iso = new FakeWorktreeIsolation();
     iso.availability = { active: false, reason: 'dirty' };

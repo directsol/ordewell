@@ -476,7 +476,9 @@ the task branch now contains the tip the repair started from
 conflict markers; and the landing that follows goes through clean — a repair
 that fails that last check is a fresh conflict, not a claim taken at its word.
 Capped per task by `conflictRepairAttempts` (default 2, persisted on the run
-so a restart cannot re-spend it; 0 turns repair off). A repair that fails
+so a restart cannot re-spend it; 0 turns repair off). While one runs the task
+is `in_progress` and its record `repairing`; each repair is counted when it
+starts, and the files every repair was started for gather in `repairedFiles`. A repair that fails
 evidence or exhausts its cap goes back to an unrepaired conflict — `awaiting_user`,
 worktree and refs kept, every existing way out still open — and never halts
 the run on its own. Every repair is logged as a notice, and a landed one is

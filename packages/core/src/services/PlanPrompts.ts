@@ -773,3 +773,39 @@ export function buildConflictResolutionPrompt(
     asked,
   ].join('\n');
 }
+
+/**
+ * Runner prompt for a conflict repair (ADR-0015): a new attempt of the
+ * conflicted task itself, in its kept worktree, so the merge runs the other
+ * way round from {@link buildConflictResolutionPrompt} — the integration tip
+ * into the task's branch. Whether it worked is decided by the evidence checks
+ * and the landing that follow, never by the agent's word.
+ */
+export function buildConflictRepairPrompt(
+  task: Task,
+  conflict: { branch: string; repos: string[]; conflictRepo?: string; conflictFiles?: string[] },
+  integrationBranch: string,
+): string {
+  const { branch } = conflict;
+  const files = conflict.conflictFiles ?? [];
+  const asked = `What the task was asked to do:\n${task.prompt ?? task.description}`;
+  const resolve = 'resolve every conflict so that both sides\' intent survives: keep the work already integrated and add what the task contributed.';
+  const repos = conflict.repos.filter((repo) => repo !== SELF_REPO);
+  if (repos.length === 0) {
+    return [
+      `Task #${task.order} "${task.title}" passed, but merging its branch \`${branch}\` into \`${integrationBranch}\` conflicted${files.length > 0 ? ` in ${files.join(', ')}` : ''}. None of its work has landed yet.`,
+      `This is the task's own worktree, on \`${branch}\`, with its work committed. Run \`git merge --no-edit ${integrationBranch}\` here and ${resolve} Never drop either side wholesale, and never abort the merge or reset it away.`,
+      'Build and test the result the way this project does, commit the merge, and only then print the completion marker.',
+      '',
+      asked,
+    ].join('\n');
+  }
+  const stoppedIn = conflict.conflictRepo ?? repos[0];
+  return [
+    `Task #${task.order} "${task.title}" passed, but landing its branch \`${branch}\` on \`${integrationBranch}\` conflicted in ${stoppedIn}${files.length > 0 ? ` (${files.join(', ')})` : ''}. A task lands in every repository it changed or in none, so none of its work has landed yet.`,
+    `This is the task's own workspace, with each repository at its usual path on \`${branch}\` and the task's work committed. In each repository the task changed — ${repos.join(', ')} — run \`git merge --no-edit ${integrationBranch}\` inside that repository's directory, and ${resolve} Never drop either side wholesale, and never abort a merge or reset it away.`,
+    'Build and test the result the way this project does, commit the merge in each repository, and only then print the completion marker.',
+    '',
+    asked,
+  ].join('\n');
+}

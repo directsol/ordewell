@@ -36,11 +36,13 @@ const ISOLATION_STATE: Record<IsolationTaskStatus, Exclude<TaskIsolation['state'
   active: 'active',
   merged: 'integrated',
   conflict: 'conflict',
+  repairing: 'repairing',
   kept: 'kept',
   failed: 'kept',
 };
 
-export function taskIsolationOf(record: IsolationTaskRecord): TaskIsolation {
+/** `repairLimit` is `conflictRepairAttempts` as it stands now, which is what the next repair will be held to. */
+export function taskIsolationOf(record: IsolationTaskRecord, repairLimit: number): TaskIsolation {
   return {
     state: ISOLATION_STATE[record.status],
     branch: record.branch,
@@ -48,6 +50,8 @@ export function taskIsolationOf(record: IsolationTaskRecord): TaskIsolation {
     repos: Object.entries(record.repos).filter(([, r]) => r.changed).map(([repoPath]) => repoPath),
     ...(record.conflictRepo ? { conflictRepo: record.conflictRepo } : {}),
     ...(record.conflictFiles?.length ? { conflictFiles: record.conflictFiles } : {}),
+    ...(record.repairs ? { repair: { attempt: record.repairs, limit: repairLimit } } : {}),
+    ...(record.repairedFiles?.length ? { repairedFiles: record.repairedFiles } : {}),
   };
 }
 

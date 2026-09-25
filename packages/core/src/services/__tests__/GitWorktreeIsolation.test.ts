@@ -511,6 +511,147 @@ describe.skipIf(!hasGit)('WorktreeIsolation conflicts', () => {
   });
 });
 
+describe.skipIf(!hasGit)('WorktreeIsolation conflict repair', () => {
+  /** Task 1 landed `left`; task 2, cut beside it, wrote `right` and conflicted. */
+  async function conflicted() {
+    const root = repo({ 'shared.txt': 'base\n' });
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const [t1, t2] = [task(1, 'Left'), task(2, 'Right')];
+    const a = await iso.prepare(t1, run);
+    const b = await iso.prepare(t2, run);
+    writeFileSync(join(a.cwd, 'shared.txt'), 'left\n');
+    writeFileSync(join(b.cwd, 'shared.txt'), 'right\n');
+    expect(await iso.integrate(t1, run)).toBe('merged');
+    expect(await iso.integrate(t2, run)).toBe('conflict');
+    const integration = run.repos[0].integrationBranch;
+    return { root, iso, run, t2, b, integration, tip: git(root, 'rev-parse', integration) };
+  }
+
+  it('reopens the kept worktree at the same cwd, recording the tip it starts from and counting the repair', async () => {
+    const { root, iso, run, t2, b, tip } = await conflicted();
+    const committed = git(root, 'rev-parse', b.branch);
+
+    const reopened = await iso.reopen(t2, run);
+
+    expect(reopened).toEqual({ cwd: b.cwd, branch: b.branch, copied: [] });
+    expect(worktreePaths(root)).toContain(b.cwd);
+    expect(git(root, 'rev-parse', b.branch)).toBe(committed);
+    expect(run.tasks['task-2']).toMatchObject({
+      status: 'repairing', repairs: 1, repairBase: { '.': tip }, repairedFiles: ['shared.txt'], conflictFiles: ['shared.txt'],
+    });
+  });
+
+  /** What a repair's agent does when it gets it right: merge the tip in and resolve so both sides survive. */
+  function mergeAndResolve(cwd: string, integration: string, resolved = 'left and right\n'): void {
+    expect(() => git(cwd, 'merge', '--no-edit', integration)).toThrow();
+    writeFileSync(join(cwd, 'shared.txt'), resolved);
+    git(cwd, 'add', 'shared.txt');
+    git(cwd, 'commit', '-q', '--no-edit');
+  }
+
+  it('accepts a repair whose branch now contains the tip it started from', async () => {
+    const { iso, run, t2, b, integration } = await conflicted();
+    await iso.reopen(t2, run);
+
+    mergeAndResolve(b.cwd, integration);
+
+    expect(await iso.verifyRepair(t2, run)).toEqual({ ok: true });
+  });
+
+  it('refuses a repair that never merged the tip in, however its files read', async () => {
+    const { iso, run, t2, b } = await conflicted();
+    await iso.reopen(t2, run);
+
+    writeFileSync(join(b.cwd, 'shared.txt'), 'left and right\n');
+
+    expect(await iso.verifyRepair(t2, run)).toEqual({ ok: false, reason: 'not-merged', repo: '.' });
+  });
+
+  it('refuses a repair that merged the tip in but left the conflict markers, even uncommitted', async () => {
+    const { iso, run, t2, b, integration } = await conflicted();
+    await iso.reopen(t2, run);
+
+    expect(() => git(b.cwd, 'merge', '--no-edit', integration)).toThrow();
+
+    expect(await iso.verifyRepair(t2, run)).toEqual({ ok: false, reason: 'conflict-markers', repo: '.', files: ['shared.txt'] });
+  });
+
+  it('does not count whitespace warnings as leftover markers', async () => {
+    const { iso, run, t2, b, integration } = await conflicted();
+    await iso.reopen(t2, run);
+
+    mergeAndResolve(b.cwd, integration, 'left and right   \n');
+
+    expect(await iso.verifyRepair(t2, run)).toEqual({ ok: true });
+  });
+
+  it('lands a repaired branch cleanly, with one merge on the tip, keeping what the repair did on the record', async () => {
+    const { root, iso, run, t2, b, integration, tip } = await conflicted();
+    await iso.reopen(t2, run);
+    mergeAndResolve(b.cwd, integration);
+    expect(await iso.verifyRepair(t2, run)).toEqual({ ok: true });
+
+    expect(await iso.integrate(t2, run)).toBe('merged');
+
+    expect(git(root, 'show', `${integration}:shared.txt`)).toBe('left and right');
+    expect(git(root, 'rev-parse', `${integration}^1`)).toBe(tip);
+    expect(git(root, 'log', '-1', '--format=%s', integration)).toBe('Merge task 2: Right');
+    const record = run.tasks['task-2'];
+    expect(record).toMatchObject({ status: 'merged', repairs: 1, repairedFiles: ['shared.txt'] });
+    expect(record.repairBase).toBeUndefined();
+    expect(record.conflictFiles).toBeUndefined();
+  });
+
+  it('is a fresh conflict, not a repair, when the tip moved again under the repaired branch', async () => {
+    const { root, iso, run, t2, b, integration } = await conflicted();
+    await iso.reopen(t2, run);
+    mergeAndResolve(b.cwd, integration);
+    expect(await iso.verifyRepair(t2, run)).toEqual({ ok: true });
+    const t3 = task(3, 'Later');
+    const c = await iso.prepare(t3, run);
+    writeFileSync(join(c.cwd, 'shared.txt'), 'later\n');
+    expect(await iso.integrate(t3, run)).toBe('merged');
+    const tipBefore = git(root, 'rev-parse', integration);
+
+    expect(await iso.integrate(t2, run)).toBe('conflict');
+
+    expect(git(root, 'rev-parse', integration)).toBe(tipBefore);
+    expect(run.tasks['task-2']).toMatchObject({ status: 'conflict', repairs: 1, conflictFiles: ['shared.txt'] });
+    expect(run.tasks['task-2'].repairBase).toBeUndefined();
+    expect((await iso.reopen(t2, run)).cwd).toBe(b.cwd);
+    expect(run.tasks['task-2']).toMatchObject({ status: 'repairing', repairs: 2, repairBase: { '.': tipBefore } });
+  });
+
+  it('leaves the task conflicted as it was when a repair is released or a crash interrupted it', async () => {
+    const { iso, run, t2, b } = await conflicted();
+    await iso.reopen(t2, run);
+
+    await iso.release(run, 'task-2', { keep: true });
+
+    expect(run.tasks['task-2']).toMatchObject({ status: 'conflict', repairs: 1, conflictFiles: ['shared.txt'] });
+    expect(run.tasks['task-2'].repairBase).toBeUndefined();
+
+    await iso.reopen(t2, run);
+    await iso.pruneOrphans(run);
+
+    expect(run.tasks['task-2']).toMatchObject({ status: 'conflict', repairs: 2 });
+    expect(run.tasks['task-2'].repairBase).toBeUndefined();
+    expect(existsSync(b.cwd)).toBe(true);
+  });
+
+  it('refuses to reopen a task that has no conflict', async () => {
+    const root = repo();
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const t1 = task(1, 'Running');
+    await iso.prepare(t1, run);
+
+    await expect(iso.reopen(t1, run)).rejects.toThrow(/no conflict/);
+    expect(run.tasks['task-1'].status).toBe('active');
+  });
+});
+
 describe.skipIf(!hasGit)('WorktreeIsolation.release', () => {
   it('keep: true preserves the worktree and branch for inspection', async () => {
     const root = repo();
@@ -1493,6 +1634,29 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
       expect(await iso.integrate(both, run)).toBe('merged');
       expect(git(join(dir, 'api'), 'show', `${integrationOf(run)}:api.txt`)).toBe('both');
       expect(git(join(dir, 'web'), 'show', `${integrationOf(run)}:web.txt`)).toBe('resolved');
+    });
+
+    it('repairs a two-repository conflict in the task\'s own workspace, then lands it in both', async () => {
+      const { dir, iso, run, both, b } = await secondConflicts();
+      expect(await iso.integrate(both, run)).toBe('conflict');
+      const tips = { api: tip(dir, 'api', run), web: tip(dir, 'web', run) };
+
+      expect(await iso.reopen(both, run)).toEqual({ cwd: b.cwd, branch: b.branch, copied: [] });
+      expect(run.tasks['task-2']).toMatchObject({ status: 'repairing', repairBase: tips, repairedFiles: ['web/web.txt'] });
+
+      // The repair's agent: bring the tip into every repository the task changed.
+      git(join(b.cwd, 'api'), 'merge', '--no-edit', integrationOf(run));
+      expect(await iso.verifyRepair(both, run)).toEqual({ ok: false, reason: 'not-merged', repo: 'web' });
+      expect(() => git(join(b.cwd, 'web'), 'merge', '--no-edit', integrationOf(run))).toThrow();
+      writeFileSync(join(b.cwd, 'web', 'web.txt'), 'first and both\n');
+      expect(await iso.verifyRepair(both, run)).toEqual({ ok: true });
+
+      expect(await iso.integrate(both, run)).toBe('merged');
+      expect(git(join(dir, 'api'), 'show', `${integrationOf(run)}:api.txt`)).toBe('both');
+      expect(git(join(dir, 'web'), 'show', `${integrationOf(run)}:web.txt`)).toBe('first and both');
+      for (const repo of ['api', 'web'] as const) {
+        expect(git(join(dir, repo), 'rev-parse', `${integrationOf(run)}^1`)).toBe(tips[repo]);
+      }
     });
 
     it('merges nothing for a task that changed nothing, and lands it', async () => {

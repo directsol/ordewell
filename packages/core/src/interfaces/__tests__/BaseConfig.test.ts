@@ -88,6 +88,27 @@ describe('BaseConfig', () => {
     });
   });
 
+  describe('conflictRepairAttempts', () => {
+    const key = 'ORDEWELL_CONFLICT_REPAIR_ATTEMPTS';
+    let backup: string | undefined;
+    beforeEach(() => { backup = process.env[key]; delete process.env[key]; });
+    afterEach(() => { if (backup !== undefined) process.env[key] = backup; else delete process.env[key]; });
+
+    it('allows two repairs per task by default', () => {
+      expect(new TestConfig().conflictRepairAttempts).toBe(2);
+    });
+
+    it.each([['0', 0], ['1', 1], [' 5 ', 5]])('reads %j from ORDEWELL_CONFLICT_REPAIR_ATTEMPTS', (value, expected) => {
+      process.env[key] = value;
+      expect(new TestConfig().conflictRepairAttempts).toBe(expected);
+    });
+
+    it.each(['-1', '1.5', 'two', ''])('keeps the default for %j, which is not a non-negative integer', (value) => {
+      process.env[key] = value;
+      expect(new TestConfig().conflictRepairAttempts).toBe(2);
+    });
+  });
+
   describe('provider detection & key resolution', () => {
     const keys = ['AI_PROVIDER', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GEMINI_BASE_URL'];
     const backup: Record<string, string | undefined> = {};

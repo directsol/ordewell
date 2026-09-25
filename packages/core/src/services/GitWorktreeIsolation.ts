@@ -19,6 +19,7 @@ import type {
   IntegrationDisposal,
   IWorktreeIsolation,
   PreparedTask,
+  RepairEvidence,
 } from '../interfaces/IWorktreeIsolation';
 import type { Task } from '../models/Task';
 import { augmentedPath, withPath } from '../utils/shellPath';
@@ -118,6 +119,18 @@ function statusPaths(porcelain: string): string[] {
     if (/[RC]/.test(entry.slice(0, 2)) && fields[i + 1]) paths.push(fields[++i]);
   }
   return paths;
+}
+
+/** The files `git diff --check` reports leftover conflict markers in; its whitespace warnings are not asked about. */
+function leftoverMarkerFiles(check: string): string[] {
+  const files = check.split(/\r?\n/).flatMap((line) => /^(.+):\d+: leftover conflict marker$/.exec(line)?.[1] ?? []);
+  return [...new Set(files)];
+}
+
+/** Where a landing or a release leaves a task; a repair in flight ends there too, whatever the outcome. */
+function settleStatus(record: IsolationTaskRecord, status: IsolationTaskRecord['status']): void {
+  record.status = status;
+  delete record.repairBase;
 }
 
 function sameDir(a: string, b: string): boolean {
@@ -460,6 +473,57 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     });
   }
 
+  reopen(task: Task, run: IsolationRun): Promise<PreparedTask> {
+    return this.admin(run.workspaceRoot, async () => {
+      const record = run.tasks[task.id];
+      if (record?.status !== 'conflict') throw new Error(`Task ${task.order} has no conflict to repair`);
+      let cwd = record.workspace;
+      const repairBase: Record<string, string> = {};
+      for (const repo of run.repos) {
+        const entry = record.repos[repo.path];
+        if (!entry) continue;
+        if (!fs.existsSync(entry.worktree)) throw new Error(`The worktree of task ${task.order} is gone: ${entry.worktree}`);
+        if (repo.path === SELF_REPO) cwd = await this.inWorkspacePlace(repo, entry.worktree);
+        // A record from before `changed` was kept names only the repo that stopped it.
+        if (entry.changed || repo.path === record.conflictRepo) {
+          repairBase[repo.path] = (await this.git(repo.root, ['rev-parse', '--verify', repo.integrationBranch])).trim();
+        }
+      }
+      const files = (record.conflictFiles ?? []).map((file) => (record.conflictRepo && record.conflictRepo !== SELF_REPO ? `${record.conflictRepo}/${file}` : file));
+      record.repairs = (record.repairs ?? 0) + 1;
+      record.repairBase = repairBase;
+      record.repairedFiles = [...new Set([...(record.repairedFiles ?? []), ...files])];
+      record.status = 'repairing';
+      return { cwd, branch: record.branch, copied: [] };
+    });
+  }
+
+  async verifyRepair(task: Task, run: IsolationRun): Promise<RepairEvidence> {
+    const record = run.tasks[task.id];
+    if (!record?.repairBase) return { ok: false, reason: 'failed', repo: record?.conflictRepo ?? SELF_REPO };
+    for (const repo of run.repos) {
+      const entry = record.repos[repo.path];
+      if (!entry) continue;
+      try {
+        await this.commitWorktree(repo, record, entry);
+      } catch {
+        return { ok: false, reason: 'failed', repo: repo.path };
+      }
+    }
+    for (const repo of run.repos) {
+      const base = record.repairBase[repo.path];
+      if (base === undefined) continue;
+      const contains = await this.tryGit(repo.root, ['merge-base', '--is-ancestor', base, record.branch]);
+      if (!contains.ok) return { ok: false, reason: contains.code === 1 ? 'not-merged' : 'failed', repo: repo.path };
+      const check = await this.tryGit(repo.root, ['-c', 'core.quotePath=false', 'diff', '--check', base, record.branch]);
+      // Exit 2 is "found something", which is whitespace just as often; anything else is git failing.
+      if (!check.ok && check.code !== 2) return { ok: false, reason: 'failed', repo: repo.path };
+      const files = leftoverMarkerFiles(check.stdout);
+      if (files.length > 0) return { ok: false, reason: 'conflict-markers', repo: repo.path, files };
+    }
+    return { ok: true };
+  }
+
   /**
    * The place in a repo's worktree that matches where the workspace sits in
    * the real repo: the worktree itself, or a subdirectory of it when the
@@ -493,6 +557,7 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
       if (opts.keep) {
         // Off `active` so a crash-recovery prune does not mistake a kept attempt for an orphan.
         if (record.status === 'active') record.status = 'kept';
+        else if (record.status === 'repairing') settleStatus(record, 'conflict');
         return;
       }
       await this.removeTask(run, record, { dropRecord: true });
@@ -519,6 +584,8 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
       for (const record of Object.values(run.tasks)) {
         if (record.status === 'active') await this.removeTask(run, record, { dropRecord: true });
         else if (record.status === 'merged') await this.removeTask(run, record, { dropRecord: false });
+        // The work a repair was given is committed on the branch; only the attempt died.
+        else if (record.status === 'repairing') settleStatus(record, 'conflict');
       }
       await this.removeUnowned(run);
       for (const repo of run.repos) await this.tryGit(repo.root, ['worktree', 'prune']);
@@ -755,7 +822,7 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
 
     // No await between these: a persist must never see the landing cleared without the task merged.
     delete run.landing;
-    record.status = 'merged';
+    settleStatus(record, 'merged');
     delete record.conflictRepo;
     delete record.conflictFiles;
     // The work is on the integration branches already; a stuck cleanup must
@@ -765,7 +832,7 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
   }
 
   private stopLanding(record: IsolationTaskRecord, outcome: Exclude<IsolationOutcome, 'merged'>, repo?: IsolationRepo, files?: string[]): IsolationOutcome {
-    record.status = outcome;
+    settleStatus(record, outcome);
     if (repo) record.conflictRepo = repo.path;
     else delete record.conflictRepo;
     if (files && files.length > 0) record.conflictFiles = files;

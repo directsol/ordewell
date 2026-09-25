@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildConflictResolutionPrompt, buildConversationSystemPrompt, buildModifyDuringExecutionPrompt, buildResearchPrompt, buildResearchToolsPrompt, buildSubagentSystemPrompt } from '../PlanPrompts';
+import { buildConflictRepairPrompt, buildConflictResolutionPrompt, buildConversationSystemPrompt, buildModifyDuringExecutionPrompt, buildResearchPrompt, buildResearchToolsPrompt, buildSubagentSystemPrompt } from '../PlanPrompts';
 import type { RepoGroupLayout } from '../../interfaces/IWorktreeIsolation';
 import { createTask, type DiscoveredModel, type RunnerId } from '../../models/Task';
 
@@ -318,5 +318,37 @@ describe('the resolver task prompt', () => {
     expect(p).toContain('In each repository the task changed — api, web — run `git merge --no-ff ordewell/r1/3-edit-both` inside that repository');
     expect(p).toContain('commit the merge in each repository');
     expect(p).toContain('change the API and its client');
+  });
+});
+
+describe('the conflict repair prompt', () => {
+  const conflicted = createTask({ id: 't1', order: 3, title: 'Edit both', prompt: 'change the API and its client' });
+
+  it('has a repository that is the whole workspace merge the integration tip into the task\'s own worktree', () => {
+    const conflict = { branch: 'ordewell/r1/3-edit-both', repos: ['.'], conflictRepo: '.', conflictFiles: ['src/api.ts', 'src/client.ts'] };
+    expect(buildConflictRepairPrompt(conflicted, conflict, 'ordewell/r1/integration')).toBe([
+      'Task #3 "Edit both" passed, but merging its branch `ordewell/r1/3-edit-both` into `ordewell/r1/integration` conflicted in src/api.ts, src/client.ts. None of its work has landed yet.',
+      'This is the task\'s own worktree, on `ordewell/r1/3-edit-both`, with its work committed. Run `git merge --no-edit ordewell/r1/integration` here and resolve every conflict so that both sides\' intent survives: keep the work already integrated and add what the task contributed. Never drop either side wholesale, and never abort the merge or reset it away.',
+      'Build and test the result the way this project does, commit the merge, and only then print the completion marker.',
+      '',
+      'What the task was asked to do:\nchange the API and its client',
+    ].join('\n'));
+  });
+
+  it('reads plainly when git named no files', () => {
+    const p = buildConflictRepairPrompt(conflicted, { branch: 'ordewell/r1/3-edit-both', repos: ['.'] }, 'ordewell/r1/integration');
+    expect(p.split('\n')[0]).toBe('Task #3 "Edit both" passed, but merging its branch `ordewell/r1/3-edit-both` into `ordewell/r1/integration` conflicted. None of its work has landed yet.');
+  });
+
+  it('has the tip merged in every repository the task changed, naming the one that conflicted and its files', () => {
+    const conflict = { branch: 'ordewell/r1/3-edit-both', repos: ['api', 'web'], conflictRepo: 'web', conflictFiles: ['web.txt'] };
+    const p = buildConflictRepairPrompt(conflicted, conflict, 'ordewell/r1/integration');
+
+    expect(p).toContain('landing its branch `ordewell/r1/3-edit-both` on `ordewell/r1/integration` conflicted in web (web.txt)');
+    expect(p).toMatch(/lands in every repository it changed or in none/);
+    expect(p).toContain('In each repository the task changed — api, web — run `git merge --no-edit ordewell/r1/integration` inside that repository\'s directory');
+    expect(p).toMatch(/Never drop either side wholesale, and never abort a merge or reset it away/);
+    expect(p).toContain('commit the merge in each repository, and only then print the completion marker');
+    expect(p).toContain('What the task was asked to do:\nchange the API and its client');
   });
 });
