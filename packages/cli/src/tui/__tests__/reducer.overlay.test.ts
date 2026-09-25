@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce, type Step } from '../reducer';
-import type { PickerState, TaskView, TuiState } from '../state';
+import type { ConfirmAction, PickerState, TaskView, TuiState } from '../state';
 
 const key = (name: string, char?: string) => ({ type: 'key' as const, key: { name, char } });
 const press = (state: TuiState, name: string, char?: string): Step => reduce(state, key(name, char));
@@ -739,5 +739,51 @@ describe('the wheel reaches past an overlay', () => {
     const after = reduce(before, { type: 'key', key: { name: 'wheelignored', col: 10, row: 5 } }).state;
 
     expect(after).toEqual(before);
+  });
+});
+
+describe('plain confirms', () => {
+  const task = (id: string): TaskView => ({ id, order: 1, title: id, type: 'ai', status: 'pending', dependencies: [] });
+  const asking = (action: ConfirmAction): TuiState =>
+    initialState({ sessionId: 's1', tasks: [task('t1')], overlay: { kind: 'confirm', title: 'Sure?', message: 'Really?', action } });
+
+  it('enter runs a remove-task confirm and closes it', () => {
+    const { state, effects } = press(asking({ kind: 'remove-task', taskId: 't1' }), 'enter');
+
+    expect(state.overlay).toBeNull();
+    expect(effects).toEqual([{ type: 'removeTask', sessionId: 's1', taskId: 't1' }]);
+  });
+
+  it('enter runs an init-workspace confirm, retrying with the workspace allowed', () => {
+    const { state, effects } = press(asking({ kind: 'init-workspace', goal: 'g', workspace: '/w' }), 'enter');
+
+    expect(state.overlay).toBeNull();
+    expect(effects).toEqual([{ type: 'startConversation', goal: 'g', allowInit: true }]);
+  });
+
+  it('enter on a new-session confirm starts over', () => {
+    const { state, effects } = press(asking({ kind: 'new-session' }), 'enter');
+
+    expect(state.overlay).toBeNull();
+    expect(state.sessionId).toBeNull();
+    expect(effects).toEqual([{ type: 'closeSession', sessionId: 's1' }]);
+  });
+
+  it('escape cancels without an effect', () => {
+    const before = asking({ kind: 'remove-task', taskId: 't1' });
+    const { state, effects } = press(before, 'escape');
+
+    expect(state).toEqual({ ...before, overlay: null });
+    expect(effects).toEqual([]);
+  });
+
+  it('has no numbered answers: digits and arrows change nothing', () => {
+    const before = asking({ kind: 'remove-task', taskId: 't1' });
+
+    for (const [name, char] of [['char', '1'], ['char', '2'], ['down', undefined], ['up', undefined]] as const) {
+      const { state, effects } = press(before, name, char);
+      expect(state).toEqual(before);
+      expect(effects).toEqual([]);
+    }
   });
 });

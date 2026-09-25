@@ -98,6 +98,8 @@ export interface ModeView {
 export interface RewindTargetView {
   index: number;
   preview: string;
+  /** The whole message, for the confirmation to quote — `preview` is one clipped line. */
+  content: string;
   timestamp: string;
 }
 
@@ -217,20 +219,44 @@ export type Overlay =
    */
   | { kind: 'handoff'; index: number; diff: { lines: string[]; scroll: number } | null }
   | { kind: 'prompt'; title: string; hint?: string; value: string; action: PromptAction }
-  | { kind: 'confirm'; title: string; message: string; action: ConfirmAction };
+  | {
+      kind: 'confirm';
+      title: string;
+      message: string;
+      action: ConfirmAction;
+      /** Text shown quoted under `message`; a blank line separates them. */
+      quote?: string;
+      /** Closing lines under the quote, one per `\n`. */
+      note?: string;
+      /** Named answers in place of the bare enter/esc; absent, enter runs `action` and esc cancels. */
+      choice?: ConfirmChoice;
+    };
+
+export interface ConfirmOption {
+  label: string;
+  /** Whether choosing this runs the overlay's `action`; otherwise it just closes. */
+  confirms: boolean;
+}
+
+export interface ConfirmChoice {
+  options: ConfirmOption[];
+  /** The highlighted option — what enter chooses. */
+  index: number;
+}
 
 /** A free-text prompt overlay — used where a list of options makes no sense. */
 export type PromptAction =
   | { kind: 'api-key'; provider: string; envVar: string }
   | { kind: 'add-task' };
 
-/** A yes/no overlay for destructive actions — enter confirms, escape cancels. */
+/** A confirmation overlay for destructive actions — enter confirms, escape cancels, unless it offers a `choice`. */
 export type ConfirmAction =
   | { kind: 'new-session' }
   | { kind: 'remove-task'; taskId: string }
   | { kind: 'merge-run' }
   | { kind: 'discard-run' }
-  | { kind: 'init-workspace'; goal: string; workspace: string };
+  | { kind: 'init-workspace'; goal: string; workspace: string }
+  | { kind: 'rewind'; index: number };
 
 export type Focus = 'chat' | 'plan';
 

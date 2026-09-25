@@ -17,6 +17,13 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
   with `/sessions` or `ordewell sessions load`. The message you rewound to is
   returned in full — `ordewell rewind` prints it so you can resend or edit it.
   Still refused while the planner is answering.
+- **The TUI asks before it rewinds, then hands the message back.** Choosing a
+  message in the `/rewind` picker, or typing `/rewind <n>`, opens a
+  confirmation that quotes the whole message and says the conversation will be
+  forked and the code left unchanged. Pick *Restore Conversation* (`1` or
+  Enter) to switch to the fork with that message already in the input, ready to
+  edit and send; *Never mind* (`2` or Esc) closes it and nothing happens. The
+  rewind targets the daemon lists now carry each message's full text.
 
 ### Fixed
 

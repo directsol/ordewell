@@ -119,6 +119,8 @@ export interface RewindTarget {
   /** Position in the transcript — what {@link PlannerConversation.cloneBefore} takes. */
   index: number;
   preview: string;
+  /** The whole message — the preview cuts it to one line, and a surface confirming the rewind quotes it. */
+  content: string;
   timestamp: string;
 }
 
@@ -246,7 +248,7 @@ export class PlannerConversation {
       if (m.role !== 'user' || index === 0) return [];
       const line = m.content.split('\n')[0];
       const preview = line.length > REWIND_PREVIEW_WIDTH ? `${line.slice(0, REWIND_PREVIEW_WIDTH - 1)}…` : line;
-      return [{ index, preview, timestamp: m.timestamp }];
+      return [{ index, preview, content: m.content, timestamp: m.timestamp }];
     });
   }
 
