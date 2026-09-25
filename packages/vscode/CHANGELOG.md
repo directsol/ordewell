@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-25
+
+### Added
+
+- **Each AI task can run in its own git worktree (#12).** In a git repository,
+  tasks work on their own branches and land on one integration branch per run,
+  so tasks that edit the same files no longer overwrite each other. A task card
+  marks a merge conflict, with an opt-in "Resolve as a task" action, and the
+  task details show its branch and worktree. Uncommitted changes open a prompt
+  to stash them, run without isolation this time, or cancel. At the end of a
+  run the handoff card shows the integration branch and the landed tasks, with
+  Review diff, Merge, Discard and Clean up. Turn it off with the
+  `ordewell.worktreeIsolation` setting; `ordewell.worktreeSetupCommand`
+  prepares new worktrees your own way.
+- **A folder of git repositories isolates them together (ADR-0014).** Each task
+  gets a worktree of every repository at its usual path, and a task lands in
+  every repository it changed or in none. The handoff card shows each
+  repository, and Merge all merges every one or none, naming the repository
+  and reason when it holds back. Pick the repositories with
+  `ordewell.workspaceRepos`, and link extra gitignored state such as
+  `*.tfstate` into worktrees with `ordewell.worktreeLinks`.
+- **Fork, rewind and compact the planner conversation (#9, #10).** `/fork`
+  continues in a copy of the conversation, `/rewind` cuts it back to before one
+  of your messages, and `/compact` replaces it with a summary the planner
+  writes, keeping the last two exchanges. Also in the Command Palette as
+  "Ordewell: Fork Conversation", "Ordewell: Rewind Conversation" and
+  "Ordewell: Compact Conversation". The task list is left as it is.
+- The planner can read a running task's recent output, so it can look at a
+  task that seems stuck instead of guessing (#3).
+
+### Fixed
+
+- A task's summary is taken from its own transcript, not from another task
+  that ran in the same directory.
+- A retry, cancel, Mark complete or stop is no longer overwritten by a verdict
+  from the task's previous attempt, and marking a task complete while its
+  runner starts is no longer undone.
+- Conflict marks and the handoff card come back after a reconnect or a session
+  load.
+
 ## [0.4.23] — 2026-09-23
 
 ### Fixed

@@ -8,6 +8,8 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-25
+
 ### Added
 
 - **Each AI task can run in its own git worktree (#12).** In a git repository,
@@ -42,9 +44,9 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
   the repositories, and any repository that cannot be isolated (one with no
   commits yet), are shared live with every task and named when the run starts;
   the planner is told about them so it does not run two tasks that edit one at
-  the same time. Each repository's worktree links its own `node_modules`, `.env*` and
-  agent config, plus anything matching the new `worktreeLinks` setting
-  (`ORDEWELL_WORKTREE_LINKS`), such as `*.tfstate` or `.terraform/`;
+  the same time. Each repository's worktree links its own `node_modules`,
+  `.env*` and agent config, plus anything matching the new `worktreeLinks`
+  setting (`ORDEWELL_WORKTREE_LINKS`), such as `*.tfstate` or `.terraform/`;
   `worktreeSetupCommand` runs once per repository, in its worktree, with
   `ORDEWELL_REPO` (its path in the folder) and `ORDEWELL_MAIN_REPO` (the real
   repository) set. Uncommitted changes in any repository hold the whole run,
@@ -52,8 +54,9 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
   every repository or none: if any would conflict, has a merge of yours in
   progress, or has uncommitted edits to a file the run changed, it merges
   nothing and says which repository and why. On git older than 2.38 it merges
-  repository by repository instead and says which landed. The review diff has a section per repository, and discard
-  and clean-up cover all of them. `ordewell handoff`, `/handoff` in the TUI and
+  repository by repository instead and says which landed. The review diff has
+  a section per repository, and discard and clean-up cover all of them.
+  `ordewell handoff`, `/handoff` in the TUI and
   the VS Code handoff card show each repository. A repository that itself holds
   other repositories that are not submodules is not isolated, since its
   worktrees would leave them out: tasks run in the workspace root with a notice
