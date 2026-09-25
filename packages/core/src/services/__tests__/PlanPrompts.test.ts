@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { buildConversationSystemPrompt, buildResearchPrompt, buildResearchToolsPrompt, buildSubagentSystemPrompt } from '../PlanPrompts';
-import type { DiscoveredModel, RunnerId } from '../../models/Task';
+import { buildConflictResolutionPrompt, buildConversationSystemPrompt, buildModifyDuringExecutionPrompt, buildResearchPrompt, buildResearchToolsPrompt, buildSubagentSystemPrompt } from '../PlanPrompts';
+import type { RepoGroupLayout } from '../../interfaces/IWorktreeIsolation';
+import { createTask, type DiscoveredModel, type RunnerId } from '../../models/Task';
 
 import { DEFAULT_PLANNER_MODES, type PlannerModes } from '../plannerModes';
 
@@ -201,16 +202,22 @@ describe('buildConversationSystemPrompt harness variant (ADR-0009)', () => {
   });
 });
 
+const LONE_REPO: RepoGroupLayout = { repos: ['.'], shared: [] };
+
+function conversation(isolatedExecution: false | RepoGroupLayout) {
+  return buildConversationSystemPrompt('goal', '', {}, ['claude-code'], undefined, true, false, { isolatedExecution });
+}
+
+function oneShot(isolatedExecution: false | RepoGroupLayout) {
+  return buildResearchPrompt('goal', '', {}, ['claude-code'], undefined, modes({ isolatedExecution }));
+}
+
+function midRun(isolatedExecution: false | RepoGroupLayout) {
+  return buildModifyDuringExecutionPrompt([], '[]', 'add a task', {}, ['claude-code'], undefined, { autonomousDefault: true, isolatedExecution });
+}
+
 describe('planner parallelism rules under worktree isolation (ADR-0013)', () => {
   const OVERLAP_RULE = '- For parallel tasks, specify different target files to avoid merge conflicts.';
-
-  function conversation(isolatedExecution: boolean) {
-    return buildConversationSystemPrompt('goal', '', {}, ['claude-code'], undefined, true, false, { isolatedExecution });
-  }
-
-  function oneShot(isolatedExecution: boolean) {
-    return buildResearchPrompt('goal', '', {}, ['claude-code'], undefined, modes({ isolatedExecution }));
-  }
 
   it('keeps today\'s overlap-avoidance text verbatim when tasks share the workspace', () => {
     expect(conversation(false)).toContain([
@@ -227,7 +234,7 @@ describe('planner parallelism rules under worktree isolation (ADR-0013)', () => 
   });
 
   it('stops asking for different files or file-overlap dependencies when every task gets its own worktree', () => {
-    for (const p of [conversation(true), oneShot(true)]) {
+    for (const p of [conversation(LONE_REPO), oneShot(LONE_REPO)]) {
       expect(p).not.toContain(OVERLAP_RULE);
       expect(p).not.toContain('no shared files/modules');
       expect(p).toMatch(/own git worktree/i);
@@ -236,7 +243,71 @@ describe('planner parallelism rules under worktree isolation (ADR-0013)', () => 
   });
 
   it('still asks for dependencies that reflect genuine ordering', () => {
-    expect(conversation(true)).toContain('- Only add dependencies when a slice truly depends on artifacts another slice creates.');
-    expect(oneShot(true)).toContain('- Only add dependencies when the second slice truly depends on artifacts (files, APIs) that the first slice creates.');
+    expect(conversation(LONE_REPO)).toContain('- Only add dependencies when a slice truly depends on artifacts another slice creates.');
+    expect(oneShot(LONE_REPO)).toContain('- Only add dependencies when the second slice truly depends on artifacts (files, APIs) that the first slice creates.');
+  });
+});
+
+describe('planner rules for a repo group (ADR-0014)', () => {
+  const GROUP: RepoGroupLayout = { repos: ['api', 'web'], shared: ['NOTES.md', 'design'] };
+  const builders = { conversation, oneShot, midRun };
+
+  /** The prompt with its repo-group section cut out, line for line. */
+  function withoutGroupSection(prompt: string): string {
+    const lines = prompt.split('\n');
+    const at = lines.indexOf('REPO GROUP:');
+    let end = at + 1;
+    while (lines[end]?.startsWith('- ')) end++;
+    return [...lines.slice(0, at - 1), ...lines.slice(end)].join('\n');
+  }
+
+  it.each(Object.entries(builders))('tells the %s planner the repos, the shared paths, and what a task sees and lands', (_name, build) => {
+    const p = build(GROUP);
+
+    expect(p).toContain('\n\nREPO GROUP:\n');
+    expect(p).toContain('- The workspace is a folder of git repositories isolated together: api, web (paths relative to the workspace).');
+    expect(p).toMatch(/every task sees all of them at these same relative paths/i);
+    expect(p).toMatch(/lands atomically: its changes to every repository it touched are merged together, or none are/i);
+    expect(p).toContain('NOTES.md, design');
+    expect(p).toMatch(/shared paths are live[^\n]*two tasks that edit the same shared path must not run in parallel/i);
+  });
+
+  it.each(Object.entries(builders))('otherwise gives the %s planner exactly the prompt a lone repository gets', (_name, build) => {
+    expect(build(LONE_REPO)).not.toContain('REPO GROUP');
+    expect(withoutGroupSection(build(GROUP))).toBe(build(LONE_REPO));
+  });
+
+  it('says nothing about shared paths when there are none', () => {
+    const p = conversation({ repos: ['api', 'web'], shared: [] });
+    expect(p).toContain('REPO GROUP:');
+    expect(p).not.toMatch(/shared path/i);
+  });
+
+  it('never tells a planner whose tasks share the workspace root about a group', () => {
+    for (const build of Object.values(builders)) expect(build(false)).not.toContain('REPO GROUP');
+  });
+});
+
+describe('the resolver task prompt', () => {
+  const conflicted = createTask({ id: 't1', order: 3, title: 'Edit both', prompt: 'change the API and its client' });
+
+  it('reads as it always has for a repository that is the whole workspace', () => {
+    expect(buildConflictResolutionPrompt(conflicted, { branch: 'ordewell/r1/3-edit-both', repos: ['.'], conflictRepo: '.' }, 'ordewell/r1/integration')).toBe([
+      'Task #3 "Edit both" passed, but merging its branch `ordewell/r1/3-edit-both` into `ordewell/r1/integration` conflicted.',
+      'This working tree starts at the tip of `ordewell/r1/integration`. Run `git merge --no-ff ordewell/r1/3-edit-both` here and resolve every conflict so that both sides\' intent survives: keep the work already integrated and add what the task contributed. Do not drop either side wholesale.',
+      'Build and test the result the way this project does, then commit the merge.',
+      '',
+      'What the task was asked to do:\nchange the API and its client',
+    ].join('\n'));
+  });
+
+  it('has the branch merged in every repository the task changed, since none of it landed, and names where it conflicted', () => {
+    const p = buildConflictResolutionPrompt(conflicted, { branch: 'ordewell/r1/3-edit-both', repos: ['api', 'web'], conflictRepo: 'web' }, 'ordewell/r1/integration');
+
+    expect(p).toContain('conflicted in web');
+    expect(p).toMatch(/lands in every repository it changed or in none/);
+    expect(p).toContain('In each repository the task changed — api, web — run `git merge --no-ff ordewell/r1/3-edit-both` inside that repository');
+    expect(p).toContain('commit the merge in each repository');
+    expect(p).toContain('change the API and its client');
   });
 });

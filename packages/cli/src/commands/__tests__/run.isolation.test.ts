@@ -6,7 +6,8 @@ import { handleApprove } from '../approve';
 type Event = Parameters<Parameters<ApiClient['streamExecution']>[1]>[0];
 
 const blocked: Event = { type: 'isolation_blocked', reason: 'dirty', message: 'Tracked files have uncommitted changes' };
-const handoff: Event = { type: 'isolation_handoff', branch: 'ordewell/r1/integration', baseRef: 'abc', landed: [{ taskId: 't1', order: 1, title: 'One' }] };
+const landed = [{ taskId: 't1', order: 1, title: 'One' }];
+const handoff: Event = { type: 'isolation_handoff', repos: [{ path: '.', integrationBranch: 'ordewell/r1/integration', baseRef: 'abc', landed }], landed };
 const complete: Event = { type: 'execution_complete', summary: { total: 1, completed: 1, failed: 0 } };
 
 const TERMINAL = new Set(['execution_complete', 'execution_stopped', 'isolation_blocked']);
@@ -100,5 +101,57 @@ describe('ordewell run at the end of an isolated run', () => {
 
     expect(stdout).toContain('Run finished on ordewell/r1/integration — 1 task landed.');
     expect(stdout).toContain('ordewell handoff');
+  });
+});
+
+describe('ordewell run over a repo group', () => {
+  const at = (order: number) => ({ taskId: `t${order}`, order, title: `Task ${order}` });
+  const groupRepos = [
+    { path: 'api', integrationBranch: 'ordewell/r1/integration', baseRef: 'a', landed: [at(1), at(2), at(3)] },
+    { path: 'infra', integrationBranch: 'ordewell/r1/integration', baseRef: 'b', landed: [] },
+  ];
+  const groupHandoff: Event = { type: 'isolation_handoff', repos: groupRepos, landed: [at(1), at(2), at(3)] };
+
+  it('says per repo what landed, and where to land it', async () => {
+    const { client } = liveDaemon({ execute: [groupHandoff, complete] });
+
+    const { stdout } = await capture(() => handleRun(['--session-id', 's1'], client));
+
+    expect(stdout).toContain('Run finished on ordewell/r1/integration in api, infra — 3 tasks landed.');
+    expect(stdout).toContain('  api: 3 tasks landed');
+    expect(stdout).toContain('  infra: nothing to merge');
+    expect(stdout).toContain('ordewell handoff');
+  });
+
+  it('prints the notices a run gives about how it isolates', async () => {
+    const { client } = liveDaemon({ execute: [
+      { type: 'notice', level: 'info', message: 'NOTES.md is shared live with every task, so edits to it are not isolated.' },
+      complete,
+    ] });
+
+    const { stderr } = await capture(() => handleRun(['--session-id', 's1'], client));
+
+    expect(stderr).toContain('NOTES.md is shared live with every task, so edits to it are not isolated.');
+  });
+
+  it('names the dirty repos, and says --stash stashes all of them', async () => {
+    const dirty: Event = { type: 'isolation_blocked', reason: 'dirty', repos: ['api', 'web'], message: 'Tracked files have uncommitted changes in api, web' };
+    const { client } = liveDaemon({ execute: [dirty] });
+
+    const { stderr } = await capture(() => handleRun(['--session-id', 's1'], client));
+
+    expect(stderr).toContain('Tracked files have uncommitted changes in api, web');
+    expect(stderr).toContain('`--stash` to stash your tracked changes in api, web first');
+  });
+
+  it('--stash stashes every dirty repo through the one call, and follows the run', async () => {
+    const dirty: Event = { type: 'isolation_blocked', reason: 'dirty', repos: ['api', 'web'], message: 'dirty' };
+    const { api, client } = liveDaemon({ execute: [dirty], stash: [groupHandoff, complete] });
+
+    const { stdout, exit } = await capture(() => handleRun(['--session-id', 's1', '--stash'], client));
+
+    expect(exit).toBeNull();
+    expect(api.continueWithStash).toHaveBeenCalledTimes(1);
+    expect(stdout).toContain('api: 3 tasks landed');
   });
 });

@@ -11,15 +11,19 @@ import type { RunnerRegistry } from '../plugins/RunnerRegistry';
 import type {
   IsolationHandoff,
   IsolationInactiveReason,
+  IsolationMergeResult,
   IsolationOutcome,
   IsolationRun,
-  IsolationTaskStatus,
   IsolationView,
   IWorktreeIsolation,
   PlanIsolation,
+  RepoGroupLayout,
   TaskIsolation,
 } from '../interfaces/IWorktreeIsolation';
-import { createWorktreeIsolation, handoffOf } from './GitWorktreeIsolation';
+import { createWorktreeIsolation } from './GitWorktreeIsolation';
+import { describeMergeResult } from './mergeResultNotice';
+import { handoffOf, integrationBranchNameOf, layoutOf, SELF_REPO, taskIsolationOf } from './isolationRecord';
+import type { IsolatedExecution } from './plannerModes';
 
 /**
  * The one notification channel out of the orchestrator. Everything that used
@@ -38,24 +42,55 @@ export interface OrchestratorObserver {
   onCheckpoint?(data: { taskId: string; taskTitle: string; summary: string }): void;
   /** The isolation run record changed and should be persisted with the plan. */
   onIsolationChanged?(): void;
-  /** A run did not start: the tree is dirty, and the user picks stash or no isolation. */
-  onIsolationBlocked?(data: { reason: 'dirty' }): void;
+  /** A run did not start: the tree is dirty, and the user picks stash or no isolation. `repos` names the dirty repos of a group. */
+  onIsolationBlocked?(data: { reason: 'dirty'; repos: string[] }): void;
   /** An isolated run settled; emitted before `onExecutionComplete`, which surfaces treat as terminal. */
   onIsolationHandoff?(handoff: IsolationHandoff): void;
+  /**
+   * What a run says about how it isolates — the fallback to the workspace root,
+   * shared paths, copies, a stash. Beside the notification channel, which a
+   * daemon may leave unwired, so a surface without toasts can still show it.
+   */
+  onIsolationNotice?(data: { level: 'info' | 'warn'; message: string }): void;
 }
 
+type SharedRootReason = Exclude<IsolationInactiveReason, 'dirty'>;
+
 type RunDecision =
-  | { mode: 'isolated'; continuing: boolean }
-  | { mode: 'blocked' }
-  | { mode: 'shared'; reason: Exclude<IsolationInactiveReason, 'dirty'> };
+  | { mode: 'isolated'; continuing: boolean; layout: RepoGroupLayout }
+  | { mode: 'blocked'; repos: string[] }
+  | { mode: 'shared'; reason: SharedRootReason; repos: string[] };
+
+const SHARED_ROOT_TAIL = 'tasks run in the workspace root without worktree isolation.';
 
 /** Why a run fell back to the shared workspace root, as the one line the user is told. */
-const SHARED_ROOT_NOTICE: Record<Exclude<IsolationInactiveReason, 'dirty'>, string> = {
-  'disabled': 'Worktree isolation is off — tasks run in the workspace root.',
-  'git-missing': 'git was not found — tasks run in the workspace root without worktree isolation.',
-  'not-git': 'Not a git repository — tasks run in the workspace root without worktree isolation.',
-  'no-commits': 'The repository has no commits yet — tasks run in the workspace root without worktree isolation.',
-};
+function sharedRootNotice(reason: SharedRootReason, repos: string[]): string {
+  switch (reason) {
+    case 'disabled': return 'Worktree isolation is off — tasks run in the workspace root.';
+    case 'git-missing': return `git was not found — ${SHARED_ROOT_TAIL}`;
+    case 'no-commits':
+      return repos.length > 0
+        ? `No repository in this folder has commits yet (${repos.join(', ')}) — ${SHARED_ROOT_TAIL}`
+        : `The repository has no commits yet — ${SHARED_ROOT_TAIL}`;
+    case 'not-git': return `Not a git repository — ${SHARED_ROOT_TAIL}`;
+    case 'nested-repos':
+      return `This repository contains nested repositories that are not submodules (${repos.join(', ')}) — ${SHARED_ROOT_TAIL} Ignore them in git or make them submodules to isolate this repository.`;
+  }
+}
+
+/** What a new run shares live instead of isolating, as one line; null when it shares nothing. */
+function sharedPathsNotice(run: IsolationRun): string | null {
+  const loose = run.shared.filter((p) => !run.sharedRepos.includes(p));
+  if (run.sharedRepos.length === 0) {
+    if (loose.length === 0) return null;
+    const one = loose.length === 1;
+    return `${loose.join(', ')} ${one ? 'is' : 'are'} shared live with every task, so edits to ${one ? 'it' : 'them'} are not isolated.`;
+  }
+  const one = run.sharedRepos.length === 1 && loose.length === 0;
+  const subject = [run.sharedRepos.length === 1 ? 'It' : 'They', ...(loose.length > 0 ? [`and ${loose.join(', ')}`] : [])].join(' ');
+  return `Could not isolate ${run.sharedRepos.join(', ')} (no commits, or git refused a worktree). `
+    + `${subject} ${one ? 'is' : 'are'} shared live with every task, so edits to ${one ? 'it' : 'them'} are not isolated.`;
+}
 
 /**
  * One run of one task, from the moment the scheduler claims it until its
@@ -86,14 +121,6 @@ interface TaskAttempt {
 }
 
 type AttemptPhase = 'starting' | 'running' | 'integrating';
-
-const ISOLATION_STATE: Record<IsolationTaskStatus, Exclude<TaskIsolation['state'], 'none'>> = {
-  active: 'active',
-  merged: 'integrated',
-  conflict: 'conflict',
-  kept: 'kept',
-  failed: 'kept',
-};
 
 /** Read-only view of a task's live attempt. */
 export interface TaskAttemptSnapshot {
@@ -144,6 +171,8 @@ export class TaskOrchestrator {
   private isolation: IWorktreeIsolation;
   /** The plan's isolation run (ADR-0013). Outlives one run: a resumed plan continues it. */
   private isolationRun: IsolationRun | null = null;
+  /** Copied paths already reported for the current run: every task gets the same copies. */
+  private reportedCopies = new Set<string>();
   /**
    * How the open run executes; null while no run is open. A run is one
    * Execute-Plan or one manual task run, from its start until it settles or
@@ -155,6 +184,8 @@ export class TaskOrchestrator {
   private opening: Promise<boolean> | null = null;
   /** The start a dirty tree turned away, replayed once the user chooses how to go on. */
   private blockedStart: (() => Promise<void>) | null = null;
+  /** The dirty repos behind {@link blockedStart}, for the stash notice. */
+  private blockedRepos: string[] = [];
 
   private registry: RunnerRegistry | null = null;
   private workspaceRootFn: () => string = () => process.cwd();
@@ -283,7 +314,7 @@ export class TaskOrchestrator {
     if (!this.isolationRun) return null;
     const record = this.isolationRun.tasks[taskId];
     if (!record) return { state: 'none' };
-    return { state: ISOLATION_STATE[record.status], branch: record.branch, worktree: record.worktree };
+    return taskIsolationOf(record);
   }
 
   /**
@@ -293,9 +324,7 @@ export class TaskOrchestrator {
   isolationView(): IsolationView | null {
     const run = this.isolationRun;
     if (!run) return null;
-    const tasks = Object.fromEntries(Object.values(run.tasks).map((r): [string, TaskIsolation] => (
-      [r.taskId, { state: ISOLATION_STATE[r.status], branch: r.branch, worktree: r.worktree }]
-    )));
+    const tasks = Object.fromEntries(Object.values(run.tasks).map((r): [string, TaskIsolation] => [r.taskId, taskIsolationOf(r)]));
     return { tasks, handoff: handoffOf(run) };
   }
 
@@ -324,7 +353,7 @@ export class TaskOrchestrator {
     try {
       await this.isolation.pruneOrphans(this.isolationRun);
     } catch (err) {
-      this.notifications.warn(`Could not prune leftover worktrees: ${err instanceof Error ? err.message : String(err)}`);
+      this.tell('warn', `Could not prune leftover worktrees: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -332,13 +361,15 @@ export class TaskOrchestrator {
     return this.isolation.reviewDiff(this.requireRun());
   }
 
-  async mergeRun(): Promise<IsolationOutcome> {
+  /** "Merge all": the run's integration branches into whatever the user has checked out, in every repo or none. */
+  async mergeRun(): Promise<IsolationMergeResult> {
     const run = this.requireRun();
-    const outcome = await this.isolation.mergeIntoCheckedOut(run);
-    if (outcome === 'merged') this.notifications.info(`Merged ${run.integrationBranch} into your checked-out branch.`);
-    else if (outcome === 'conflict') this.notifications.warn(`Merging ${run.integrationBranch} conflicted, so it was aborted — your tree is as it was.`);
-    else this.notifications.error(`Could not merge ${run.integrationBranch} — finish or abort the merge already in progress, then try again.`);
-    return outcome;
+    const result = await this.isolation.mergeIntoCheckedOut(run);
+    const branch = integrationBranchNameOf(run);
+    const group = run.repos.some((r) => r.path !== SELF_REPO);
+    const { level, message } = describeMergeResult(result, branch, group);
+    this.notifications[level](message);
+    return result;
   }
 
   /** Worktrees and task branches go; the integration branch and the record stay for review and merge. */
@@ -547,7 +578,8 @@ export class TaskOrchestrator {
   private async integrateWork(task: Task): Promise<IsolationOutcome> {
     const run = this.isolationRun;
     if (!run) return 'failed';
-    const outcome = await this.isolation.integrate(task, run).catch((): IsolationOutcome => 'failed');
+    // Saved before the first merge, so a crash mid-landing leaves the tips to roll back to.
+    const outcome = await this.isolation.integrate(task, run, () => this.emit('onIsolationChanged')).catch((): IsolationOutcome => 'failed');
     this.emit('onIsolationChanged');
     return outcome;
   }
@@ -561,16 +593,24 @@ export class TaskOrchestrator {
   }
 
   private landUnmerged(task: Task, landing: Exclude<IsolationOutcome, 'merged'>): void {
+    const branch = this.isolationRun ? integrationBranchNameOf(this.isolationRun) : 'the integration branch';
+    // Named only where there is a repo to name: a group of one reads as it always has.
+    const repo = this.isolationRun?.tasks[task.id]?.conflictRepo;
+    const inRepo = repo && repo !== SELF_REPO ? repo : null;
     if (landing === 'conflict') {
       // Never resolved here, by a model or otherwise: the task waits on the
       // user, and its dependents wait on it.
       this.store.markAwaitingUser(task.id);
-      this.notifications.warn(`Task "${task.title}" passed, but merging it into ${this.isolationRun?.integrationBranch ?? 'the integration branch'} conflicted. Its worktree is kept — resolve it by hand, retry it, or resolve it as a task.`);
+      this.notifications.warn(inRepo
+        ? `Task "${task.title}" passed, but landing it on ${branch} conflicted in ${inRepo}, so none of it landed. Its worktrees are kept — resolve it by hand, retry it, or resolve it as a task.`
+        : `Task "${task.title}" passed, but merging it into ${branch} conflicted. Its worktree is kept — resolve it by hand, retry it, or resolve it as a task.`);
     } else {
       this.store.markFailed(task.id);
       this.running = false;
       this.planStatus = 'approved';
-      this.notifications.error(`Task "${task.title}" passed, but git could not integrate its work. Its worktree is kept for inspection.`);
+      this.notifications.error(inRepo
+        ? `Task "${task.title}" passed, but git could not integrate its work in ${inRepo}, so none of it landed. Its worktrees are kept for inspection.`
+        : `Task "${task.title}" passed, but git could not integrate its work. Its worktree is kept for inspection.`);
     }
   }
 
@@ -993,10 +1033,27 @@ export class TaskOrchestrator {
       await this.releaseWorktree(task.id, { keep: false });
       return this.workspaceRootFn();
     }
-    const { cwd } = await this.isolation.prepare(task, this.isolationRun);
+    const { cwd, copied } = await this.isolation.prepare(task, this.isolationRun);
     attempt.worktree = true;
     this.emit('onIsolationChanged');
+    this.reportCopies(copied);
     return cwd;
+  }
+
+  private tell(level: 'info' | 'warn', message: string): void {
+    this.notifications[level](message);
+    this.emit('onIsolationNotice', { level, message });
+  }
+
+  private reportCopies(copied: string[]): void {
+    const fresh = copied.filter((p) => !this.reportedCopies.has(p));
+    if (fresh.length === 0) return;
+    for (const p of fresh) this.reportedCopies.add(p);
+    const one = fresh.length === 1;
+    this.tell(
+      'warn',
+      `${fresh.join(', ')} could not be linked into task workspaces (a hard link is impossible there), so each task gets ${one ? 'a copy' : 'copies'}: edits to ${one ? 'it' : 'them'} stay in the task.`,
+    );
   }
 
   /**
@@ -1012,24 +1069,33 @@ export class TaskOrchestrator {
 
   /**
    * Whether the run in force, or else the next one, gives each task its own
-   * worktree — what the planner is told, since it decides whether tasks on the
-   * same file have to be ordered. A tree that would block counts as not
-   * isolating: the user may yet run without isolation, and ordering is the
-   * safe rule then.
+   * worktrees, and of which repo group — what the planner is told, since it
+   * decides whether tasks on the same file have to be ordered and which shared
+   * paths two tasks must not edit at once. A tree that would block counts as
+   * not isolating: the user may yet run without isolation, and ordering is
+   * the safe rule then.
    */
-  async willIsolate(): Promise<boolean> {
-    if (this.runMode) return this.runMode === 'isolated';
-    return (await this.decideRun(this.workspaceRootFn())).mode === 'isolated';
+  async plannerIsolation(): Promise<IsolatedExecution> {
+    if (this.runMode) return this.runMode === 'isolated' && this.isolationRun ? layoutOf(this.isolationRun) : false;
+    const decision = await this.decideRun(this.workspaceRootFn());
+    return decision.mode === 'isolated' ? decision.layout : false;
   }
 
   private async decideRun(root: string): Promise<RunDecision> {
     const availability = await this.isolation.isActive(root);
-    const continuing = this.continuableRun(root);
-    if (availability.active) return { mode: 'isolated', continuing };
+    const continued = this.continuableRun(root);
+    const continuing = continued !== null;
+    // A continued run keeps the group it started with.
+    if (availability.active) {
+      const layout = continued ? layoutOf(continued) : { repos: availability.repos ?? [SELF_REPO], shared: availability.shared ?? [] };
+      return { mode: 'isolated', continuing, layout };
+    }
     // A continued run's base is already fixed, so edits the user has made in
     // their own tree since cannot change what its tasks start from.
-    if (availability.reason === 'dirty') return continuing ? { mode: 'isolated', continuing } : { mode: 'blocked' };
-    return { mode: 'shared', reason: availability.reason };
+    if (availability.reason === 'dirty') {
+      return continued ? { mode: 'isolated', continuing, layout: layoutOf(continued) } : { mode: 'blocked', repos: availability.repos ?? [] };
+    }
+    return { mode: 'shared', reason: availability.reason, repos: availability.repos ?? [] };
   }
 
   private async activate(resume: () => Promise<void>): Promise<boolean> {
@@ -1037,15 +1103,27 @@ export class TaskOrchestrator {
     const decision = await this.decideRun(root);
     if (decision.mode === 'blocked') {
       this.blockedStart = resume;
-      this.emit('onIsolationBlocked', { reason: 'dirty' });
+      this.blockedRepos = decision.repos;
+      this.emit('onIsolationBlocked', { reason: 'dirty', repos: decision.repos });
       return false;
     }
-    if (decision.mode === 'isolated') {
-      if (!decision.continuing) await this.mintRun(root);
-    } else {
-      this.notifications.info(SHARED_ROOT_NOTICE[decision.reason]);
+    if (decision.mode === 'shared') {
+      this.tell('info', sharedRootNotice(decision.reason, decision.repos));
+      this.runMode = 'shared';
+      return true;
     }
-    this.runMode = decision.mode;
+    if (!decision.continuing) {
+      try {
+        await this.mintRun(root);
+      } catch (err) {
+        // Git can still refuse every repo of the group once a run is minted — the one check `isActive` cannot make.
+        this.tell('info', `${err instanceof Error ? err.message : String(err)} — ${SHARED_ROOT_TAIL}`);
+        this.emit('onIsolationChanged');
+        this.runMode = 'shared';
+        return true;
+      }
+    }
+    this.runMode = 'isolated';
     return true;
   }
 
@@ -1054,9 +1132,9 @@ export class TaskOrchestrator {
    * branch: a resumed plan's dependents must start from a tip that holds their
    * predecessors' work, and a fresh branch from the checked-out commit does not.
    */
-  private continuableRun(root: string): boolean {
+  private continuableRun(root: string): IsolationRun | null {
     const run = this.isolationRun;
-    return !!run && run.workspaceRoot === root && Object.values(run.tasks).some((r) => r.status === 'merged');
+    return run && run.workspaceRoot === root && Object.values(run.tasks).some((r) => r.status === 'merged') ? run : null;
   }
 
   /**
@@ -1070,10 +1148,14 @@ export class TaskOrchestrator {
     if (previous) {
       const landed = Object.values(previous.tasks).some((r) => r.status === 'merged');
       await this.isolation.discard(previous, { keepIntegration: landed }).catch(() => undefined);
+      this.isolationRun = null;
     }
     this.isolationRun = await this.isolation.startRun(root);
     this.resolvers = {};
+    this.reportedCopies.clear();
     this.emit('onIsolationChanged');
+    const shared = sharedPathsNotice(this.isolationRun);
+    if (shared) this.tell('info', shared);
   }
 
   /** Close the open run. An isolated one hands its integration branch over for review. */
@@ -1084,7 +1166,7 @@ export class TaskOrchestrator {
     try {
       this.emit('onIsolationHandoff', await this.isolation.handoff(this.isolationRun));
     } catch (err) {
-      this.notifications.warn(`Could not hand the run's integration branch over: ${err instanceof Error ? err.message : String(err)}`);
+      this.tell('warn', `Could not hand the run's integration branch over: ${err instanceof Error ? err.message : String(err)}`);
     }
     this.emit('onIsolationChanged');
   }
@@ -1100,10 +1182,12 @@ export class TaskOrchestrator {
     this.blockedStart = null;
     if (how === 'stash') {
       await this.isolation.stash(this.workspaceRootFn());
-      this.notifications.info('Stashed your uncommitted changes — `git stash pop` brings them back.');
+      this.tell('info', this.blockedRepos.length > 0
+        ? `Stashed your uncommitted changes in ${this.blockedRepos.join(', ')} — \`git stash pop\` in each brings them back.`
+        : 'Stashed your uncommitted changes — `git stash pop` brings them back.');
     } else {
       this.runMode = 'shared';
-      this.notifications.info('Running without worktree isolation — tasks share the workspace root for this run.');
+      this.tell('info', 'Running without worktree isolation — tasks share the workspace root for this run.');
     }
     await resume();
   }

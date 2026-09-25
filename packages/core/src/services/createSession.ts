@@ -23,6 +23,7 @@ import {
   serializePlan,
   executionSummary,
   type SessionBroadcaster,
+  type SessionNotice,
 } from './SessionMessage';
 import { saveSession } from '../utils/sessionStore';
 import { mintSessionId } from '../utils/sessionId';
@@ -33,7 +34,8 @@ import type { IFileSystem } from '../interfaces/IFileSystem';
 import type { INotification } from '../interfaces/INotification';
 import type { ITerminalRunner } from '../interfaces/ITerminalRunner';
 import type { TaskOutputSource } from '../interfaces/TaskOutputSource';
-import type { IsolationOutcome, IsolationView, IWorktreeIsolation } from '../interfaces/IWorktreeIsolation';
+import type { IsolationMergeResult, IsolationView, IWorktreeIsolation } from '../interfaces/IWorktreeIsolation';
+import { integrationBranchNameOf, migratePlanStateIsolation } from './isolationRecord';
 import type { RunnerRegistry } from '../plugins/RunnerRegistry';
 import { runnerModesFrom, resolveDefaultMode, type RunnerModeInfo } from './ModeResolver';
 
@@ -158,6 +160,8 @@ export interface SessionDeps {
   fsAdapter: IFileSystem;
   /** Emits plan-lifecycle events to the surface. Transport-agnostic. */
   broadcast: SessionBroadcaster;
+  /** Where {@link SessionNotice}s go, for a host whose `notifications` are not seen by the user. */
+  onNotice?: (notice: SessionNotice) => void;
   /** Shared across sessions — sole producer of model catalogs and routing lists. */
   modelResolver: ModelResolver;
   /** Live runtime settings (tdd, verification). Read at each operation that needs them. */
@@ -222,6 +226,7 @@ export class Session {
   private goal = '';
   private workspace: string;
   private broadcast: SessionBroadcaster;
+  private onNotice?: (notice: SessionNotice) => void;
   private modelResolver: ModelResolver;
   private fsAdapter: IFileSystem;
   private approvals: PendingApprovals;
@@ -249,6 +254,7 @@ export class Session {
     this.orchestrator.setTddEnabled(() => this.settingsFn().tddEnabled);
     this.workspace = deps.workspaceRoot();
     this.broadcast = deps.broadcast;
+    this.onNotice = deps.onNotice;
     this.modelResolver = deps.modelResolver;
     this.fsAdapter = deps.fsAdapter;
     this.settingsFn = deps.settings;
@@ -410,12 +416,17 @@ export class Session {
         this.persist();
         this.broadcastStatus();
       },
-      onIsolationBlocked: ({ reason }) => {
+      onIsolationBlocked: ({ reason, repos }) => {
+        const where = repos.length > 0 ? ` in ${repos.join(', ')}` : '';
         this.broadcast({
           type: 'isolation_blocked',
           reason,
-          message: 'Tracked files have uncommitted changes, so tasks cannot run in isolated worktrees. Stash them, or run this plan without isolation.',
+          ...(repos.length > 0 ? { repos } : {}),
+          message: `Tracked files have uncommitted changes${where}, so tasks cannot run in isolated worktrees. Stash them, or run this plan without isolation.`,
         });
+      },
+      onIsolationNotice: ({ level, message }) => {
+        this.onNotice?.({ type: 'notice', level, message });
       },
       onIsolationHandoff: (handoff) => {
         this.broadcast({ type: 'isolation_handoff', ...handoff });
@@ -641,7 +652,7 @@ export class Session {
     // drops the ones a one-shot run cannot honour, so a structural toggle like
     // verify — which only appends a task — stops being silently lost between
     // here and the prompt.
-    const modes = { ...plannerModesFrom(settings, this.config.autonomousMode), isolatedExecution: await this.orchestrator.willIsolate() };
+    const modes = { ...plannerModesFrom(settings, this.config.autonomousMode), isolatedExecution: await this.orchestrator.plannerIsolation() };
 
     const releaseAbort = this.denyApprovalsOnAbort(options?.signal);
     let plan: LegacyPlanState;
@@ -805,7 +816,7 @@ export class Session {
       runnerModes,
       autonomousDefault: this.config.autonomousMode,
       verificationEnabled: settings.verificationEnabled ?? false,
-      isolatedExecution: await this.orchestrator.willIsolate(),
+      isolatedExecution: await this.orchestrator.plannerIsolation(),
       fs: this.fsAdapter,
       fetcher: this.fetcher,
     };
@@ -944,7 +955,7 @@ export class Session {
       runnerModes,
       autonomousDefault: this.config.autonomousMode,
       perRunnerAllowlist: modelAllowlist,
-      isolatedExecution: await this.orchestrator.willIsolate(),
+      isolatedExecution: await this.orchestrator.plannerIsolation(),
     });
 
     this.mutatePlan(() => {
@@ -1014,13 +1025,16 @@ export class Session {
   }
 
   /**
-   * Merge the run's integration branch into whatever the user has checked out.
-   * The one irreversible step of isolated execution, so this explicit call is
-   * the only way it ever happens.
+   * "Merge all": each repo's integration branch into whatever the user has
+   * checked out there — every repo, or none if any cannot take it. The one
+   * irreversible step of isolated execution, so this explicit call is the
+   * only way it ever happens.
    */
-  async mergeRun(): Promise<IsolationOutcome> {
+  async mergeRun(): Promise<IsolationMergeResult> {
     this.requireSettledRun();
-    return this.orchestrator.mergeRun();
+    const result = await this.orchestrator.mergeRun();
+    this.broadcast({ type: 'isolation_merge', result });
+    return result;
   }
 
   /** Remove the run's worktrees and task branches; keep its integration branch to review or merge. */
@@ -1064,9 +1078,9 @@ export class Session {
     return this.editPlan(() => {
       const resolver = this.store.add({
         title: `Resolve merge conflict: ${task.title}`,
-        description: `Merge ${isolation.branch} into ${run.integrationBranch} by hand.`,
+        description: `Merge ${isolation.branch} into ${integrationBranchNameOf(run)} by hand.`,
         type: 'ai',
-        prompt: buildConflictResolutionPrompt(task, isolation.branch, run.integrationBranch),
+        prompt: buildConflictResolutionPrompt(task, isolation, integrationBranchNameOf(run)),
         assignedRunner: task.assignedRunner,
         assignedModel: task.assignedModel,
         thinkingEffort: task.thinkingEffort,
@@ -1342,6 +1356,7 @@ export class Session {
     // same file instead of forking the session under a fresh identity.
     if (opts?.sessionId) this.currentSessionId = opts.sessionId;
     this.orchestrator.loadPlan(plan.tasks, plan.runners);
+    migratePlanStateIsolation(plan);
     // The run record is taken synchronously; only the orphan prune is awaited
     // in the background, and git serializes it ahead of any worktree a run adds.
     if (adopting) void this.orchestrator.adoptIsolation(plan.isolation ?? null);

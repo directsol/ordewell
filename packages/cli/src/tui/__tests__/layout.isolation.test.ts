@@ -57,16 +57,81 @@ describe('plan pane — isolation', () => {
     expect(out).not.toContain('.ordewell/worktrees');
   });
 
+  it('names the repositories a task changed beside its branch, and only for a group', () => {
+    const group = frame(plan([task({ isolation: { ...integrated, repos: ['api', 'web'] } })], { expandedTaskId: 't1' }));
+    const lone = frame(plan([task({ isolation: { ...integrated, repos: ['.'] } })], { expandedTaskId: 't1' }));
+
+    expect(group).toContain('Repos');
+    expect(group).toContain('api, web');
+    expect(lone).not.toContain('Repos');
+    expect(frame(plan([task({ isolation: { ...integrated, repos: [] } })], { expandedTaskId: 't1' }))).not.toContain('Repos');
+  });
+
+  it('names the repository a conflict stopped in, and keeps the plain mark for a group of one', () => {
+    const named = frame(plan([task({ status: 'awaiting_user', isolation: { ...conflict, repos: ['api', 'web'], conflictRepo: 'web' } })]));
+    const lone = frame(plan([task({ status: 'awaiting_user', isolation: { ...conflict, repos: ['.'], conflictRepo: '.' } })]));
+
+    expect(named).toContain('⚠ merge conflict in web —');
+    expect(lone).toContain('⚠ merge conflict —');
+  });
+
   it('offers the resolve key only on a conflicted task', () => {
     expect(footerHints(plan([task({ isolation: conflict })]))).toContain('x resolve conflict');
     expect(footerHints(plan([task({ isolation: active })]))).not.toContain('x resolve conflict');
   });
 });
 
+describe('handoff overlay frame over a repo group', () => {
+  const t = (order: number, title: string) => ({ taskId: `t${order}`, order, title });
+  const branch = 'ordewell/r1/integration';
+  const handoff: HandoffView = {
+    repos: [
+      { path: 'api', integrationBranch: branch, baseRef: 'aaaaaaaaaaaaaaaa', landed: [t(1, 'One'), t(2, 'Two'), t(3, 'Three')] },
+      { path: 'infra', integrationBranch: branch, baseRef: 'bbbbbbbbbbbbbbbb', landed: [] },
+    ],
+    landed: [t(1, 'One'), t(2, 'Two'), t(3, 'Three')],
+  };
+  const open = (over: Partial<TuiState> = {}): TuiState =>
+    initialState({ sessionId: 's1', rows: 34, cols: 100, handoff, overlay: { kind: 'handoff', index: 0, diff: null }, ...over });
+
+  it('says per repo what landed, or that there is nothing to merge', () => {
+    const out = frame(open());
+
+    expect(out).toContain('api: 3 tasks landed');
+    expect(out).toContain('infra: nothing to merge');
+  });
+
+  it('offers Merge all for what Merge is called for one repo', () => {
+    const out = frame(open());
+
+    expect(out).toContain('Merge all');
+    expect(out).toContain('every repository');
+  });
+
+  it('names where each repository forked from', () => {
+    const out = frame(open());
+
+    expect(out).toContain('api aaaaaaaaaaaa');
+    expect(out).toContain('infra bbbbbbbbbbbb');
+  });
+
+  it('scrolls a long diff of many repos as before', () => {
+    const lines = Array.from({ length: 100 }, (_, i) => (i === 0 ? '# api' : `+added ${i}`));
+    const rows = render(open({ overlay: { kind: 'handoff', index: 0, diff: { lines, scroll: 10 } } }));
+
+    expect(rows).toHaveLength(34);
+    expect(rows.join('\n')).toContain('+added 10');
+  });
+});
+
 describe('handoff overlay frame', () => {
   const handoff: HandoffView = {
-    branch: 'ordewell/r1/integration',
-    baseRef: 'abcdef1234567890',
+    repos: [{
+      path: '.',
+      integrationBranch: 'ordewell/r1/integration',
+      baseRef: 'abcdef1234567890',
+      landed: [{ taskId: 't1', order: 1, title: 'Add the route' }, { taskId: 't2', order: 2, title: 'Write the tests' }],
+    }],
     landed: [{ taskId: 't1', order: 1, title: 'Add the route' }, { taskId: 't2', order: 2, title: 'Write the tests' }],
   };
   const open = (over: Partial<TuiState> = {}): TuiState =>
@@ -78,6 +143,14 @@ describe('handoff overlay frame', () => {
     expect(out).toContain('ordewell/r1/integration');
     expect(out.indexOf('#1 Add the route')).toBeLessThan(out.indexOf('#2 Write the tests'));
     for (const label of ['Review diff', 'Merge', 'Discard', 'Clean up']) expect(out).toContain(label);
+  });
+
+  it('reads as it always has for a group of one', () => {
+    const out = frame(open());
+
+    expect(out).not.toContain('nothing to merge');
+    expect(out).not.toContain('Merge all');
+    expect(out).toContain('Forked from abcdef123456');
   });
 
   it('says plainly when nothing landed', () => {

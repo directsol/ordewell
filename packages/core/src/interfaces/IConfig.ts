@@ -58,6 +58,19 @@ export interface IConfig {
    * or a virtualenv is wrong.
    */
   worktreeSetupCommand?: string;
+  /**
+   * Repositories of the repo group listed by hand, relative to the workspace
+   * (ADR-0014). When non-empty the group is exactly these, replacing the
+   * repositories auto-detected directly inside the folder; needed for ones
+   * deeper than that, which are never auto-detected.
+   */
+  workspaceRepos: string[];
+  /**
+   * Extra paths or globs, relative to each repo root, linked from the real repo
+   * into its task worktree where they exist — gitignored local state such as
+   * `*.tfstate` that a task must use, not a copy of.
+   */
+  worktreeLinks: string[];
 
   /**
    * What to do when planner research reaches outside its default envelope — an

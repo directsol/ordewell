@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { TaskOrchestrator } from '../TaskOrchestrator';
 import { createTask, type Task } from '../../models/Task';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
+import type { IsolationAvailability, IsolationMergeResult } from '../../interfaces/IWorktreeIsolation';
 import { fakeConfig, FakeTerminalSession, FakeWorktreeIsolation } from '../../testing';
 import { fakeNotification } from './sessionTestKit';
 import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
@@ -58,7 +59,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
     openMerge();
     await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
     expect(orchestrator.getTaskIsolation('t1')).toEqual({
-      state: 'integrated', branch: 'ordewell/run1/1-t1', worktree: '/fake-worktrees/run1/1-t1',
+      state: 'integrated', branch: 'ordewell/run1/1-t1', worktree: '/fake-worktrees/run1/1-t1', repos: ['.'],
     });
   });
 
@@ -248,7 +249,8 @@ describe('TaskOrchestrator with worktree isolation', () => {
     await orchestrator.markTaskComplete('t1');
 
     expect(handoffs).toEqual([{
-      branch: 'ordewell/run1/integration', baseRef: 'base0000', landed: [{ taskId: 't1', order: 1, title: 'Task t1' }],
+      repos: [{ path: '.', integrationBranch: 'ordewell/run1/integration', baseRef: 'base0000', landed: [{ taskId: 't1', order: 1, title: 'Task t1' }] }],
+      landed: [{ taskId: 't1', order: 1, title: 'Task t1' }],
     }]);
   });
 
@@ -270,6 +272,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
       ['git-missing', /git was not found/i],
       ['disabled', /isolation is off/i],
       ['no-commits', /no commits/i],
+      ['nested-repos', /nested repositories/i],
     ] as const)('runs in the workspace root when the workspace is %s, and says so once', async (reason, notice) => {
       const isolation = new FakeWorktreeIsolation();
       isolation.availability = { active: false, reason };
@@ -288,6 +291,229 @@ describe('TaskOrchestrator with worktree isolation', () => {
     });
   });
 
+  describe('the notice for a folder of repositories', () => {
+    async function noticesFor(availability: IsolationAvailability): Promise<string[]> {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.availability = availability;
+      const { orchestrator, notifications } = setup({ isolation, workspace: '/plain' });
+      orchestrator.loadPlan([task('t1', 1)]);
+      await orchestrator.runTask('t1');
+      return vi.mocked(notifications.info).mock.calls.map((c) => String(c[0]));
+    }
+
+    it('names the repositories of a folder when none of them has a commit', async () => {
+      expect(await noticesFor({ active: false, reason: 'no-commits', repos: ['api', 'web'] })).toContain(
+        'No repository in this folder has commits yet (api, web) — tasks run in the workspace root without worktree isolation.',
+      );
+    });
+
+    it('names the nested repositories that keep a repository from isolating', async () => {
+      expect(await noticesFor({ active: false, reason: 'nested-repos', repos: ['services/billing', 'tools/cli'] })).toContain(
+        'This repository contains nested repositories that are not submodules (services/billing, tools/cli) — tasks run in the workspace root without worktree isolation. Ignore them in git or make them submodules to isolate this repository.',
+      );
+    });
+
+    it('keeps the plain wording when there is nothing to name', async () => {
+      expect(await noticesFor({ active: false, reason: 'not-git' })).toContain(
+        'Not a git repository — tasks run in the workspace root without worktree isolation.',
+      );
+    });
+  });
+
+  describe('a run over a repo group', () => {
+    it('names the repositories and paths every task shares live, once per run', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.shared = ['NOTES.md', 'design', 'scratch'];
+      isolation.sharedRepos = ['scratch'];
+      const { orchestrator, notifications } = setup({ isolation, workspace: '/group' });
+      orchestrator.loadPlan([task('t1', 1), task('t2', 2)]);
+
+      await orchestrator.approveReview();
+
+      const notices = vi.mocked(notifications.info).mock.calls.map((c) => String(c[0]));
+      expect(notices.filter((n) => /shared live/i.test(n))).toEqual([
+        'Could not isolate scratch (no commits, or git refused a worktree). It and NOTES.md, design are shared live with every task, so edits to them are not isolated.',
+      ]);
+    });
+
+    it('names loose paths alone when every repository isolated', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.shared = ['NOTES.md'];
+      const { orchestrator, notifications } = setup({ isolation, workspace: '/group' });
+      orchestrator.loadPlan([task('t1', 1)]);
+
+      await orchestrator.approveReview();
+
+      expect(vi.mocked(notifications.info).mock.calls.map((c) => String(c[0]))).toContain(
+        'NOTES.md is shared live with every task, so edits to it are not isolated.',
+      );
+    });
+
+    it('says nothing about sharing for a group of one', async () => {
+      const { orchestrator, notifications } = setup();
+      orchestrator.loadPlan([task('t1', 1)]);
+      await orchestrator.approveReview();
+      expect(vi.mocked(notifications.info).mock.calls.flat().join('\n')).not.toMatch(/shared live/i);
+    });
+
+    it('says which paths a task got copies of, each only once per run', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.copied = ['api/.env'];
+      const { orchestrator, notifications, pass, spawnedCwd } = setup({ isolation, workspace: '/group' });
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1, task('t2', 2, { dependencies: ['t1'] })]);
+
+      await orchestrator.approveReview();
+      pass(t1);
+      await vi.waitFor(() => expect(spawnedCwd('t2')).toBeDefined());
+
+      const copies = vi.mocked(notifications.warn).mock.calls.map((c) => String(c[0])).filter((n) => /cop(y|ies)/i.test(n));
+      expect(copies).toEqual([
+        'api/.env could not be linked into task workspaces (a hard link is impossible there), so each task gets a copy: edits to it stay in the task.',
+      ]);
+    });
+
+    it('tells the planner the layout of the run in force, or else of the next one', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.availability = { active: true, repos: ['api', 'web'], shared: ['NOTES.md'] };
+      const { orchestrator } = setup({ isolation, workspace: '/group' });
+      expect(await orchestrator.plannerIsolation()).toEqual({ repos: ['api', 'web'], shared: ['NOTES.md'] });
+
+      isolation.repos = ['api', 'web', 'infra'];
+      isolation.shared = ['design'];
+      orchestrator.loadPlan([task('t1', 1)]);
+      await orchestrator.approveReview();
+      expect(await orchestrator.plannerIsolation()).toEqual({ repos: ['api', 'web', 'infra'], shared: ['design'] });
+    });
+
+    function group(configure: (isolation: FakeWorktreeIsolation) => void = () => undefined) {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.repos = ['api', 'web'];
+      configure(isolation);
+      return setup({ isolation, workspace: '/group' });
+    }
+
+    it('names the repository a task\'s landing conflicted in, and says none of it landed', async () => {
+      const { orchestrator, notifications, pass } = group((iso) => {
+        iso.outcomes.set('t1', 'conflict');
+        iso.stopsIn.set('t1', 'web');
+      });
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1, task('t2', 2, { dependencies: ['t1'] })]);
+      await orchestrator.approveReview();
+
+      pass(t1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
+
+      expect(orchestrator.getTaskIsolation('t1')).toEqual({
+        state: 'conflict', branch: 'ordewell/run1/1-t1', worktree: '/fake-worktrees/run1/1-t1', repos: ['api', 'web'], conflictRepo: 'web',
+      });
+      expect(vi.mocked(notifications.warn).mock.calls.map((c) => String(c[0]))).toContain(
+        'Task "Task t1" passed, but landing it on ordewell/run1/integration conflicted in web, so none of it landed. Its worktrees are kept — resolve it by hand, retry it, or resolve it as a task.',
+      );
+    });
+
+    it('names the repository git could not integrate a task in', async () => {
+      const { orchestrator, notifications, pass } = group((iso) => {
+        iso.outcomes.set('t1', 'failed');
+        iso.stopsIn.set('t1', 'api');
+      });
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1]);
+      await orchestrator.approveReview();
+
+      pass(t1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('failed'));
+
+      expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'kept', conflictRepo: 'api' });
+      expect(vi.mocked(notifications.error).mock.calls.map((c) => String(c[0]))).toContain(
+        'Task "Task t1" passed, but git could not integrate its work in api, so none of it landed. Its worktrees are kept for inspection.',
+      );
+    });
+
+    it('waits for the whole task to land before starting a dependent', async () => {
+      const { orchestrator, isolation, pass, spawn } = group((iso) => iso.changes.set('t1', ['api', 'web']));
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1, task('t2', 2, { dependencies: ['t1'] })]);
+      await orchestrator.approveReview();
+      const openMerge = isolation.holdIntegration('t1');
+
+      pass(t1);
+      await vi.waitFor(() => expect(isolation.taskIdsFor('integrate')).toEqual(['t1']));
+      await new Promise((r) => setTimeout(r, 10));
+      expect(spawn).toHaveBeenCalledTimes(1);
+
+      openMerge();
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+    });
+
+    describe('Merge all', () => {
+      async function settled(result: IsolationMergeResult) {
+        const env = group((iso) => { iso.mergeResult = result; });
+        const t1 = task('t1', 1);
+        env.orchestrator.loadPlan([t1]);
+        await env.orchestrator.approveReview();
+        env.pass(t1);
+        await vi.waitFor(() => expect(env.orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
+        return { ...env, merged: await env.orchestrator.mergeRun() };
+      }
+      const said = (fn: (message: string) => void) => vi.mocked(fn).mock.calls.map((c) => String(c[0]));
+
+      it('says each repository that blocked it, and why, and that nothing was merged', async () => {
+        const result: IsolationMergeResult = {
+          outcome: 'blocked',
+          blocked: [
+            { repo: 'api', reason: 'uncommitted-changes', files: ['api.txt', 'b.txt'] },
+            { repo: 'web', reason: 'conflict', files: ['web.txt'] },
+            { repo: 'docs', reason: 'merge-in-progress', files: [] },
+          ],
+        };
+        const { notifications, merged } = await settled(result);
+
+        expect(merged).toEqual(result);
+        expect(said(notifications.warn)).toContain(
+          'Merged nothing, so every tree is as it was: api has uncommitted changes to api.txt, b.txt; web would conflict in web.txt; docs has a merge in progress.',
+        );
+      });
+
+      it('says which repositories stay merged when a merge stops part-way', async () => {
+        const { notifications } = await settled({ outcome: 'conflict', repo: 'web', files: ['web.txt'], landed: ['api'] });
+
+        expect(said(notifications.warn)).toContain(
+          'Merging ordewell/run1/integration conflicted in web (web.txt), so it was aborted there. api was merged already and stays merged.',
+        );
+      });
+
+      it('reports a merge that could not start in a repository as an error, and that nothing landed', async () => {
+        const { notifications } = await settled({ outcome: 'failed', repo: 'api' });
+
+        expect(said(notifications.error)).toContain(
+          'Could not merge ordewell/run1/integration in api — finish or abort any merge in progress there, then try again. Nothing was merged.',
+        );
+      });
+
+      it('says it merged into the checked-out branch of every repository', async () => {
+        const { notifications } = await settled({ outcome: 'merged' });
+        expect(said(notifications.info)).toContain('Merged ordewell/run1/integration into the checked-out branch of every repository.');
+      });
+    });
+
+    it('runs in the workspace root when no repository of the group could be isolated after all', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.startRunError = new Error('No repository could be isolated: api, web');
+      const { orchestrator, notifications, spawnedCwd } = setup({ isolation, workspace: '/group' });
+      orchestrator.loadPlan([task('t1', 1)]);
+
+      await orchestrator.approveReview();
+
+      expect(spawnedCwd('t1')).toBe('/group');
+      expect(vi.mocked(notifications.info).mock.calls.map((c) => String(c[0]))).toContain(
+        'No repository could be isolated: api, web — tasks run in the workspace root without worktree isolation.',
+      );
+      expect(orchestrator.getTaskIsolation('t1')).toBeNull();
+    });
+  });
+
   describe('when the tree is dirty', () => {
     function dirty() {
       const isolation = new FakeWorktreeIsolation();
@@ -298,6 +524,19 @@ describe('TaskOrchestrator with worktree isolation', () => {
       env.orchestrator.loadPlan([task('t1', 1)]);
       return { ...env, observed };
     }
+
+    it('names the dirty repositories of a group', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.availability = { active: false, reason: 'dirty', repos: ['api', 'web'] };
+      const { orchestrator } = setup({ isolation });
+      const blocked: Array<{ reason: 'dirty'; repos: string[] }> = [];
+      orchestrator.subscribe({ onIsolationBlocked: (data) => blocked.push(data) });
+      orchestrator.loadPlan([task('t1', 1)]);
+
+      await orchestrator.approveReview();
+
+      expect(blocked).toEqual([{ reason: 'dirty', repos: ['api', 'web'] }]);
+    });
 
     it('does not start, and says why', async () => {
       const { orchestrator, spawn, observed } = dirty();
@@ -343,6 +582,110 @@ describe('TaskOrchestrator with worktree isolation', () => {
     });
   });
 
+  describe('the notices a surface is handed', () => {
+    function heard(orchestrator: TaskOrchestrator) {
+      const notices: Array<{ level: string; message: string }> = [];
+      orchestrator.subscribe({ onIsolationNotice: (n) => notices.push(n) });
+      return notices;
+    }
+
+    it('hands over the fallback to the workspace root, which the notification channel may drop', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.availability = { active: false, reason: 'nested-repos', repos: ['services/billing'] };
+      const { orchestrator } = setup({ isolation, workspace: '/plain' });
+      const notices = heard(orchestrator);
+      orchestrator.loadPlan([task('t1', 1)]);
+
+      await orchestrator.approveReview();
+
+      expect(notices).toEqual([{
+        level: 'info',
+        message: 'This repository contains nested repositories that are not submodules (services/billing) — tasks run in the workspace root without worktree isolation. Ignore them in git or make them submodules to isolate this repository.',
+      }]);
+    });
+
+    it('hands over the shared paths of a group and the copies a task got', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.shared = ['NOTES.md'];
+      isolation.copied = ['api/.env'];
+      const { orchestrator } = setup({ isolation, workspace: '/group' });
+      const notices = heard(orchestrator);
+      orchestrator.loadPlan([task('t1', 1)]);
+
+      await orchestrator.approveReview();
+
+      expect(notices.map((n) => n.level)).toEqual(['info', 'warn']);
+      expect(notices[0].message).toBe('NOTES.md is shared live with every task, so edits to it are not isolated.');
+      expect(notices[1].message).toMatch(/^api\/\.env could not be linked/);
+    });
+
+    it('names the repositories it stashed, and where to pop them', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.availability = { active: false, reason: 'dirty', repos: ['api', 'web'] };
+      const { orchestrator } = setup({ isolation });
+      const notices = heard(orchestrator);
+      orchestrator.loadPlan([task('t1', 1)]);
+      await orchestrator.approveReview();
+
+      await orchestrator.continueBlockedRun('stash');
+
+      expect(notices).toContainEqual({
+        level: 'info',
+        message: 'Stashed your uncommitted changes in api, web — `git stash pop` in each brings them back.',
+      });
+    });
+
+    it('keeps the stash notice as it was for a group of one', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.availability = { active: false, reason: 'dirty' };
+      const { orchestrator, notifications } = setup({ isolation });
+      orchestrator.loadPlan([task('t1', 1)]);
+      await orchestrator.approveReview();
+
+      await orchestrator.continueBlockedRun('stash');
+
+      expect(vi.mocked(notifications.info)).toHaveBeenCalledWith('Stashed your uncommitted changes — `git stash pop` brings them back.');
+    });
+  });
+
+  it('has the run saved with its landing before anything merges', async () => {
+    const { orchestrator, isolation, pass } = setup();
+    const saved: unknown[] = [];
+    orchestrator.subscribe({ onIsolationChanged: () => saved.push(JSON.parse(JSON.stringify(orchestrator.isolationRecord!.run.landing ?? null))) });
+    const t1 = task('t1', 1);
+    orchestrator.loadPlan([t1]);
+    await orchestrator.approveReview();
+    const openMerge = isolation.holdIntegration('t1');
+
+    pass(t1);
+    await vi.waitFor(() => expect(saved).toContainEqual({ taskId: 't1', tips: { '.': 'tip-.' } }));
+
+    openMerge();
+    await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
+    expect(saved.at(-1)).toBeNull();
+  });
+
+  it('words a group of one\'s conflict and Merge all as it always has', async () => {
+    const { orchestrator, isolation, notifications, pass } = setup();
+    isolation.outcomes.set('t1', 'conflict');
+    const t1 = task('t1', 1);
+    orchestrator.loadPlan([t1]);
+    await orchestrator.approveReview();
+    pass(t1);
+    await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
+    isolation.mergeResult = { outcome: 'conflict', repo: '.', files: ['a.txt'] };
+    await orchestrator.mergeRun();
+    isolation.mergeResult = { outcome: 'failed', repo: '.' };
+    await orchestrator.mergeRun();
+
+    const warned = vi.mocked(notifications.warn).mock.calls.map((c) => String(c[0]));
+    expect(warned).toContain('Task "Task t1" passed, but merging it into ordewell/run1/integration conflicted. Its worktree is kept — resolve it by hand, retry it, or resolve it as a task.');
+    expect(warned).toContain('Merging ordewell/run1/integration conflicted, so it was aborted — your tree is as it was.');
+    expect(vi.mocked(notifications.error).mock.calls.map((c) => String(c[0]))).toContain(
+      'Could not merge ordewell/run1/integration — finish or abort the merge already in progress, then try again.',
+    );
+  });
+
   it('hands the integration branch over when the plan settles, before reporting completion', async () => {
     const { orchestrator, pass } = setup();
     const events: string[] = [];
@@ -359,8 +702,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
     await vi.waitFor(() => expect(events).toEqual(['handoff', 'complete']));
 
     expect(handoff).toEqual({
-      branch: 'ordewell/run1/integration',
-      baseRef: 'base0000',
+      repos: [{ path: '.', integrationBranch: 'ordewell/run1/integration', baseRef: 'base0000', landed: [{ taskId: 't1', order: 1, title: 'Task t1' }] }],
       landed: [{ taskId: 't1', order: 1, title: 'Task t1' }],
     });
   });
@@ -490,8 +832,9 @@ describe('TaskOrchestrator with worktree isolation', () => {
     it('adopts its persisted run, prunes what a crash left behind, and continues it', async () => {
       const { orchestrator, isolation, spawnedCwd } = setup();
       const run = {
-        id: 'old', workspaceRoot: '/repo', baseRef: 'abc', integrationBranch: 'ordewell/old/integration',
-        tasks: { t1: { taskId: 't1', order: 1, title: 'Task t1', branch: 'ordewell/old/1-t1', worktree: '/wt/1', status: 'merged' as const, linked: [] } },
+        id: 'old', workspaceRoot: '/repo', shared: [], sharedRepos: [],
+        repos: [{ path: '.', root: '/repo', baseRef: 'abc', integrationBranch: 'ordewell/old/integration' }],
+        tasks: { t1: { taskId: 't1', order: 1, title: 'Task t1', branch: 'ordewell/old/1-t1', workspace: '/wt/1', status: 'merged' as const, repos: { '.': { worktree: '/wt/1', linked: [], changed: true } } } },
       };
       orchestrator.loadPlan([task('t1', 1, { status: 'completed' }), task('t2', 2, { dependencies: ['t1'] })]);
 
@@ -507,8 +850,9 @@ describe('TaskOrchestrator with worktree isolation', () => {
     it('keeps the integration branch of a run it cannot continue while that branch holds landed work', async () => {
       const { orchestrator, isolation, spawnedCwd } = setup({ workspace: '/repo' });
       const run = {
-        id: 'old', workspaceRoot: '/elsewhere/repo', baseRef: 'abc', integrationBranch: 'ordewell/old/integration',
-        tasks: { t1: { taskId: 't1', order: 1, title: 'Task t1', branch: 'ordewell/old/1-t1', worktree: '/wt/1', status: 'merged' as const, linked: [] } },
+        id: 'old', workspaceRoot: '/elsewhere/repo', shared: [], sharedRepos: [],
+        repos: [{ path: '.', root: '/elsewhere/repo', baseRef: 'abc', integrationBranch: 'ordewell/old/integration' }],
+        tasks: { t1: { taskId: 't1', order: 1, title: 'Task t1', branch: 'ordewell/old/1-t1', workspace: '/wt/1', status: 'merged' as const, repos: { '.': { worktree: '/wt/1', linked: [], changed: true } } } },
       };
       orchestrator.loadPlan([task('t1', 1, { status: 'completed' }), task('t2', 2)]);
       await orchestrator.adoptIsolation({ run, resolvers: {} });

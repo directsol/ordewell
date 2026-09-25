@@ -2,7 +2,7 @@ import http from 'http';
 import WebSocket from 'ws';
 import { DEFAULT_PORT } from './daemon';
 import { bearerHeaderValue, readDaemonToken, tokenSubprotocols, mintSessionId } from '@ordewell/core';
-import type { SerializedPlan, DiscoveredModel, SessionMessage, RewindTarget } from '@ordewell/core';
+import type { SerializedPlan, DiscoveredModel, SessionMessage, SessionNotice, RewindTarget, IsolationMergeResult } from '@ordewell/core';
 
 const DEFAULT_HTTP_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -12,6 +12,9 @@ export interface PlanResult {
   models?: DiscoveredModel[];
   modelsByRunner?: Record<string, DiscoveredModel[]>;
 }
+
+/** How a merge of the run into the user's checkout went, and on anything but `merged`, which repo stopped it. */
+export type MergeRunResult = IsolationMergeResult;
 
 interface ErrorResponse {
   error?: string;
@@ -74,7 +77,7 @@ export interface ExecutionSummary {
  * compiled everywhere and was silently dropped by their `default:` arms. Naming
  * the real type turns that into a compile error at each surface.
  */
-export type WsEvent = SessionMessage;
+export type WsEvent = SessionMessage | SessionNotice;
 
 export class ApiClient {
   private port: number;
@@ -394,13 +397,16 @@ export class ApiClient {
     return res.data.diff;
   }
 
-  /** A conflict or a refusal is an outcome, not an error: the user's tree is untouched either way. */
-  async mergeRun(sessionId: string): Promise<'merged' | 'conflict' | 'failed'> {
-    const res = await this.httpRequest<{ outcome: 'merged' | 'conflict' | 'failed' } & ErrorResponse>('POST', `/api/plans/${sessionId}/isolation/merge`);
+  /**
+   * A conflict or a block is an outcome, not an error. Passed on whole: which
+   * repos blocked the merge, or landed before it stopped, is the answer.
+   */
+  async mergeRun(sessionId: string): Promise<MergeRunResult> {
+    const res = await this.httpRequest<MergeRunResult & ErrorResponse>('POST', `/api/plans/${sessionId}/isolation/merge`);
     if (res.status !== 200) {
       throw new Error(res.data?.error || 'Merge failed');
     }
-    return res.data.outcome;
+    return res.data;
   }
 
   discardRun(sessionId: string): Promise<void> {

@@ -38,6 +38,7 @@ export function fakeFs(): IFileSystem {
 
 export interface SessionOverrides {
   broadcast?: SessionDeps['broadcast'];
+  onNotice?: SessionDeps['onNotice'];
   config?: SessionDeps['config'];
   /** Supply a real adapter when a test needs the approval channel Session injects into it. */
   fsAdapter?: IFileSystem;
@@ -53,6 +54,8 @@ export interface SessionOverrides {
   taskOutput?: TaskOutputSource;
   /** Defaults to git behind a config with isolation off, so no test runs git in the repo it runs in. */
   isolation?: IWorktreeIsolation;
+  /** Defaults to the directory the suite runs in; an end-to-end test points it at a temporary workspace. */
+  workspaceRoot?: () => string;
 }
 
 /**
@@ -77,9 +80,10 @@ export function makeSession(overrides: SessionOverrides = {}): Session {
     notifications: fakeNotification(),
     runner,
     registry: new RunnerRegistry(),
-    workspaceRoot: () => testWorkspace,
+    workspaceRoot: overrides.workspaceRoot ?? (() => testWorkspace),
     fsAdapter: overrides.fsAdapter ?? fakeFs(),
     broadcast: overrides.broadcast ?? vi.fn(),
+    onNotice: overrides.onNotice,
     modelResolver: { getCachedRunnerModels: () => [], ...(overrides.modelResolver ?? { modelsForRunners: vi.fn().mockResolvedValue({}) }) } as ModelResolver,
     settings: overrides.settings ?? (() => ({ tddEnabled: false })),
     sessionId: overrides.sessionId,

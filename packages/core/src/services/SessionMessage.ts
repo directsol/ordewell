@@ -1,7 +1,7 @@
 import type { LegacyPlanState, QueuedMessage, ResearchStep, RunnerId, Task, Verdict } from '../models/Task';
 import type { ApprovalKind } from '../interfaces/IApproval';
 import type { ApprovalSource } from './ApprovalPolicy';
-import type { IsolationHandoff, TaskIsolation } from '../interfaces/IWorktreeIsolation';
+import type { IsolationHandoff, IsolationMergeResult, TaskIsolation } from '../interfaces/IWorktreeIsolation';
 
 export type SerializedTaskStatus = {
   id: string;
@@ -56,12 +56,17 @@ export type SessionMessage =
   | { type: 'task_output'; taskId: string; text: string }
   // A run did not start because tracked files are modified. It waits for the
   // user to stash (`continueWithStash`) or to run without isolation this once
-  // (`continueWithoutIsolation`); nothing is spawned until then.
-  | { type: 'isolation_blocked'; reason: 'dirty'; message: string }
-  // An isolated run settled: the branch its work landed on, the commit that
-  // branch forked from, and what landed, in plan order. Sent before
-  // `execution_complete`, which surfaces treat as the end of the stream.
-  | { type: 'isolation_handoff'; branch: string; baseRef: string; landed: IsolationHandoff['landed'] }
+  // (`continueWithoutIsolation`); nothing is spawned until then. `repos` names
+  // the dirty repos of a group; a group of one names none.
+  | { type: 'isolation_blocked'; reason: 'dirty'; repos?: string[]; message: string }
+  // An isolated run settled: for each repo, the branch its work landed on and
+  // the commit that branch forked from; and what landed, in plan order. Sent
+  // before `execution_complete`, which surfaces treat as the end of the stream.
+  | { type: 'isolation_handoff'; repos: IsolationHandoff['repos']; landed: IsolationHandoff['landed'] }
+  // What "Merge all" did, for every surface watching rather than only the one
+  // that asked: merged, blocked with each repo and why, or stopped part-way
+  // with the repos that stay merged.
+  | { type: 'isolation_merge'; result: IsolationMergeResult }
   | { type: 'plan_thinking'; text: string }
   // Carries no content — see `ResearchProgress['liveness']`. Exists only so a
   // surface's idle watchdog sees the harness process working even during a
@@ -95,6 +100,14 @@ export type SessionMessage =
       granted: boolean;
       source: Exclude<ApprovalSource, 'asked'>;
     };
+
+/**
+ * A line a run wants the user to read — how it isolates, what it shares. Not a
+ * {@link SessionMessage}: hosts that show notices as toasts already do, and
+ * widening the union would break every exhaustive switch over it. A host with
+ * no toast channel (the daemon) hands these to its clients by its own means.
+ */
+export type SessionNotice = { type: 'notice'; level: 'info' | 'warn'; message: string };
 
 export type SessionBroadcaster = (msg: SessionMessage) => void;
 

@@ -1,10 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { makeSession, FakeTerminalSession } from './sessionTestKit';
 import { FakeWorktreeIsolation } from '../../testing';
 import * as sessionStore from '../../utils/sessionStore';
 import { createTask, type LegacyPlanState, type Task } from '../../models/Task';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
-import type { SessionMessage } from '../SessionMessage';
+import type { SessionMessage, SessionNotice } from '../SessionMessage';
+import type { IsolationMergeResult } from '../../interfaces/IWorktreeIsolation';
 import type { ConversationTurn, IAiService } from '../AiService';
 
 function runner() {
@@ -27,11 +31,12 @@ function plan(tasks: Task[]): LegacyPlanState {
 
 function setup(isolation = new FakeWorktreeIsolation(), aiService?: Partial<IAiService>) {
   const messages: SessionMessage[] = [];
+  const notices: SessionNotice[] = [];
   const r = runner();
-  const session = makeSession({ runner: r.runner, isolation, aiService, broadcast: (m) => messages.push(m) });
+  const session = makeSession({ runner: r.runner, isolation, aiService, broadcast: (m) => messages.push(m), onNotice: (n) => notices.push(n) });
   const pass = (t: Task) => r.sessions.find((s) => s.taskId === t.id)!.emitOutput(`<<<ORDEWELL_DONE_${t.completionMarker}>>>`);
   const lastStatus = () => [...messages].reverse().find((m): m is Extract<SessionMessage, { type: 'status_update' }> => m.type === 'status_update');
-  return { session, isolation, messages, pass, lastStatus, ...r };
+  return { session, isolation, messages, notices, pass, lastStatus, ...r };
 }
 
 const saved = () => vi.mocked(sessionStore.saveSession).mock.calls.at(-1)?.[0];
@@ -46,7 +51,7 @@ describe('Session with worktree isolation', () => {
     await session.executePlan();
 
     expect(lastStatus()!.tasks.find((t) => t.id === 't1')!.isolation).toEqual({
-      state: 'active', branch: 'ordewell/run1/1-t1', worktree: '/fake-worktrees/run1/1-t1',
+      state: 'active', branch: 'ordewell/run1/1-t1', worktree: '/fake-worktrees/run1/1-t1', repos: [],
     });
     expect(lastStatus()!.tasks.find((t) => t.id === 't2')!.isolation).toEqual({ state: 'none' });
   });
@@ -75,14 +80,25 @@ describe('Session with worktree isolation', () => {
     expect(types.indexOf('isolation_handoff')).toBeLessThan(types.indexOf('execution_complete'));
     expect(messages.find((m) => m.type === 'isolation_handoff')).toEqual({
       type: 'isolation_handoff',
-      branch: 'ordewell/run1/integration',
-      baseRef: 'base0000',
+      repos: [{ path: '.', integrationBranch: 'ordewell/run1/integration', baseRef: 'base0000', landed: [{ taskId: 't1', order: 1, title: 'Task t1' }] }],
       landed: [{ taskId: 't1', order: 1, title: 'Task t1' }],
     });
     expect(saved()!.isolation).toEqual({
-      run: expect.objectContaining({ id: 'run1', integrationBranch: 'ordewell/run1/integration' }),
+      run: expect.objectContaining({ id: 'run1', repos: [expect.objectContaining({ path: '.', integrationBranch: 'ordewell/run1/integration' })] }),
       resolvers: {},
     });
+  });
+
+  it('hands a surface the notice of a run that falls back to the workspace root, apart from the session stream', async () => {
+    const isolation = new FakeWorktreeIsolation();
+    isolation.availability = { active: false, reason: 'not-git' };
+    const { session, notices, messages } = setup(isolation);
+    session.loadPlan(plan([task('t1', 1)]), 'goal', '/repo');
+
+    await session.executePlan();
+
+    expect(notices).toEqual([{ type: 'notice', level: 'info', message: 'Not a git repository — tasks run in the workspace root without worktree isolation.' }]);
+    expect(messages.map((m) => m.type)).not.toContain('notice');
   });
 
   describe('on a dirty tree', () => {
@@ -102,6 +118,22 @@ describe('Session with worktree isolation', () => {
       expect(spawn).not.toHaveBeenCalled();
       expect(messages).toContainEqual({ type: 'isolation_blocked', reason: 'dirty', message: expect.stringMatching(/stash/i) });
       expect(messages.map((m) => m.type)).not.toContain('execution_complete');
+    });
+
+    it('names the dirty repositories of a group', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.availability = { active: false, reason: 'dirty', repos: ['api', 'web'] };
+      const { session, messages } = setup(isolation);
+      session.loadPlan(plan([task('t1', 1)]), 'goal', '/group');
+
+      await session.executePlan();
+
+      expect(messages).toContainEqual({
+        type: 'isolation_blocked',
+        reason: 'dirty',
+        repos: ['api', 'web'],
+        message: 'Tracked files have uncommitted changes in api, web, so tasks cannot run in isolated worktrees. Stash them, or run this plan without isolation.',
+      });
     });
 
     it('continues isolated after stashing', async () => {
@@ -130,8 +162,9 @@ describe('Session with worktree isolation', () => {
       ...plan([task('t1', 1, { status: 'completed' }), task('t2', 2, { dependencies: ['t1'] })]),
       isolation: {
         run: {
-          id: 'old', workspaceRoot: process.cwd(), baseRef: 'abc', integrationBranch: 'ordewell/old/integration',
-          tasks: { t1: { taskId: 't1', order: 1, title: 'Task t1', branch: 'ordewell/old/1-t1', worktree: '/wt/1', status: 'merged', linked: [] } },
+          id: 'old', workspaceRoot: process.cwd(), shared: [], sharedRepos: [],
+          repos: [{ path: '.', root: process.cwd(), baseRef: 'abc', integrationBranch: 'ordewell/old/integration' }],
+          tasks: { t1: { taskId: 't1', order: 1, title: 'Task t1', branch: 'ordewell/old/1-t1', workspace: '/wt/1', status: 'merged', repos: { '.': { worktree: '/wt/1', linked: [], changed: true } } } },
         },
         resolvers: {},
       },
@@ -144,16 +177,59 @@ describe('Session with worktree isolation', () => {
     expect(spawn.mock.calls[0][0].cwd).toBe('/fake-worktrees/old/2-t2');
   });
 
+  it('resumes a session saved by 0.4.23 with an unfinished run, and hands it off as before', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ordewell-legacy-'));
+    try {
+      const saved = {
+        ...plan([task('t1', 1, { status: 'completed' }), task('t2', 2, { dependencies: ['t1'] })]),
+        // The ADR-0013 record, as 0.4.23 wrote it: the refs on the run, one worktree per task.
+        isolation: {
+          run: {
+            id: 'old', workspaceRoot: process.cwd(), baseRef: 'abc', baseBranch: 'main', integrationBranch: 'ordewell/old/integration',
+            tasks: { t1: { taskId: 't1', order: 1, title: 'Task t1', branch: 'ordewell/old/1-t1', worktree: '/wt/1', status: 'merged', linked: [] } },
+          },
+          resolvers: {},
+        },
+      };
+      fs.mkdirSync(path.join(dir, '.ordewell', 'sessions'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.ordewell', 'sessions', '2026-09-20T10-00-00_goal_legacy1.json'),
+        JSON.stringify({ meta: { id: 'session-legacy1', goal: 'goal', runners: ['claude-code'], taskCount: 2, status: 'approved', createdAt: saved.generatedAt, updatedAt: saved.generatedAt }, plan: saved }),
+      );
+      const { session, isolation, spawn, pass, messages } = setup();
+
+      const loaded = sessionStore.loadSession('session-legacy1', dir)!;
+      session.loadPlan(loaded.plan, loaded.meta.goal, '/repo');
+      await vi.waitFor(() => expect(isolation.calls).toEqual([{ op: 'pruneOrphans' }]));
+      await session.executePlan();
+
+      expect(spawn.mock.calls[0][0].cwd).toBe('/fake-worktrees/old/2-t2');
+      pass(session.planState!.tasks[1]);
+      await vi.waitFor(() => expect(messages.map((m) => m.type)).toContain('isolation_handoff'));
+      const landed = [{ taskId: 't1', order: 1, title: 'Task t1' }, { taskId: 't2', order: 2, title: 'Task t2' }];
+      expect(messages.find((m) => m.type === 'isolation_handoff')).toEqual({
+        type: 'isolation_handoff',
+        repos: [{ path: '.', integrationBranch: 'ordewell/old/integration', baseRef: 'abc', landed }],
+        landed,
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('describes an adopted run to a surface no stream has told: each task\'s mark and the handoff', () => {
     const { session } = setup();
     const record = (taskId: string, order: number, status: 'merged' | 'conflict') => ({
-      taskId, order, title: `Task ${taskId}`, branch: `ordewell/old/${order}-${taskId}`, worktree: `/wt/${order}`, status, linked: [],
+      taskId, order, title: `Task ${taskId}`, branch: `ordewell/old/${order}-${taskId}`, workspace: `/wt/${order}`, status,
+      repos: { '.': { worktree: `/wt/${order}`, linked: [], ...(status === 'merged' ? { changed: true } : {}) } },
+      ...(status === 'conflict' ? { conflictRepo: '.' } : {}),
     });
     session.loadPlan({
       ...plan([task('t1', 1, { status: 'completed' }), task('t2', 2, { status: 'awaiting_user' }), task('t3', 3)]),
       isolation: {
         run: {
-          id: 'old', workspaceRoot: process.cwd(), baseRef: 'abc', integrationBranch: 'ordewell/old/integration',
+          id: 'old', workspaceRoot: process.cwd(), shared: [], sharedRepos: [],
+          repos: [{ path: '.', root: process.cwd(), baseRef: 'abc', integrationBranch: 'ordewell/old/integration' }],
           tasks: { t2: record('t2', 2, 'conflict'), t1: record('t1', 1, 'merged') },
         },
         resolvers: {},
@@ -162,10 +238,13 @@ describe('Session with worktree isolation', () => {
 
     expect(session.isolationView()).toEqual({
       tasks: {
-        t1: { state: 'integrated', branch: 'ordewell/old/1-t1', worktree: '/wt/1' },
-        t2: { state: 'conflict', branch: 'ordewell/old/2-t2', worktree: '/wt/2' },
+        t1: { state: 'integrated', branch: 'ordewell/old/1-t1', worktree: '/wt/1', repos: ['.'] },
+        t2: { state: 'conflict', branch: 'ordewell/old/2-t2', worktree: '/wt/2', repos: [], conflictRepo: '.' },
       },
-      handoff: { branch: 'ordewell/old/integration', baseRef: 'abc', landed: [{ taskId: 't1', order: 1, title: 'Task t1' }] },
+      handoff: {
+        repos: [{ path: '.', integrationBranch: 'ordewell/old/integration', baseRef: 'abc', landed: [{ taskId: 't1', order: 1, title: 'Task t1' }] }],
+        landed: [{ taskId: 't1', order: 1, title: 'Task t1' }],
+      },
     });
   });
 
@@ -181,7 +260,10 @@ describe('Session with worktree isolation', () => {
     const restored: LegacyPlanState = {
       ...plan([task('t1', 1)]),
       isolation: {
-        run: { id: 'old', workspaceRoot: process.cwd(), baseRef: 'abc', integrationBranch: 'ordewell/old/integration', tasks: {} },
+        run: {
+          id: 'old', workspaceRoot: process.cwd(), shared: [], sharedRepos: [], tasks: {},
+          repos: [{ path: '.', root: process.cwd(), baseRef: 'abc', integrationBranch: 'ordewell/old/integration' }],
+        },
         resolvers: {},
       },
     };
@@ -228,8 +310,32 @@ describe('Session with worktree isolation', () => {
       const { session, isolation } = await landed();
       expect(isolation.calls.map((c) => c.op)).not.toContain('mergeIntoCheckedOut');
 
-      expect(await session.mergeRun()).toBe('merged');
+      expect(await session.mergeRun()).toEqual({ outcome: 'merged' });
       expect(isolation.calls.map((c) => c.op)).toContain('mergeIntoCheckedOut');
+    });
+
+    it('tells every surface what Merge all did, down to each repository that blocked it', async () => {
+      const { session, isolation, messages } = await landed();
+      const result: IsolationMergeResult = { outcome: 'blocked', blocked: [{ repo: 'web', reason: 'conflict', files: ['web.txt'] }] };
+      isolation.mergeResult = result;
+
+      expect(await session.mergeRun()).toEqual(result);
+      expect(messages.at(-1)).toEqual({ type: 'isolation_merge', result });
+    });
+
+    it('saves the run with its landing before anything merges, and again once it has landed', async () => {
+      const { session, isolation, pass } = setup();
+      const t1 = task('t1', 1);
+      session.loadPlan(plan([t1]), 'goal', '/repo');
+      await session.executePlan();
+      const openMerge = isolation.holdIntegration('t1');
+
+      pass(t1);
+      await vi.waitFor(() => expect(saved()!.isolation?.run.landing).toEqual({ taskId: 't1', tips: { '.': 'tip-.' } }));
+
+      openMerge();
+      await vi.waitFor(() => expect(saved()!.isolation?.run.tasks.t1.status).toBe('merged'));
+      expect(saved()!.isolation?.run.landing).toBeUndefined();
     });
 
     it('cleans up worktrees but keeps the branch and the record', async () => {
@@ -272,6 +378,25 @@ describe('Session with worktree isolation', () => {
     expect(resolver.assignedModel?.modelId).toBe('sonnet');
     expect(resolver.dependencies).toEqual([]);
     expect(saved()!.isolation!.resolvers).toEqual({ [resolver.id]: 't1' });
+  });
+
+  it('asks a resolver to merge the conflicted branch in every repository the task changed, naming where it conflicted', async () => {
+    const isolation = new FakeWorktreeIsolation();
+    isolation.repos = ['api', 'web'];
+    isolation.outcomes.set('t1', 'conflict');
+    isolation.stopsIn.set('t1', 'web');
+    const { session, pass } = setup(isolation);
+    const t1 = task('t1', 1);
+    session.loadPlan(plan([t1]), 'goal', '/group');
+    await session.executePlan();
+    pass(t1);
+    await vi.waitFor(() => expect(session.getTask('t1')!.status).toBe('awaiting_user'));
+
+    await session.resolveConflictAsTask('t1');
+
+    const { prompt } = session.planTasks[1];
+    expect(prompt).toContain('conflicted in web');
+    expect(prompt).toContain('In each repository the task changed — api, web — run `git merge --no-ff ordewell/run1/1-t1`');
   });
 
   it('refuses to resolve a task that did not conflict', async () => {
@@ -361,8 +486,20 @@ describe('Session with worktree isolation', () => {
       await session.startPlanning('goal', ['claude-code']);
       await session.generatePlan('goal', ['claude-code']);
 
-      expect(startConversation).toHaveBeenCalledWith(expect.objectContaining({ isolatedExecution: true }));
-      expect(generate).toHaveBeenCalledWith(expect.objectContaining({ modes: expect.objectContaining({ isolatedExecution: true }) }));
+      const lone = { repos: ['.'], shared: [] };
+      expect(startConversation).toHaveBeenCalledWith(expect.objectContaining({ isolatedExecution: lone }));
+      expect(generate).toHaveBeenCalledWith(expect.objectContaining({ modes: expect.objectContaining({ isolatedExecution: lone }) }));
+    });
+
+    it('describes a repo group to the planner: its repositories and the paths its tasks share', async () => {
+      const layout = { repos: ['api', 'web'], shared: ['NOTES.md'] };
+      const { session, startConversation, generate } = planning({ active: true, ...layout });
+
+      await session.startPlanning('goal', ['claude-code']);
+      await session.generatePlan('goal', ['claude-code']);
+
+      expect(startConversation).toHaveBeenCalledWith(expect.objectContaining({ isolatedExecution: layout }));
+      expect(generate).toHaveBeenCalledWith(expect.objectContaining({ modes: expect.objectContaining({ isolatedExecution: layout }) }));
     });
 
     it.each([

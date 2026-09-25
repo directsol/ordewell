@@ -5,7 +5,8 @@ import {
   bodyRows, chatInputWrap, chatLayout, footerHints, helpLayout, packHints, planLayout, planOffset,
 } from './layout';
 import { chatEditorRoom, chatPaneWidth, paneColumns, planPaneWidth } from './geometry';
-import { diffRoom, HANDOFF_ACTIONS } from './handoff';
+import { diffRoom, handoffActions } from './handoff';
+import { handoffBase, handoffBranch, isRepoGroup, repoResultLines } from '../isolation';
 import { SKILL_IDS, visibleItems, type PickerState, type TuiState } from './state';
 
 /**
@@ -464,23 +465,29 @@ function renderHandoff(
     // line would push the end of the diff and the footer out of the frame.
     const shown = lines.slice(scroll, scroll + room).map((line) => paintDiffLine(truncate(line, Math.max(1, cols - 2))));
     const more = scroll + room < lines.length ? '↑↓ pgup/pgdn scroll · ' : '';
-    return frame(`Diff — ${handoff.branch}`, [...shown, '', style.grey(`${more}enter or esc goes back`)], rows, cols);
+    return frame(`Diff — ${handoffBranch(handoff)}`, [...shown, '', style.grey(`${more}enter or esc goes back`)], rows, cols);
   }
 
   const landed = handoff.landed.length === 0
     ? [style.grey('Nothing landed on it.')]
     : handoff.landed.map((task) => `  ${style.green('✓')} #${task.order} ${task.title}`);
-  const actions = HANDOFF_ACTIONS.map((action, index) => {
+  const actions = handoffActions(handoff).map((action, index) => {
     const active = index === overlay.index;
     const caret = active ? style.cyan('❯') : ' ';
     return `${caret} ${active ? style.bold(action.label) : action.label}${style.grey(` — ${action.hint}`)}`;
   });
+  // A group answers per repo first: Merge all is one step over all of them, so
+  // the user needs to see which have work before taking it.
+  const perRepo = isRepoGroup(handoff)
+    ? ['Per repository:', ...handoff.repos.map((repo, i) => `  ${repo.landed.length > 0 ? style.green('✓') : style.grey('·')} ${repoResultLines(handoff)[i]}`), '']
+    : [];
   return frame(
     'Run handoff',
     [
-      `Branch  ${style.cyan(handoff.branch)}`,
-      style.grey(`Forked from ${handoff.baseRef.slice(0, 12)}`),
+      `Branch  ${style.cyan(handoffBranch(handoff))}`,
+      style.grey(`Forked from ${handoffBase(handoff, 12)}`),
       '',
+      ...perRepo,
       'Landed on it, in plan order:',
       ...landed,
       '',

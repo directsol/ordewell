@@ -7,7 +7,8 @@ import { normalizeCatalog } from '../catalog';
 import { describePlannerSwitch } from '../plannerModelSwitch';
 import type { Action, Effect } from './reducer';
 import type { RewindTargetView, SessionView, TaskIsolationView } from './state';
-import type { WsEvent } from '../apiClient';
+import type { MergeRunResult, WsEvent } from '../apiClient';
+import { mergeOutcome } from '../isolation';
 
 /** The slice of the daemon client the TUI needs; `ApiClient` satisfies it. */
 export interface OrdewellApi {
@@ -33,7 +34,7 @@ export interface OrdewellApi {
   compactConversation(sessionId: string): Promise<{ plan: unknown; summary: string; keptMessages: number }>;
   closeSession(sessionId: string): Promise<{ ok: boolean }>;
   reviewRunDiff(sessionId: string): Promise<string>;
-  mergeRun(sessionId: string): Promise<'merged' | 'conflict' | 'failed'>;
+  mergeRun(sessionId: string): Promise<MergeRunResult>;
   discardRun(sessionId: string): Promise<void>;
   cleanupRun(sessionId: string): Promise<void>;
   continueWithStash(sessionId: string): Promise<void>;
@@ -491,12 +492,8 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
     // A conflict or a refusal is an answer, not a fault: either way the user's
     // tree is exactly as it was, and the words say what to do next.
     case 'isolationMerge': {
-      const outcome = await api.mergeRun(effect.sessionId);
-      dispatch(outcome === 'merged'
-        ? { type: 'notice', message: `Merged ${effect.branch} into your checked-out branch.` }
-        : outcome === 'conflict'
-          ? { type: 'failed', message: `Merging ${effect.branch} conflicted, so it was aborted — your tree is as it was. Merge it with git and resolve the conflict there.` }
-          : { type: 'failed', message: `Could not merge ${effect.branch} — finish or abort the merge already in progress, then try again.` });
+      const { ok, message } = mergeOutcome(await api.mergeRun(effect.sessionId), effect.branch, effect.group === true);
+      dispatch({ type: ok ? 'notice' : 'failed', message });
       return;
     }
 
@@ -822,11 +819,16 @@ function onExecutionEvent(dispatch: (action: Action) => void, event: WsEvent, se
 
     // Nothing started; the user chooses how to go on.
     case 'isolation_blocked':
-      dispatch({ type: 'isolationBlocked', message: event.message, sessionId });
+      dispatch({ type: 'isolationBlocked', message: event.message, ...(event.repos ? { repos: event.repos } : {}), sessionId });
+      return;
+
+    // How the run isolates. The daemon has no toast channel, so this is the only place the user hears it.
+    case 'notice':
+      dispatch({ type: 'notice', message: event.message });
       return;
 
     case 'isolation_handoff':
-      dispatch({ type: 'isolationHandoff', handoff: { branch: event.branch, baseRef: event.baseRef, landed: event.landed }, sessionId });
+      dispatch({ type: 'isolationHandoff', handoff: { repos: event.repos, landed: event.landed }, sessionId });
       return;
 
     // Raw runner chatter, and the planner's own turn: the status line and the
@@ -842,6 +844,10 @@ function onExecutionEvent(dispatch: (action: Action) => void, event: WsEvent, se
     case 'research_step_done':
     case 'approval_request':
     case 'approval_settled':
+      return;
+
+    // Its asker already has the result, from the merge request itself.
+    case 'isolation_merge':
       return;
 
     default: {
