@@ -68,7 +68,7 @@ describe('models and providers', () => {
   });
 
   it('/refresh re-discovers runners and catalogs', () => {
-    expect(run('/refresh').effects).toEqual([{ type: 'refresh' }]);
+    expect(run('/refresh').effects).toEqual([{ type: 'refresh', announce: true }]);
   });
 });
 

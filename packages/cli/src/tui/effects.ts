@@ -547,7 +547,7 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
 
     case 'refresh':
       await Promise.all([loadRunners(deps), loadSettings(deps), loadModels(deps)]);
-      dispatch({ type: 'notice', message: 'Refreshed runners, settings and models.' });
+      if (effect.announce) dispatch({ type: 'notice', message: 'Refreshed runners, settings and models.' });
       return;
 
     case 'exit':

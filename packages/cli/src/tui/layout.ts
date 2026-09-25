@@ -232,14 +232,11 @@ export function chatLayout(state: TuiState, rows: number, cols: number): ChatLay
   // planning conversation and only goes once a plan exists — from then on the
   // plan pane owns the screen and the chat column is too narrow for the art.
   const welcome = state.tasks.length === 0;
-  if (welcome && state.messages.length === 0) {
-    // Nothing has been said yet, so the welcome hangs off the top and stays
-    // put; reporting any other bound would invent notches that do nothing.
-    return { lines: welcomeLines(state, cols), anchor: 'top', maxScroll: 0 };
-  }
   const body = chatBodyLines(state.messages, cols);
-  const lines = welcome ? [...welcomeLines(state, cols), '', ...body] : body;
-  return { lines, anchor: 'bottom', maxScroll: Math.max(0, lines.length - rows) };
+  const lines = !welcome ? body : state.messages.length === 0 ? welcomeLines(state, cols) : [...welcomeLines(state, cols), '', ...body];
+  // Content that fits hangs off the top so the welcome does not jump when the
+  // first message lands; once it overflows the newest lines win the pane.
+  return { lines, anchor: lines.length > rows ? 'bottom' : 'top', maxScroll: Math.max(0, lines.length - rows) };
 }
 
 /** How far back the chat pane can be scrolled at the size it is about to be painted. */
