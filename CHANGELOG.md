@@ -8,6 +8,8 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-09-26
+
 ### Added
 
 - **Each project's own environment reaches its planner and agents (ADR-0016).**

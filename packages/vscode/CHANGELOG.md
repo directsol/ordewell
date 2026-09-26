@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-09-26
+
 ### Added
 
 - **Each project's own environment reaches its planner and agents**, from its
