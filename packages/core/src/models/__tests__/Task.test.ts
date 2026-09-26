@@ -278,6 +278,24 @@ describe('migrateLegacyPlan', () => {
     expect(result.history).toHaveLength(2);
   });
 
+  it('carries a finished subagent into history as its brief and digest', () => {
+    const legacy: LegacyPlanState = {
+      tasks: [],
+      generatedAt: '2024-01-01T00:00:00.000Z',
+      status: 'draft',
+      runners: ['claude-code'],
+      lastUpdated: '2024-01-01T00:00:00.000Z',
+      researchLog: [{ id: 'sa1-log', type: 'subagent', subagentId: 'sa1', brief: 'find auth', outcome: 'done', digest: 'in auth.ts', timestamp: '2024-01-01T00:00:00.000Z' }],
+    };
+    const result = migrateLegacyPlan(legacy);
+    expect(result.history).toEqual([{
+      id: 'sa1-log',
+      role: 'system',
+      content: '{"subagentId":"sa1","brief":"find auth","outcome":"done","digest":"in auth.ts"}',
+      timestamp: Date.UTC(2024, 0, 1),
+    }]);
+  });
+
   it('migrates old flat plan without researchLog to executing phase with empty log', () => {
     const task = createTask({ id: 't1', title: 'Test', status: 'pending' });
     const legacy: LegacyPlanState = {

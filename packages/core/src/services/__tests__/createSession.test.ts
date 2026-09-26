@@ -740,6 +740,107 @@ describe('session id stability (persist seam)', () => {
     expect(broadcast).toHaveBeenCalledWith({ type: 'plan_token', token: 'Question: ' });
   });
 
+  describe('turn-scoped planner progress (#47)', () => {
+    async function broadcastsFor(progress: import('../../models/Task').ResearchProgress[]): Promise<unknown[]> {
+      const broadcast = vi.fn();
+      const session = makeSession({
+        broadcast,
+        aiService: {
+          startConversation: vi.fn(async (req: import('../../services/AiService').ConversationRequest) => {
+            for (const p of progress) req.onProgress(p);
+            return { kind: 'message' as const, text: 'done', researchLog: [] };
+          }),
+          hasActiveConversation: () => true,
+          reset: vi.fn(),
+        },
+      });
+      await session.startPlanning('add persistence', ['claude-code']);
+      return broadcast.mock.calls.map((c: unknown[]) => c[0]).filter((m) => (m as { type: string }).type !== 'planner_message');
+    }
+
+    it('streams reply prose of a turn as text deltas, and retracts it', async () => {
+      const sent = await broadcastsFor([
+        { type: 'text_delta', turnId: 't1', segmentId: 's1', text: 'Which ' },
+        { type: 'text_delta', turnId: 't1', segmentId: 's1', text: 'store?' },
+        { type: 'text_retracted', turnId: 't1', segmentId: 's1' },
+        { type: 'text_retracted', turnId: 't1' },
+      ]);
+
+      expect(sent).toEqual([
+        { type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Which ' },
+        { type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'store?' },
+        { type: 'planner_text_retracted', turnId: 't1', segmentId: 's1' },
+        { type: 'planner_text_retracted', turnId: 't1' },
+      ]);
+    });
+
+    // No turn to scope it to yet: the prose still reaches the stream every
+    // surface already draws, rather than vanishing.
+    it('passes prose streamed outside a turn on as plan tokens', async () => {
+      const sent = await broadcastsFor([{ type: 'text_delta', segmentId: 's1', text: 'Which store?' }]);
+
+      expect(sent).toEqual([{ type: 'plan_token', token: 'Which store?' }]);
+    });
+
+    it('keeps the turn and the subagent on thinking, steps and plan tokens', async () => {
+      const step = { id: 's1', tool: 'grep' as const, args: '{}', result: '', success: true, outcome: 'success' as const, subagentId: 'sa1', timestamp: '' };
+      const sent = await broadcastsFor([
+        { type: 'thinking', turnId: 't1', subagentId: 'sa1', text: 'look in src' },
+        { type: 'thinking', turnId: 't1', segmentId: 'th1', text: 'streamed' },
+        { type: 'tool_call', turnId: 't1', subagentId: 'sa1', tool: 'grep', toolArgs: '{}', toolCallId: 'c1' },
+        { type: 'tool_result', turnId: 't1', subagentId: 'sa1', step, toolCallId: 'c1' },
+        { type: 'plan_token', turnId: 't1', planToken: '{"tasks"' },
+      ]);
+
+      expect(sent).toEqual([
+        { type: 'plan_thinking', turnId: 't1', subagentId: 'sa1', text: 'look in src' },
+        { type: 'planner_thinking_delta', turnId: 't1', segmentId: 'th1', text: 'streamed' },
+        { type: 'research_step', turnId: 't1', subagentId: 'sa1', tool: 'grep', args: '{}', toolCallId: 'c1' },
+        { type: 'research_step_done', turnId: 't1', subagentId: 'sa1', step },
+        { type: 'plan_token', turnId: 't1', token: '{"tasks"' },
+      ]);
+    });
+
+    it('announces a subagent starting and finishing', async () => {
+      const sent = await broadcastsFor([
+        { type: 'subagent_started', turnId: 't1', subagentId: 'sa1', brief: 'find the cache', model: 'flash' },
+        { type: 'subagent_finished', turnId: 't1', subagentId: 'sa1', outcome: 'done', digest: 'src/cache.ts', usage: { inputTokens: 900 } },
+      ]);
+
+      expect(sent).toEqual([
+        { type: 'subagent_started', turnId: 't1', subagentId: 'sa1', brief: 'find the cache', model: 'flash' },
+        { type: 'subagent_finished', turnId: 't1', subagentId: 'sa1', outcome: 'done', digest: 'src/cache.ts', usage: { inputTokens: 900 } },
+      ]);
+    });
+
+    it('broadcasts running usage, subagents counted in the total and shown apart', async () => {
+      const sent = await broadcastsFor([
+        { type: 'usage', turnId: 't1', record: { source: 'claude-code', inputTokens: 1000, outputTokens: 100, contextWindow: 200000, reportedCost: { amount: 0.01, currency: 'USD' } } },
+        { type: 'usage', turnId: 't1', record: { source: 'claude-code', inputTokens: 400, outputTokens: 40, subagentId: 'sa1' } },
+      ]);
+
+      expect(sent).toEqual([
+        {
+          type: 'planner_usage', turnId: 't1',
+          totals: { inputTokens: 1000, outputTokens: 100, reportedCost: { USD: 0.01 } },
+          contextFill: { usedTokens: 1000, windowTokens: 200000 },
+        },
+        {
+          type: 'planner_usage', turnId: 't1',
+          totals: { inputTokens: 1400, outputTokens: 140, reportedCost: { USD: 0.01 } },
+          bySubagent: { sa1: { inputTokens: 400, outputTokens: 40 } },
+          contextFill: { usedTokens: 1000, windowTokens: 200000 },
+        },
+      ]);
+    });
+
+    it('leaves context fill out while the window is unknown', async () => {
+      const sent = await broadcastsFor([{ type: 'usage', record: { source: 'openai', inputTokens: 1000 } }]);
+
+      expect(sent).toEqual([{ type: 'planner_usage', totals: { inputTokens: 1000 } }]);
+    });
+  });
+
   // The orchestrator has ONE notification channel (the observer); the Session
   // turns store mutations into status_update broadcasts. There is no separate
   // onRefresh callback for a surface to wire.

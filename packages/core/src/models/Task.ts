@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { PlanIsolation } from '../interfaces/IWorktreeIsolation';
+import type { PlannerUsage, UsageRecord, UsageTotals } from './Usage';
 
 export interface UserStep {
   order: number;
@@ -110,6 +111,8 @@ export interface ResearchStep {
   /** The model's tool_call id, so a surface can match `tool_result` to the
    * pending `tool_call` it announced — robust under parallel same-tool rounds. */
   toolCallId?: string;
+  /** The research subagent that ran the call, so a reload regroups it under that subagent. */
+  subagentId?: string;
   timestamp: string;
   thinkingText?: string;
 }
@@ -121,14 +124,47 @@ export interface UserPromptEntry {
   timestamp: string;
 }
 
-export type ResearchLogEntry = ResearchStep | UserPromptEntry;
+export type SubagentOutcome = 'done' | 'failed' | 'stopped';
+
+/**
+ * One subagent's whole run, logged when it finishes: what it was asked, how it
+ * ended and what it reported. Its steps stay separate entries carrying the same
+ * `subagentId`, so an older reader that knows only steps still shows them.
+ */
+export interface SubagentLogEntry {
+  id: string;
+  type: 'subagent';
+  subagentId: string;
+  brief: string;
+  model?: string;
+  outcome: SubagentOutcome;
+  digest: string;
+  usage?: UsageTotals;
+  timestamp: string;
+}
+
+export type ResearchLogEntry = ResearchStep | UserPromptEntry | SubagentLogEntry;
 
 export interface ResearchProgress {
   // 'liveness' carries no content: a raw-line signal from the harness process
   // (ADR-0009) that reaches a surface even when a turn is producing nothing
   // visible — a subagent's filtered chatter, most often — so an idle watchdog
   // downstream doesn't mistake "nothing to show" for "nothing happening".
-  type: 'thinking' | 'tool_call' | 'tool_result' | 'plan_token' | 'interrupted' | 'liveness';
+  //
+  // The turn-scoped kinds below carry one planner turn's stream (#47); see the
+  // matching SessionMessage variants for the invariants each one keeps.
+  // 'text_delta' is reply prose (`text`, `segmentId`) and 'text_retracted'
+  // takes back an attempt's prose (`segmentId`, or all of it when absent).
+  // 'usage' reports one model call (`record`). 'subagent_started' carries
+  // `brief` and `model`; 'subagent_finished' carries `outcome`, `digest` and
+  // `usage`.
+  type:
+    | 'thinking' | 'tool_call' | 'tool_result' | 'plan_token' | 'interrupted' | 'liveness'
+    | 'text_delta' | 'text_retracted' | 'usage' | 'subagent_started' | 'subagent_finished';
+  /** Minted by whoever runs the turn and passed through untouched; absent outside a turn. */
+  turnId?: string;
+  /** One continuous run of model text — text before a tool call is its own segment. */
+  segmentId?: string;
   text?: string;
   tool?: string;
   /** Harness planners (ADR-0009): the agent's own name for a tool Ordewell has no member for. */
@@ -143,6 +179,12 @@ export interface ResearchProgress {
   toolCallId?: string;
   /** Present when this event originates from (or reports on) one spawned research subagent (issue #34). */
   subagentId?: string;
+  record?: UsageRecord;
+  brief?: string;
+  model?: string;
+  outcome?: SubagentOutcome;
+  digest?: string;
+  usage?: UsageTotals;
 }
 
 export interface ThinkingBlock {
@@ -247,6 +289,8 @@ export interface LegacyPlanState {
    * must leave it behind rather than share it.
    */
   isolation?: PlanIsolation;
+  /** Kept so a reopened session shows the same token line (#49). */
+  plannerUsage?: PlannerUsage;
 }
 
 export interface Message {
@@ -289,28 +333,23 @@ function hasTasks(raw: unknown): raw is LegacyPlanState {
   return typeof raw === 'object' && raw !== null && 'tasks' in raw && Array.isArray((raw as Record<string, unknown>).tasks);
 }
 
+function logEntryToMessage(entry: ResearchLogEntry): Message {
+  const timestamp = new Date(entry.timestamp).getTime();
+  if (!('type' in entry)) {
+    return { id: entry.id, role: 'system', content: JSON.stringify({ tool: entry.tool, args: entry.args, result: entry.result }), timestamp };
+  }
+  if (entry.type === 'subagent') {
+    const { subagentId, brief, outcome, digest } = entry;
+    return { id: entry.id, role: 'system', content: JSON.stringify({ subagentId, brief, outcome, digest }), timestamp };
+  }
+  return { id: entry.id, role: entry.type === 'user_prompt' ? 'user' : 'system', content: entry.content, timestamp };
+}
+
 function migrateHistory(raw: LegacyPlanState): Message[] {
   const messages: Message[] = [];
 
   if (raw.researchLog) {
-    for (const entry of raw.researchLog) {
-      if ('type' in entry && entry.type === 'user_prompt') {
-        messages.push({
-          id: entry.id,
-          role: 'user',
-          content: (entry as UserPromptEntry).content,
-          timestamp: new Date(entry.timestamp).getTime(),
-        });
-      } else {
-        const step = entry as ResearchStep;
-        messages.push({
-          id: step.id,
-          role: 'system',
-          content: JSON.stringify({ tool: step.tool, args: step.args, result: step.result }),
-          timestamp: new Date(step.timestamp).getTime(),
-        });
-      }
-    }
+    messages.push(...raw.researchLog.map(logEntryToMessage));
   }
 
   if (raw.queuedMessages) {
@@ -384,24 +423,7 @@ export function migrateLegacyPlan(legacy: LegacyPlanState): PlanState {
   const messages: Message[] = [];
 
   if (legacy.researchLog) {
-    for (const entry of legacy.researchLog) {
-      if ('type' in entry && entry.type === 'user_prompt') {
-        messages.push({
-          id: entry.id,
-          role: 'user',
-          content: (entry as UserPromptEntry).content,
-          timestamp: new Date(entry.timestamp).getTime(),
-        });
-      } else {
-        const step = entry as ResearchStep;
-        messages.push({
-          id: step.id,
-          role: 'system',
-          content: JSON.stringify({ tool: step.tool, args: step.args, result: step.result }),
-          timestamp: new Date(step.timestamp).getTime(),
-        });
-      }
-    }
+    messages.push(...legacy.researchLog.map(logEntryToMessage));
   }
 
   if (legacy.queuedMessages) {

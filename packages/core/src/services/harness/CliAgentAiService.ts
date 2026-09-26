@@ -8,6 +8,7 @@ import {
   type RunnerId,
   type LegacyPlanState,
 } from '../../models/Task';
+import { addUsage, type UsageTotals } from '../../models/Usage';
 import type { IConfig } from '../../interfaces/IConfig';
 import type { IFileSystem } from '../../interfaces/IFileSystem';
 import type { IWebFetcher } from '../../interfaces/IWebFetcher';
@@ -368,9 +369,17 @@ export class CliAgentAiService implements IAiService {
     signal?: AbortSignal,
   ): Promise<HarnessTurn> {
     const adapter = await this.ensureAdapter();
-    const pendingCalls = new Map<string, { tool: ResearchStep['tool']; toolLabel?: string; args: string }>();
+    const pendingCalls = new Map<string, { tool: ResearchStep['tool']; toolLabel?: string; args: string; subagentId?: string }>();
     const researchLog: ResearchStep[] = [];
     let text = '';
+    // Deltas of the reply run still open. Its complete `assistant_text`
+    // replaces them; a tool call or the end of the turn commits them as sent.
+    let streamedRun = '';
+    const commitRun = () => { text += streamedRun; streamedRun = ''; };
+    // Who streamed thinking deltas (the planner as '', or a subagent) since
+    // their last complete `thinking`, which then repeats what was already sent.
+    const streamedThinking = new Set<string>();
+    const subagentUsage = new Map<string, UsageTotals>();
     let error: string | undefined;
     let stepIndex = 0;
     let backgroundAgents = 0;
@@ -378,7 +387,7 @@ export class CliAgentAiService implements IAiService {
     const truncate = (value: string) =>
       value.length > LOG_MAX_CHARS ? `${value.slice(0, LOG_MAX_CHARS)}\n[... truncated, total ${value.length} chars]` : value;
 
-    const settle = (id: string, rawOutput: string, success: boolean, outcome: ResearchStep['outcome']) => {
+    const settle = (id: string, rawOutput: string, success: boolean, outcome: ResearchStep['outcome'], reportedBy?: string) => {
       // The other construction point for a research step (see `executeTool`).
       // A harness agent runs its own tools against its own provider, so the
       // provider half of the leak is already outside our reach — but the copy
@@ -387,6 +396,7 @@ export class CliAgentAiService implements IAiService {
       const output = redactSecrets(rawOutput);
       const call = pendingCalls.get(id);
       pendingCalls.delete(id);
+      const subagentId = call?.subagentId ?? reportedBy;
       const step: ResearchStep = {
         id: `rs-${Date.now()}-${stepIndex++}`,
         tool: call?.tool ?? 'agent_tool',
@@ -396,33 +406,67 @@ export class CliAgentAiService implements IAiService {
         success,
         outcome,
         toolCallId: id,
+        subagentId,
         timestamp: new Date().toISOString(),
       };
       researchLog.push(step);
-      onProgress({ type: 'tool_result', toolResult: output, step, toolCallId: id });
+      onProgress({ type: 'tool_result', toolResult: output, step, toolCallId: id, subagentId });
     };
 
     await adapter.send(message, (event: AgentEvent) => {
       switch (event.type) {
-        case 'assistant_text':
-          text += event.text;
+        case 'assistant_text_delta':
+          streamedRun += event.text;
           onProgress({ type: 'plan_token', planToken: event.text });
           return;
 
+        case 'assistant_text':
+          text += event.text;
+          if (streamedRun) streamedRun = '';
+          else onProgress({ type: 'plan_token', planToken: event.text });
+          return;
+
+        case 'thinking_delta':
+          streamedThinking.add(event.subagentId ?? '');
+          onProgress({ type: 'thinking', text: event.text, subagentId: event.subagentId });
+          return;
+
         case 'thinking':
-          onProgress({ type: 'thinking', text: event.text });
+          if (!streamedThinking.delete(event.subagentId ?? '')) onProgress({ type: 'thinking', text: event.text, subagentId: event.subagentId });
           return;
 
         case 'tool_call': {
+          // A subagent's call happens inside the planner's own pending call;
+          // it does not end the planner's run of text.
+          if (!event.subagentId) commitRun();
           const mapped = mapAgentTool(event.name);
           const args = JSON.stringify(normalizeAgentArgs(mapped.tool, event.args));
-          pendingCalls.set(event.id, { tool: mapped.tool, toolLabel: mapped.toolLabel, args });
-          onProgress({ type: 'tool_call', tool: mapped.tool, toolLabel: mapped.toolLabel, toolArgs: args, toolCallId: event.id });
+          const subagentId = event.subagentId;
+          pendingCalls.set(event.id, { tool: mapped.tool, toolLabel: mapped.toolLabel, args, subagentId });
+          onProgress({ type: 'tool_call', tool: mapped.tool, toolLabel: mapped.toolLabel, toolArgs: args, toolCallId: event.id, subagentId });
           return;
         }
 
         case 'tool_result':
-          settle(event.id, event.output, event.success, event.success ? 'success' : 'failure');
+          settle(event.id, event.output, event.success, event.success ? 'success' : 'failure', event.subagentId);
+          return;
+
+        case 'usage': {
+          const { subagentId } = event.record;
+          if (subagentId) subagentUsage.set(subagentId, addUsage(subagentUsage.get(subagentId) ?? {}, event.record));
+          onProgress({ type: 'usage', record: event.record });
+          return;
+        }
+
+        case 'subagent_started':
+          onProgress({ type: 'subagent_started', subagentId: event.subagentId, brief: event.brief, model: event.model });
+          return;
+
+        case 'subagent_finished':
+          onProgress({
+            type: 'subagent_finished', subagentId: event.subagentId, outcome: event.outcome, digest: event.digest,
+            usage: subagentUsage.get(event.subagentId),
+          });
           return;
 
         case 'background_agent':
@@ -456,6 +500,8 @@ export class CliAgentAiService implements IAiService {
           return;
       }
     }, signal, () => onProgress({ type: 'liveness' }));
+
+    commitRun();
 
     // Anything still pending when the turn ended never produced a result —
     // report it rather than leaving a spinner running in every surface.

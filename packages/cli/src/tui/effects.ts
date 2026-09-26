@@ -678,12 +678,25 @@ async function converse(deps: EffectDeps, sessionId: string, call: () => Promise
   };
 
   const stream = deps.api.streamPlanning(sessionId, (event) => {
-    if (event?.type === 'plan_token' && event.token) {
-      tokenBuffer += event.token;
+    const token = event?.type === 'plan_token' ? event.token : event?.type === 'planner_text_delta' ? event.text : '';
+    if (token) {
+      tokenBuffer += token;
       if (tokenTimer === null) {
         tokenTimer = setTimeout(flushTokens, TOKEN_DEBOUNCE_MS);
       }
       return;
+    }
+    // The rest of a turn's stream waits for the shared conversation view
+    // (#52); dropped here, it neither renders nor splits a token burst.
+    switch (event?.type) {
+      case 'planner_turn_started':
+      case 'planner_turn_ended':
+      case 'planner_thinking_delta':
+      case 'planner_text_retracted':
+      case 'planner_usage':
+      case 'subagent_started':
+      case 'subagent_finished':
+        return;
     }
     flushTokens();
     if (event?.type === 'approval_request') {
@@ -862,6 +875,14 @@ function onExecutionEvent(dispatch: (action: Action) => void, event: WsEvent, se
     case 'research_step_done':
     case 'approval_request':
     case 'approval_settled':
+    case 'planner_turn_started':
+    case 'planner_turn_ended':
+    case 'planner_text_delta':
+    case 'planner_thinking_delta':
+    case 'planner_text_retracted':
+    case 'planner_usage':
+    case 'subagent_started':
+    case 'subagent_finished':
       return;
 
     // Its asker already has the words, from the merge request itself; a

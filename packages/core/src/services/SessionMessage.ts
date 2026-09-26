@@ -1,4 +1,5 @@
-import type { LegacyPlanState, QueuedMessage, ResearchStep, RunnerId, Task, Verdict } from '../models/Task';
+import type { LegacyPlanState, QueuedMessage, ResearchStep, RunnerId, SubagentOutcome, Task, Verdict } from '../models/Task';
+import type { UsageTotals } from '../models/Usage';
 import type { ApprovalKind } from '../interfaces/IApproval';
 import type { ApprovalSource } from './ApprovalPolicy';
 import type { IsolationHandoff, IsolationMergeResult, TaskIsolation } from '../interfaces/IWorktreeIsolation';
@@ -41,9 +42,90 @@ export type SerializedPlan = {
   queuedMessages?: QueuedMessage[];
 };
 
+/** How a planner turn ended: the reply kind it settled on, a user stop, or a failure. */
+export type PlannerTurnOutcome = 'message' | 'plan' | 'task_ops' | 'stopped' | 'error';
+
+/**
+ * Everything a session tells its surfaces, over one broadcast seam.
+ *
+ * A planner turn (#47) streams between `planner_turn_started` and
+ * `planner_turn_ended` with the same `turnId`; every turn-scoped message in
+ * between carries it. The stream is provisional and the settled messages are
+ * authoritative:
+ * - `planner_message` replaces the streamed text of the turn's final segment —
+ *   a surface drops what it accumulated and shows the message instead.
+ * - A reply that is a JSON envelope (plan, taskOps, taskQuery) never arrives
+ *   as `planner_text_delta`; it streams as `plan_token`, the "building plan"
+ *   display.
+ * - A subagent's own text never appears in the reply; its activity arrives
+ *   tagged with its `subagentId`.
+ */
 export type SessionMessage =
   | { type: 'plan_generated'; plan: SerializedPlan; goal: string; runners: RunnerId[] }
-  | { type: 'planner_message'; content: string; timestamp: string }
+  /**
+   * The settled reply of a planner turn, emitted by the session once the turn
+   * is classified. Authoritative over any `planner_text_delta` of its turn's
+   * final segment. `turnId` is absent for replies sent outside a streamed turn.
+   */
+  | { type: 'planner_message'; content: string; timestamp: string; turnId?: string }
+  /**
+   * A planner turn began. Emitted once per turn by whoever runs the turn,
+   * before any other message carrying its `turnId`. `prompt` is the user's
+   * message when the turn answers one.
+   */
+  | { type: 'planner_turn_started'; turnId: string; prompt?: string }
+  /**
+   * A planner turn is over; nothing more carries its `turnId`. Emitted exactly
+   * once per `planner_turn_started`, stop and failure included, after the
+   * turn's `planner_message` when it has one.
+   */
+  | { type: 'planner_turn_ended'; turnId: string; outcome: PlannerTurnOutcome }
+  /**
+   * Reply prose as it streams, appended in order within its segment. A segment
+   * is one continuous run of model text; text before a tool call is its own
+   * segment, and a later segment never rewrites an earlier one. Never carries
+   * a JSON envelope or a subagent's text (see the union's invariants).
+   */
+  | { type: 'planner_text_delta'; turnId: string; segmentId: string; text: string }
+  /**
+   * Exposed reasoning as it streams, from the planner or — tagged with
+   * `subagentId` — from one of its subagents. Never part of the reply. Sent by
+   * the session for thinking a backend streams in segments of a turn; thinking
+   * without a segment still arrives as `plan_thinking`.
+   */
+  | { type: 'planner_thinking_delta'; turnId: string; segmentId?: string; subagentId?: string; text: string }
+  /**
+   * Text streamed for an attempt the turn discarded (a corrective retry) is
+   * taken back: a surface removes it. With `segmentId`, only that segment;
+   * without, all of the turn's text not yet settled by a `planner_message`.
+   */
+  | { type: 'planner_text_retracted'; turnId: string; segmentId?: string }
+  /**
+   * The planner's running usage for the session, subagents included, emitted
+   * after a model call reports usage. `totals` already contains every
+   * `bySubagent` entry. `contextFill` is the last planner prompt against the
+   * model's window, omitted when the window is unknown. Cost appears only as
+   * reported by a provider or runner (see `UsageRecord`).
+   */
+  | {
+      type: 'planner_usage';
+      turnId?: string;
+      totals: UsageTotals;
+      bySubagent?: Record<string, UsageTotals>;
+      contextFill?: { usedTokens: number; windowTokens: number };
+    }
+  /**
+   * A subagent began work on `brief`. Emitted by the planner backend that
+   * spawned it (ADR-0005 research agents, or a harness planner's own), before
+   * any message tagged with its `subagentId`.
+   */
+  | { type: 'subagent_started'; turnId?: string; subagentId: string; brief: string; model?: string }
+  /**
+   * A subagent is done; nothing more is tagged with its `subagentId`. Emitted
+   * once per `subagent_started`. `digest` is what it handed back to the
+   * planner; `usage` is its own share, already counted in `planner_usage`.
+   */
+  | { type: 'subagent_finished'; turnId?: string; subagentId: string; outcome: SubagentOutcome; digest: string; usage?: UsageTotals }
   | { type: 'status_update'; tasks: SerializedTaskStatus[] }
   | { type: 'review_needed'; tasks: SerializedTask[] }
   | { type: 'review_approved' }
@@ -67,7 +149,7 @@ export type SessionMessage =
   // that asked: merged, blocked with each repo and why, or stopped part-way
   // with the repos that stay merged.
   | { type: 'isolation_merge'; result: IsolationMergeResult }
-  | { type: 'plan_thinking'; text: string }
+  | { type: 'plan_thinking'; text: string; turnId?: string; subagentId?: string }
   // Carries no content — see `ResearchProgress['liveness']`. Exists only so a
   // surface's idle watchdog sees the harness process working even during a
   // stretch that produces nothing visible.
@@ -75,14 +157,14 @@ export type SessionMessage =
   // `toolLabel` carries a harness planner's own name for the tool (ADR-0009) —
   // always set when `tool` is `agent_tool`, so no surface has to render the
   // catch-all member name at the user.
-  | { type: 'research_step'; tool: string; toolLabel?: string; args: string; subagentId?: string; toolCallId?: string }
-  | { type: 'plan_token'; token: string }
-  | { type: 'research_step_done'; step: ResearchStep; subagentId?: string }
+  | { type: 'research_step'; tool: string; toolLabel?: string; args: string; subagentId?: string; toolCallId?: string; turnId?: string }
+  | { type: 'plan_token'; token: string; turnId?: string }
+  | { type: 'research_step_done'; step: ResearchStep; subagentId?: string; turnId?: string }
   // Planner research wants something outside its default envelope and is
   // blocked until a human answers. Broadcast rather than returned, because the
   // human may be on any surface (or several at once) and the request outlives
   // whichever HTTP call triggered it.
-  | { type: 'approval_request'; id: string; kind: ApprovalKind; subject: string; scope: string; detail?: string }
+  | { type: 'approval_request'; id: string; kind: ApprovalKind; subject: string; scope: string; detail?: string; turnId?: string }
   | { type: 'approval_settled'; id: string; granted: boolean }
   // A decision reached with no round-trip prompt: pre-approved via config,
   // remembered from earlier in this session, or the operator's mode floor

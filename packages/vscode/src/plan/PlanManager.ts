@@ -400,9 +400,10 @@ export function handleSessionMessage(
   msg: import('@ordewell/core').SessionMessage,
   deps: PlanManagerDeps,
 ): void {
-  if (msg.type === 'plan_token' && deps.isGeneratingPlan()) {
+  const token = msg.type === 'plan_token' ? msg.token : msg.type === 'planner_text_delta' ? msg.text : null;
+  if (token !== null && deps.isGeneratingPlan()) {
     const current = deps.getLastPlannerContent() ?? '';
-    deps.setLastPlannerContent(current + msg.token);
+    deps.setLastPlannerContent(current + token);
   }
   if (routePlannerStream(msg, deps.chatProvider, deps.isGeneratingPlan())) return;
   if (msg.type === 'approval_request') {
@@ -518,9 +519,11 @@ export function handleSessionMessage(
       handleIsolationHandoff({ repos: msg.repos, landed: msg.landed }, deps);
       break;
     // Handled by `routePlannerStream` above (it returns before the switch), or
-    // not rendered by this surface at all. Named so a new SessionMessage variant
-    // fails to compile until someone decides what it means here.
+    // not rendered by this surface at all — the turn-scoped planner stream waits
+    // for the shared view (#53). Named so a new SessionMessage variant fails to
+    // compile until someone decides what it means here.
     case 'plan_token':
+    case 'planner_text_delta':
     case 'plan_thinking':
     case 'planner_liveness':
     case 'research_step':
@@ -529,6 +532,13 @@ export function handleSessionMessage(
     case 'review_approved':
     case 'task_updated':
     case 'task_started':
+    case 'planner_turn_started':
+    case 'planner_turn_ended':
+    case 'planner_thinking_delta':
+    case 'planner_text_retracted':
+    case 'planner_usage':
+    case 'subagent_started':
+    case 'subagent_finished':
       break;
     // What Merge all did, whether this host asked for it or another surface did.
     // The webview shows a blocked or part-landed group per repo; core's notices

@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import type { ChildProcess } from 'child_process';
 import type { SpawnFn } from '../HeadlessRunner';
+import type { AgentAdapterFactory, AgentEvent } from '../harness/AgentAdapter';
 
 /**
  * The one test seam for harness planners (ADR-0009): a fake process boundary,
@@ -195,5 +196,24 @@ export function planJson(runner = 'claude-code'): string {
         subtasks: [],
       },
     ],
+  });
+}
+
+/**
+ * An adapter that plays one scripted event list per `send`, for the service's
+ * own mapping rules — the events no recorded transcript produces yet, or
+ * orderings a fixture would bury. Adapters themselves are proven through
+ * {@link fakeSpawn}; this skips them on purpose.
+ */
+export function scriptedAdapter(turns: AgentEvent[][], agentId = 'claude-code'): AgentAdapterFactory {
+  const queue = [...turns];
+  return () => ({
+    agentId,
+    start: async () => {},
+    send: async (_message, onEvent) => {
+      for (const event of queue.shift() ?? [{ type: 'turn_end' }]) onEvent(event);
+    },
+    nativeSessionId: () => null,
+    dispose: () => {},
   });
 }

@@ -15,6 +15,27 @@ describe('routePlannerStream', () => {
     expect(sink.sendResearchProgress).not.toHaveBeenCalled();
   });
 
+  // The webview draws streamed prose on the token stream until it adopts the
+  // shared conversation view (#53).
+  it('routes planner_text_delta to the webview token stream', () => {
+    const sink = fakeSink();
+    const handled = routePlannerStream({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Which ' }, sink, true);
+    expect(handled).toBe(true);
+    expect(sink.streamToken).toHaveBeenCalledWith('Which ');
+  });
+
+  it('drops a planner_text_delta that arrives after the turn was stopped', () => {
+    const sink = fakeSink();
+    expect(routePlannerStream({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'late' }, sink, false)).toBe(true);
+    expect(sink.streamToken).not.toHaveBeenCalled();
+  });
+
+  it('keeps a subagent\'s thinking tagged with its subagent', () => {
+    const sink = fakeSink();
+    routePlannerStream({ type: 'plan_thinking', text: 'grep first', subagentId: 'sa1' }, sink, true);
+    expect(sink.sendResearchProgress).toHaveBeenCalledWith({ type: 'thinking', text: 'grep first', subagentId: 'sa1' });
+  });
+
   it('rebuilds the exact webview shapes for thinking, tool calls, and tool results', () => {
     const sink = fakeSink();
     const step = { id: 's1', tool: 'read_file' as const, args: '{"path":"x"}', result: 'ok', timestamp: '', success: true, outcome: 'success' as const };

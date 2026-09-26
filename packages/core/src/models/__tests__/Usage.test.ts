@@ -1,0 +1,35 @@
+import { describe, it, expect } from 'vitest';
+import { addUsage, type UsageTotals } from '../Usage';
+
+describe('addUsage', () => {
+  it('sums the tokens of two calls', () => {
+    const once = addUsage({}, { source: 'openai', inputTokens: 1200, outputTokens: 300, cachedInputTokens: 800 });
+    const twice = addUsage(once, { source: 'openai', inputTokens: 50, outputTokens: 7, cachedInputTokens: 0 });
+
+    expect(twice).toEqual({ inputTokens: 1250, outputTokens: 307, cachedInputTokens: 800 });
+  });
+
+  it('leaves a measure no call reported absent rather than zero', () => {
+    const totals = addUsage(addUsage({}, { source: 'codex', outputTokens: 40 }), { source: 'codex', outputTokens: 2 });
+
+    expect(totals).toEqual({ outputTokens: 42 });
+    expect('inputTokens' in totals).toBe(false);
+    expect('reportedCost' in totals).toBe(false);
+  });
+
+  it('sums reported cost per currency, never across currencies', () => {
+    let totals: UsageTotals = {};
+    totals = addUsage(totals, { source: 'claude-code', reportedCost: { amount: 0.25, currency: 'USD' } });
+    totals = addUsage(totals, { source: 'openrouter', reportedCost: { amount: 0.5, currency: 'USD' } });
+    totals = addUsage(totals, { source: 'other', reportedCost: { amount: 3, currency: 'EUR' } });
+
+    expect(totals.reportedCost).toEqual({ USD: 0.75, EUR: 3 });
+  });
+
+  it('returns new totals and leaves the ones it was given alone', () => {
+    const before: UsageTotals = { inputTokens: 10, reportedCost: { USD: 1 } };
+    addUsage(before, { source: 'openai', inputTokens: 5, reportedCost: { amount: 1, currency: 'USD' } });
+
+    expect(before).toEqual({ inputTokens: 10, reportedCost: { USD: 1 } });
+  });
+});

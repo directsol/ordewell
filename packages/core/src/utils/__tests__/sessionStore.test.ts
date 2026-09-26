@@ -185,6 +185,46 @@ describe('sessionStore', () => {
   });
 
   describe('loadSession', () => {
+    // Written before subagent entries and planner usage existed (#47).
+    it('loads a session saved without subagent or usage fields unchanged', () => {
+      const plan = {
+        tasks: [],
+        generatedAt: '2026-05-01T10:00:00.000Z',
+        status: 'draft',
+        runners: ['claude-code'],
+        lastUpdated: '2026-05-01T10:05:00.000Z',
+        researchLog: [
+          { id: 'up-1', type: 'user_prompt', content: 'add a cache', timestamp: '2026-05-01T10:00:00.000Z' },
+          { id: 'rs-1', tool: 'read_file', args: '{"path":"a.ts"}', result: 'x', success: true, outcome: 'success', toolCallId: 'c1', timestamp: '2026-05-01T10:01:00.000Z' },
+        ],
+        conversationHistory: [{ role: 'user', content: 'add a cache', timestamp: '2026-05-01T10:00:00.000Z' }],
+      };
+      const sessionsDir = path.join(tmpDir, '.ordewell', 'sessions');
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      const meta = { id: 'session-0123456789abcdef', goal: 'add a cache', runners: ['claude-code'], taskCount: 0, status: 'draft', createdAt: plan.generatedAt, updatedAt: plan.lastUpdated };
+      fs.writeFileSync(path.join(sessionsDir, 'older.json'), JSON.stringify({ meta, plan }));
+
+      expect(loadSession(meta.id, tmpDir)!.plan).toEqual(plan);
+    });
+
+    it('keeps subagent entries and planner usage across a save and a load', () => {
+      const plan = {
+        ...createEmptyPlan(),
+        runners: ['claude-code'],
+        tasks: [],
+        researchLog: [
+          { id: 'rs-1', tool: 'grep' as const, args: '{}', result: '', success: true, outcome: 'success' as const, subagentId: 'sa-1', timestamp: '2026-05-01T10:01:00.000Z' },
+          { id: 'sa-1-log', type: 'subagent' as const, subagentId: 'sa-1', brief: 'find the cache', outcome: 'done' as const, digest: 'in src/cache.ts', usage: { inputTokens: 900 }, timestamp: '2026-05-01T10:02:00.000Z' },
+        ],
+        plannerUsage: { totals: { inputTokens: 1500, outputTokens: 200, reportedCost: { USD: 0.02 } }, bySubagent: { 'sa-1': { inputTokens: 900 } }, lastPromptTokens: 600, contextWindow: 200000 },
+      };
+      const meta = saveSession(plan, 'goal', tmpDir);
+
+      const loaded = loadSession(meta.id, tmpDir)!.plan;
+      expect(loaded.researchLog).toEqual(plan.researchLog);
+      expect(loaded.plannerUsage).toEqual(plan.plannerUsage);
+    });
+
     it('brings an ADR-0013 isolation record to the repo-group shape', () => {
       const plan = { ...createEmptyPlan(), runners: ['claude-code'], tasks: [] };
       const legacyIsolation = {
