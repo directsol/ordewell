@@ -8,6 +8,40 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **A conflicted task repairs its own conflict first (ADR-0015).** When a
+  passed task's landing conflicts, Ordewell now starts a bounded repair: the
+  same task runs again in its kept worktree, on its own runner, model and
+  mode, and is asked to merge the latest integration branch in and resolve the
+  conflict so both sides' intent survives. The repair only counts when its
+  marker appears, its branch really contains the integration tip it started
+  from, no conflict markers are left, and the normal landing goes through
+  cleanly — a repair that only claims to have done this waits for you like any
+  other conflict. `conflictRepairAttempts` (default 2; env
+  `ORDEWELL_CONFLICT_REPAIR_ATTEMPTS`, VS Code
+  `ordewell.conflictRepairAttempts`) caps how many repairs one task gets; 0
+  turns repair off and every conflict waits for you as before. A failed or
+  exhausted repair never halts the run and never overwrites the task's own
+  pass verdict — Mark complete, retry and resolve-as-a-task all still work.
+- **Conflicting tasks name their conflicting files.** The task row, the
+  conflict notice and the handoff on every surface — TUI, `ordewell handoff`,
+  VS Code and the daemon's API — show which files conflicted, and the *Merge
+  all* handoff names the tasks that only landed after a repair, with their
+  files, so review knows where to concentrate. The files are cleared when the
+  task merges or is retried.
+- **Task worktrees resolve the workspace's own packages to their own code.** A
+  worktree's `node_modules` is now a real directory mirrored entry by entry
+  from your checkout: your own workspace packages resolve to the worktree's
+  source, while every other dependency links live to the shared install. A
+  package the main checkout no longer has falls back to the copy it can still
+  reach, never to a broken link. Cleanup never touches your own
+  `node_modules`, and `worktreeSetupCommand` behaves as before.
+- **Fewer conflicts in the first place.** `CHANGELOG.md` and
+  `packages/*/CHANGELOG.md` union-merge (`.gitattributes`), so two parallel
+  tasks appending entries land cleanly; and the planner is told not to give
+  parallel tasks the same append-only file to edit.
+
 ### Changed
 
 - **Rewind forks the conversation instead of cutting it.** `/rewind` and

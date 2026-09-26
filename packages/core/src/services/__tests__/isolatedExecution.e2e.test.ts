@@ -38,13 +38,14 @@ function tempDir(): string {
   return dir;
 }
 
-function repo(root = tempDir()): string {
+function repo(root = tempDir(), files: Record<string, string> = {}): string {
   mkdirSync(root, { recursive: true });
   git(root, 'init', '-q', '-b', 'main');
   git(root, 'config', 'user.name', 'Test');
   git(root, 'config', 'user.email', 'test@example.com');
   git(root, 'config', 'commit.gpgsign', 'false');
   writeFileSync(join(root, 'README.md'), 'hello\n');
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(root, name), content);
   git(root, 'add', '-A');
   git(root, 'commit', '-q', '-m', 'initial');
   return root;
@@ -270,4 +271,168 @@ describe.skipIf(!hasGit)('isolated execution against a real repository', () => {
     expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('written by t1\n');
     expect(readFileSync(join(root, 'b.txt'), 'utf8')).toBe('written by t2\n');
   }, 30_000);
+
+  /** The repair's agent, acting in the kept worktree: the job tells it whether to really merge the tip in or only say done. */
+  type RepairJob = { merge: boolean } | undefined;
+
+  function repairingRunner(files: Record<string, string>, jobFor: (attempt: number) => RepairJob, markerOf: (taskId: string) => string) {
+    return actingRunner(files, () => false, (_taskId, n) => jobFor(n), markerOf);
+  }
+
+  /**
+   * The same runner, with an optional hold: a held spawn's session sits silent
+   * until the gate opens, which is how a test decides when a task acts.
+   */
+  function actingRunner(files: Record<string, string>, hold: (taskId: string, n: number) => boolean, jobFor: (taskId: string, n: number) => RepairJob, markerOf: (taskId: string) => string) {
+    const spawns: Array<{ taskId: string; cwd: string; prompt: string }> = [];
+    const runner: ITerminalRunner = {
+      spawn: vi.fn(async (opts) => {
+        const n = spawns.filter((s) => s.taskId === opts.taskId).length;
+        spawns.push({ taskId: opts.taskId, cwd: opts.cwd, prompt: opts.prompt });
+        const session = new FakeTerminalSession(`s-${opts.taskId}-${n}`, opts.taskId);
+        setTimeout(() => {
+          if (hold(opts.taskId, n)) return;
+          const job = jobFor(opts.taskId, n);
+          if (job?.merge) {
+            const integration = spawns.map((s) => s.prompt.match(/git merge --no-edit ([^`\n\s]+)/)?.[1]).find(Boolean)!;
+            let conflicted = false;
+            try { git(opts.cwd, 'merge', '--no-edit', integration); } catch { conflicted = true; }
+            // A conflicted merge resolves itself the way the repair is told to: keep both sides' work, commit.
+            if (conflicted) {
+              const conflictedFile = join(opts.cwd!, files[opts.taskId] ?? 'shared.txt');
+              const kept = readFileSync(conflictedFile, 'utf8')
+                .split('\n')
+                .filter((l) => !l.startsWith('<<<<<<<') && !l.startsWith('=======') && !l.startsWith('>>>>>>>') && l !== '' && !l.startsWith('written by'))
+                .concat(`written by ${opts.taskId}`);
+              writeFileSync(conflictedFile, kept.join('\n') + '\n');
+              git(opts.cwd, 'add', '-A');
+              git(opts.cwd, 'commit', '-q', '-m', `resolution by ${opts.taskId}`);
+            }
+          }
+          const file = files[opts.taskId];
+          if (file) writeFileSync(join(opts.cwd!, file), `written by ${opts.taskId}\n`);
+          if (file || job) {
+            git(opts.cwd, 'add', '-A');
+            const staged = execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: opts.cwd, env: cleanEnv(), encoding: 'utf8' });
+            if (staged.trim() !== '') git(opts.cwd, 'commit', '-q', '-m', `work by ${opts.taskId}`);
+          }
+          session.emitOutput(`done\n<<<ORDEWELL_DONE_${markerOf(opts.taskId)}>>>`);
+        }, 5);
+        return session;
+      }),
+      stop: vi.fn(),
+      stopAll: vi.fn(),
+      activeCount: 0,
+    };
+    return { runner, spawns };
+  }
+
+  /**
+   * t3 (order 2) and t2 (order 3) both rewrite shared.txt and run
+   * concurrently. The merge queue lands the lower order first, so t3's
+   * landing moves the integration branch under t2's worktree and t2's
+   * landing must then conflict.
+   */
+  function conflictPlan(): { tasks: Task[]; t4: Task } {
+    const t4 = createTask({ id: 't4', order: 4, title: 'Follow on', prompt: 'write follow.txt', dependencies: ['t2'] });
+    const tasks = [
+      createTask({ id: 't1', order: 1, title: 'Take the shared file', prompt: 'write shared.txt' }),
+      createTask({ id: 't3', order: 2, title: 'Rival writer', prompt: 'write shared.txt too' }),
+      createTask({ id: 't2', order: 3, title: 'Rewrite the shared file', prompt: 'write shared.txt again', dependencies: ['t1'] }),
+      t4,
+    ];
+    return { tasks, t4 };
+  }
+
+  it('a task whose landing conflicts repairs itself in its kept worktree, lands, and frees its dependent', async () => {
+    const root = repo(tempDir(), { 'shared.txt': 'base\n' });
+    const { tasks, t4 } = conflictPlan();
+    const first = repairingRunner({ t1: 'shared.txt' }, () => undefined, (id) => tasks.find((t) => t.id === id)!.completionMarker);
+    const isolation = createWorktreeIsolation({ config: fakeConfig({ worktreeIsolation: true }), resolvePath: async () => process.env.PATH ?? '' });
+    const output = new BufferedTaskOutputSource({ transcripts: { finalAssistantText: async () => null } });
+    const orchestrator = new TaskOrchestrator(fakeConfig(), fakeNotification(), first.runner, undefined, output, isolation);
+    orchestrator.setWorkspaceRoot(() => root);
+    let handoff: IsolationHandoff | undefined;
+    orchestrator.subscribe({ onIsolationHandoff: (h) => { handoff = h; } });
+    orchestrator.loadPlan([tasks[0]]);
+    await orchestrator.approveReview();
+    await vi.waitFor(() => expect(handoff).toBeDefined(), { timeout: 20_000 });
+    const integration = handoff!.repos[0].integrationBranch;
+    expect(git(root, 'show', `${integration}:shared.txt`)).toBe('written by t1');
+
+    const job: RepairJob = { merge: true };
+    const { runner } = actingRunner(
+      { t3: 'shared.txt', t2: 'shared.txt', t4: 'follow.txt' },
+      () => false,
+      () => job,
+      (id) => tasks.find((t) => t.id === id)!.completionMarker,
+    );
+    const notices: string[] = [];
+    const nots = fakeNotification();
+    (['info', 'warn', 'error'] as const).forEach((level) => (nots[level] as ReturnType<typeof vi.fn>).mockImplementation((m: string) => notices.push(`${level}: ${m}`)));
+    const second = new TaskOrchestrator(fakeConfig({ conflictRepairAttempts: 2, maxParallelSessions: 2 }), nots, runner, undefined, output, isolation);
+    second.setWorkspaceRoot(() => root);
+    let secondHandoff: IsolationHandoff | undefined;
+    second.subscribe({ onIsolationHandoff: (h) => { secondHandoff = h; } });
+    second.loadPlan([
+      createTask({ id: 't1', order: 1, title: 'Take the shared file', prompt: 'write shared.txt', status: 'completed' }),
+      tasks[1],
+      tasks[2],
+      t4,
+    ]);
+
+    await second.approveReview();
+    await vi.waitFor(() => expect(second.storeInstance.get('t4')!.status).toBe('completed'), { timeout: 30_000 }).catch(() => undefined);
+    process.stdout.write(notices.join('\n') + '\n');
+    expect(second.storeInstance.get('t2')!.status).toBe('completed');
+    expect(secondHandoff).toBeDefined();
+    const t2Entry = secondHandoff!.landed.find((l) => l.taskId === 't2')!;
+    expect(t2Entry.repairedFiles).toEqual(['shared.txt']);
+    const runIntegration = secondHandoff!.repos[0].integrationBranch;
+    expect(git(root, 'show', `${runIntegration}:shared.txt`)).toContain('written by t2');
+    expect(git(root, 'ls-tree', '--name-only', runIntegration, 'follow.txt')).toBe('follow.txt');
+  }, 60_000);
+
+  it('a repair that only claims to have merged is refused: the conflict waits for the user with the attempts used up', async () => {
+    const root = repo(tempDir(), { 'shared.txt': 'base\n' });
+    const t4 = createTask({ id: 't4', order: 4, title: 'Follow on', prompt: 'write follow.txt', dependencies: ['t2'] });
+    const tasks = [
+      createTask({ id: 't1', order: 1, title: 'Take the shared file', prompt: 'write shared.txt' }),
+      createTask({ id: 't3', order: 2, title: 'Rival writer', prompt: 'write shared.txt too' }),
+      createTask({ id: 't2', order: 3, title: 'Rewrite the shared file', prompt: 'write shared.txt again', dependencies: ['t1'] }),
+      t4,
+    ];
+
+    const first = repairingRunner({ t1: 'shared.txt' }, () => undefined, (id) => tasks.find((t) => t.id === id)!.completionMarker);
+    const isolation = createWorktreeIsolation({ config: fakeConfig({ worktreeIsolation: true }), resolvePath: async () => process.env.PATH ?? '' });
+    const output = new BufferedTaskOutputSource({ transcripts: { finalAssistantText: async () => null } });
+    const orchestrator = new TaskOrchestrator(fakeConfig(), fakeNotification(), first.runner, undefined, output, isolation);
+    orchestrator.setWorkspaceRoot(() => root);
+    let handoff: IsolationHandoff | undefined;
+    orchestrator.subscribe({ onIsolationHandoff: (h) => { handoff = h; } });
+    orchestrator.loadPlan([tasks[0]]);
+    await orchestrator.approveReview();
+    await vi.waitFor(() => expect(handoff).toBeDefined(), { timeout: 20_000 });
+    const integration = handoff!.repos[0].integrationBranch;
+
+    // The "repair" emits the marker but never merges the integration tip in: the ancestry check must refuse it.
+    const job: RepairJob = { merge: false };
+    const { runner, spawns } = repairingRunner({ t3: 'shared.txt', t2: 'shared.txt', t4: 'follow.txt' }, () => job, (id) => tasks.find((t) => t.id === id)!.completionMarker);
+    const second = new TaskOrchestrator(fakeConfig({ conflictRepairAttempts: 2, maxParallelSessions: 2 }), fakeNotification(), runner, undefined, output, isolation);
+    second.setWorkspaceRoot(() => root);
+    second.loadPlan([
+      createTask({ id: 't1', order: 1, title: 'Take the shared file', prompt: 'write shared.txt', status: 'completed' }),
+      tasks[1],
+      tasks[2],
+      t4,
+    ]);
+    await second.approveReview();
+
+    await vi.waitFor(() => expect(second.storeInstance.get('t2')!.status).toBe('awaiting_user'), { timeout: 30_000 });
+    // The first repair was spent, its unmerged work refused; a repair that does not land waits for the user instead of spending the next attempt.
+    expect(spawns.filter((s) => s.taskId === 't2')).toHaveLength(2);
+    expect(second.getTaskIsolation('t2')).toMatchObject({ state: 'conflict', conflictFiles: ['shared.txt'], repair: { attempt: 1, limit: 2 } });
+    expect(second.storeInstance.get('t2')!.verdict?.outcome).toBe('pass');
+    expect(git(root, 'show', `${integration}:shared.txt`)).toBe('written by t1');
+  }, 60_000);
 });

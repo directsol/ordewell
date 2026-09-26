@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- **A conflicted task repairs its own conflict first (ADR-0015).** A passed
+  task whose landing conflicts runs again in its kept worktree, on its own
+  runner and model, to merge the latest work in and resolve the conflict
+  within evidence and a bounded number of tries. The new
+  `ordewell.conflictRepairAttempts` setting (default 2; 0 turns repair off)
+  caps how many repairs one task gets. Task cards show a repairing task with
+  its attempt and the conflicting files, and mark a landed task that only
+  landed after a repair; the handoff card names repaired tasks and their
+  files. A repair that fails or runs out leaves the conflict exactly as it
+  was: files named, "Resolve as a task" and the rest of the ways out working.
+
 ### Changed
 
 - **Rewind forks the conversation instead of cutting it.** `/rewind` ("Ordewell:
