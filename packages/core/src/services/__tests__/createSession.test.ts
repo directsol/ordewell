@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createTask, type LegacyPlanState } from '../../models/Task';
 import * as sessionStore from '../../utils/sessionStore';
-import { makeSession, FakeTerminalSession } from './sessionTestKit';
+import { makeSession, FakeTerminalSession, fakeConfig } from './sessionTestKit';
+import { scriptedAdapter } from './harnessTestKit';
+import { CliAgentAiService } from '../harness/CliAgentAiService';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
 import { parsePlanJson } from '../PlanValidator';
 import type { Session } from '../createSession';
@@ -945,6 +947,85 @@ describe('session id stability (persist seam)', () => {
       await session.startPlanning('goal', ['claude-code']);
 
       expect(startConversation.mock.calls[0][0]).toMatchObject({ contextWindow: 200000 });
+    });
+  });
+
+  describe('subagent persistence (#50)', () => {
+    it('persists a harness planner\'s subagent events the same way', async () => {
+      const cli = new CliAgentAiService(
+        fakeConfig({ aiProvider: 'claude-code' }),
+        {
+          createAdapter: scriptedAdapter([[
+            { type: 'subagent_started', subagentId: 'sa1', brief: 'find the cache', model: 'haiku' },
+            { type: 'tool_call', id: 'c1', name: 'Grep', args: { pattern: 'cache' }, subagentId: 'sa1' },
+            { type: 'tool_result', id: 'c1', name: 'Grep', output: 'src/cache.ts', success: true, subagentId: 'sa1' },
+            { type: 'subagent_finished', subagentId: 'sa1', outcome: 'done', digest: 'src/cache.ts' },
+            { type: 'assistant_text', text: 'Found it.' },
+            { type: 'turn_end' },
+          ]]),
+          workspaceRoot: () => '/repo',
+        },
+      );
+      const session = makeSession({
+        aiService: {
+          startConversation: (req: import('../../services/AiService').ConversationRequest) => cli.startConversation(req),
+          hasActiveConversation: () => cli.hasActiveConversation(),
+          reset: () => cli.reset(),
+        },
+      });
+
+      await session.startPlanning('find the cache', ['claude-code']);
+
+      const saved = vi.mocked(sessionStore.saveSession).mock.calls.at(-1)![0] as LegacyPlanState;
+      const log = saved.researchLog ?? [];
+      const entry = log.find((e): e is import('../../models/Task').SubagentLogEntry => 'type' in e && e.type === 'subagent');
+      expect(entry).toMatchObject({ subagentId: 'sa1', brief: 'find the cache', model: 'haiku', outcome: 'done', digest: 'src/cache.ts' });
+      const step = log.find((e): e is import('../../models/Task').ResearchStep => !('type' in e) && e.toolCallId === 'c1');
+      expect(step).toMatchObject({ subagentId: 'sa1', tool: 'grep' });
+      // The child step is re-grouped directly under its entry, not left where
+      // the harness's own turn log happened to record it.
+      expect(log[log.indexOf(entry!) + 1]).toBe(step);
+    });
+
+    it('saves each subagent with its tagged child steps, grouped despite interleaving', async () => {
+      const step = (id: string, subagentId: string): import('../../models/Task').ResearchStep => ({
+        id, tool: 'grep', args: '{}', result: '', success: true, outcome: 'success', subagentId, timestamp: '',
+      });
+      const session = makeSession({
+        aiService: {
+          startConversation: vi.fn(async (req: import('../../services/AiService').ConversationRequest) => {
+            req.onProgress({ type: 'subagent_started', turnId: 't1', subagentId: 'sa-a', brief: 'explore a', model: 'flash' });
+            req.onProgress({ type: 'subagent_started', turnId: 't1', subagentId: 'sa-b', brief: 'explore b', model: 'flash' });
+            req.onProgress({ type: 'tool_result', turnId: 't1', subagentId: 'sa-a', step: step('a1', 'sa-a'), toolCallId: 'a1' });
+            req.onProgress({ type: 'tool_result', turnId: 't1', subagentId: 'sa-b', step: step('b1', 'sa-b'), toolCallId: 'b1' });
+            req.onProgress({ type: 'tool_result', turnId: 't1', subagentId: 'sa-a', step: step('a2', 'sa-a'), toolCallId: 'a2' });
+            req.onProgress({ type: 'subagent_finished', turnId: 't1', subagentId: 'sa-a', outcome: 'done', digest: 'found a', usage: { inputTokens: 10 } });
+            req.onProgress({ type: 'subagent_finished', turnId: 't1', subagentId: 'sa-b', outcome: 'failed', digest: 'no b' });
+            return { kind: 'message' as const, text: 'done', researchLog: [] };
+          }),
+          hasActiveConversation: () => true,
+          reset: vi.fn(),
+        },
+      });
+
+      await session.startPlanning('add persistence', ['claude-code']);
+
+      const saved = vi.mocked(sessionStore.saveSession).mock.calls.at(-1)![0] as LegacyPlanState;
+      const log = saved.researchLog ?? [];
+      const subagents = log.filter((e): e is import('../../models/Task').SubagentLogEntry => 'type' in e && e.type === 'subagent');
+      const steps = log.filter((e): e is import('../../models/Task').ResearchStep => !('type' in e));
+
+      expect(subagents.map((e) => [e.subagentId, e.brief, e.model, e.outcome, e.digest, e.usage])).toEqual([
+        ['sa-a', 'explore a', 'flash', 'done', 'found a', { inputTokens: 10 }],
+        ['sa-b', 'explore b', 'flash', 'failed', 'no b', undefined],
+      ]);
+      expect(steps.map((e) => [e.id, e.subagentId])).toEqual([
+        ['a1', 'sa-a'], ['a2', 'sa-a'], ['b1', 'sa-b'],
+      ]);
+      // Each subagent's steps sit immediately under its own entry, even though
+      // the live stream interleaved the two subagents' events.
+      const aIdx = log.findIndex((e) => 'type' in e && e.type === 'subagent' && e.subagentId === 'sa-a');
+      expect(log.slice(aIdx + 1, aIdx + 3).map((e) => e.id)).toEqual(['a1', 'a2']);
     });
   });
 

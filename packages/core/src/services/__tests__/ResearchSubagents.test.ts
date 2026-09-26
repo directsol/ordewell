@@ -51,6 +51,93 @@ function fakeFs(): { fs: IFileSystem; touched: string[] } {
 }
 
 describe('runResearchAgent', () => {
+  it('announces the subagent starting, then finishing with its digest and usage', async () => {
+    const chat = scriptedChat([textTurn('the digest')]);
+    const { fs } = fakeFs();
+    const events: unknown[] = [];
+
+    await runResearchAgent('map packages/core', {
+      createChat: () => chat,
+      fs,
+      subagentId: 'sa1',
+      model: 'flash',
+      usage: () => ({ inputTokens: 900, outputTokens: 40 }),
+      onProgress: (p) => events.push(p),
+    });
+
+    expect(events).toEqual([
+      { type: 'subagent_started', subagentId: 'sa1', brief: 'map packages/core', model: 'flash' },
+      { type: 'subagent_finished', subagentId: 'sa1', outcome: 'done', digest: 'the digest', usage: { inputTokens: 900, outputTokens: 40 } },
+    ]);
+  });
+
+  it('finishes a crashed subagent with the failed outcome', async () => {
+    const bad: ResearchChat = {
+      sendMessage: async () => { throw new Error('provider exploded'); },
+      sendToolResults: async () => { throw new Error('unreachable'); },
+    };
+    const { fs } = fakeFs();
+    const events: unknown[] = [];
+
+    await runResearchAgent('brief', { createChat: () => bad, fs, subagentId: 'sa1', onProgress: (p) => events.push(p) });
+
+    expect(events).toEqual([
+      { type: 'subagent_started', subagentId: 'sa1', brief: 'brief', model: undefined },
+      expect.objectContaining({ type: 'subagent_finished', subagentId: 'sa1', outcome: 'failed', digest: expect.stringContaining('provider exploded') }),
+    ]);
+  });
+
+  it('finishes an aborted subagent with the stopped outcome', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const chat = scriptedChat([toolTurn('glob', { pattern: '*' }), textTurn('never')]);
+    const { fs } = fakeFs();
+    const events: unknown[] = [];
+
+    await runResearchAgent('brief', { createChat: () => chat, fs, signal: ac.signal, subagentId: 'sa1', onProgress: (p) => events.push(p) });
+
+    expect(events).toEqual([
+      { type: 'subagent_started', subagentId: 'sa1', brief: 'brief', model: undefined },
+      expect.objectContaining({ type: 'subagent_finished', subagentId: 'sa1', outcome: 'stopped' }),
+    ]);
+  });
+
+  it('interleaves two concurrent subagents but keeps each one started → steps → finished', async () => {
+    const { fs } = fakeFs();
+    const events: import('../../models/Task').ResearchProgress[] = [];
+    // Each chat pauses, so the two loops interleave at the event boundary
+    // rather than running to completion one after the other.
+    const delayedChat = (id: string): ResearchChat => {
+      let toolDone = false;
+      return {
+        sendMessage: async () => {
+          await new Promise((r) => setTimeout(r, id === 'sa-a' ? 1 : 3));
+          if (!toolDone) { toolDone = true; return toolTurn('glob', { pattern: '*' }, `${id}-t1`); }
+          return textTurn(`digest ${id}`);
+        },
+        sendToolResults: async () => textTurn(`digest ${id}`),
+      };
+    };
+
+    await mapWithConcurrency(['sa-a', 'sa-b'], 2, (id) =>
+      runResearchAgent(`brief ${id}`, { createChat: () => delayedChat(id), fs, subagentId: id, onProgress: (p) => events.push(p) }));
+
+    const forA = events.filter((e) => e.subagentId === 'sa-a');
+    const forB = events.filter((e) => e.subagentId === 'sa-b');
+    // Both started before either finished — the streams really did overlap.
+    expect(events.slice(0, 2).map((e) => e.type)).toEqual(['subagent_started', 'subagent_started']);
+    for (const [id, own] of [['sa-a', forA], ['sa-b', forB]] as const) {
+      expect(own[0]).toMatchObject({ type: 'subagent_started', subagentId: id, brief: `brief ${id}` });
+      expect(own.at(-1)).toMatchObject({ type: 'subagent_finished', subagentId: id, outcome: 'done' });
+      const inner = own.slice(1, -1);
+      expect(inner.map((e) => e.type)).toEqual(['tool_call', 'tool_result']);
+      expect(inner.every((e) => e.subagentId === id)).toBe(true);
+    }
+
+    const stepIds = events.filter((e) => e.type === 'tool_result' && e.step).map((e) => e.step!.id);
+    expect(new Set(stepIds).size).toBe(stepIds.length);
+  });
+
   it('sends the prompt to a fresh chat and returns its digest', async () => {
     const chat = scriptedChat([textTurn('the digest')]);
     const createChat = vi.fn(() => chat);
@@ -90,7 +177,9 @@ describe('runResearchAgent', () => {
 
     await runResearchAgent('brief', { createChat: () => chat, fs, onProgress: (p) => events.push(p) });
 
-    expect(events).toEqual([
+    // The lifecycle events are covered separately; this test is about the
+    // tool_call/tool_result pair the inner loop reports.
+    expect(events.filter((e) => (e as { type: string }).type === 'tool_call' || (e as { type: string }).type === 'tool_result')).toEqual([
       { type: 'tool_call', tool: 'read_file', toolArgs: JSON.stringify({ path: 'src/a.ts' }), toolCallId: 't1' },
       {
         type: 'tool_result',
@@ -119,7 +208,7 @@ describe('runResearchAgent', () => {
 
     expect(reasoningFn).toBeTypeOf('function');
     reasoningFn!('Considering the auth flow…');
-    expect(events).toEqual([{ type: 'thinking', text: 'Considering the auth flow…' }]);
+    expect(events.filter((e) => (e as { type: string }).type === 'thinking')).toEqual([{ type: 'thinking', text: 'Considering the auth flow…' }]);
   });
 
   it('forwards each turn\'s reported usage through the progress channel (#49)', async () => {
@@ -147,7 +236,7 @@ describe('runResearchAgent', () => {
 
     await runResearchAgent('brief', { createChat: () => chat, fs, onProgress: (p) => events.push(p) });
 
-    expect(events).toEqual([]);
+    expect(events.filter((e) => (e as { type: string }).type === 'tool_call' || (e as { type: string }).type === 'tool_result')).toEqual([]);
   });
 
   it('refuses fetch, recursive spawn, and hallucinated write tools without touching the filesystem', async () => {

@@ -7,6 +7,7 @@ import { classifyOutcome } from './researchStepSummary';
 import type { IFileSystem, ToolOutcome } from '../interfaces/IFileSystem';
 import type { ResearchChat, ResearchTurn, ToolResult } from './BaseAiService';
 import type { ResearchProgress, ResearchStep } from '../models/Task';
+import type { UsageTotals } from '../models/Usage';
 
 /**
  * Read-only research subagents (issue #34), opencode-style: one stateless
@@ -35,7 +36,16 @@ export interface SubagentDeps {
   createChat: (onReasoning: (delta: string) => void) => ResearchChat;
   fs: IFileSystem;
   signal?: AbortSignal;
-  /** Structured thinking/tool_call/tool_result events for the UI while the subagent works (caller tags with subagentId). */
+  /** This subagent's id, stamped on its progress events and its step ids so a replay can regroup them. */
+  subagentId?: string;
+  /** The model this subagent runs on, shown with its lifecycle events. */
+  model?: string;
+  /**
+   * This subagent's running usage, read when it finishes. The provider emits
+   * usage through the caller's progress wrapper; absent means it reported none.
+   */
+  usage?: () => UsageTotals | undefined;
+  /** Structured lifecycle/thinking/tool_call/tool_result events for the UI while the subagent works. */
   onProgress?: (progress: ResearchProgress) => void;
 }
 
@@ -107,7 +117,7 @@ function nonPromptingFs(fs: IFileSystem): IFileSystem {
 async function runLoop(prompt: string, deps: SubagentDeps): Promise<string> {
   if (deps.signal?.aborted) return '[research agent aborted before starting]';
   const fs = nonPromptingFs(deps.fs);
-  const chat = deps.createChat((delta) => deps.onProgress?.({ type: 'thinking', text: delta }));
+  const chat = deps.createChat((delta) => deps.onProgress?.({ type: 'thinking', text: delta, subagentId: deps.subagentId }));
   // A provider that reports usage on the turn (OpenAI-compatible) has no
   // progress sink of its own here; reporting it through `deps.onProgress` lets
   // the spawn wrapper stamp every record with this subagent's id (#49).
@@ -132,7 +142,7 @@ async function runLoop(prompt: string, deps: SubagentDeps): Promise<string> {
       const args = { ...tc.args };
       if (tc.name === 'read_file' && !('maxBytes' in args) && !('limit' in args)) args.limit = 2000;
       const toolArgs = JSON.stringify(tc.args);
-      deps.onProgress?.({ type: 'tool_call', tool: tc.name, toolArgs, toolCallId: tc.id });
+      deps.onProgress?.({ type: 'tool_call', tool: tc.name, toolArgs, toolCallId: tc.id, subagentId: deps.subagentId });
       // Signal-aware per call, not just per round: a subagent round routinely
       // carries several calls, and a stop that only lands between rounds still
       // waits out every one of them.
@@ -141,16 +151,20 @@ async function runLoop(prompt: string, deps: SubagentDeps): Promise<string> {
         ? res.output.slice(0, SUBAGENT_LIMITS.toolOutputMaxChars) + `\n[... truncated to ${SUBAGENT_LIMITS.toolOutputMaxChars} chars, total ${res.output.length}]`
         : res.output;
       const stepEntry: ResearchStep = {
-        id: `subrs-${Date.now()}-${step}`,
+        // The subagentId in the id: two concurrent subagents run the same
+        // step numbers in the same millisecond, and an id collision would
+        // make their persisted steps indistinguishable on reload.
+        id: `subrs-${deps.subagentId ?? 'local'}-${Date.now()}-${step}`,
         tool: tc.name as ResearchStep['tool'],
         args: toolArgs,
         result: output,
         success: res.success,
         outcome: classifyOutcome(res.success, res.output),
+        subagentId: deps.subagentId,
         toolCallId: tc.id,
         timestamp: new Date().toISOString(),
       };
-      deps.onProgress?.({ type: 'tool_result', toolResult: output, step: stepEntry, toolCallId: tc.id });
+      deps.onProgress?.({ type: 'tool_result', toolResult: output, step: stepEntry, toolCallId: tc.id, subagentId: deps.subagentId });
       results.push({ name: tc.name, output, truncated: res.truncated || output.length < res.output.length, totalChars: res.output.length, id: tc.id });
     }
     turn = await chat.sendToolResults(results, deps.signal);
@@ -181,11 +195,19 @@ async function runLoop(prompt: string, deps: SubagentDeps): Promise<string> {
  * can never fail a plan or a turn.
  */
 export async function runResearchAgent(prompt: string, deps: SubagentDeps): Promise<SubagentToolOutcome> {
+  deps.onProgress?.({ type: 'subagent_started', subagentId: deps.subagentId, brief: prompt, model: deps.model });
   try {
-    return { success: true, output: await runLoop(prompt, deps), truncated: false };
+    const digest = await runLoop(prompt, deps);
+    // runLoop returns a partial digest rather than throwing when stopped, so
+    // the stop is read off the signal — an aborted run is 'stopped', not 'done'.
+    const stopped = deps.signal?.aborted ?? false;
+    deps.onProgress?.({ type: 'subagent_finished', subagentId: deps.subagentId, outcome: stopped ? 'stopped' : 'done', digest, usage: deps.usage?.() });
+    return { success: !stopped, output: digest, truncated: false };
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    return { success: false, output: `[research agent failed: ${reason}] Continue researching this area yourself with your own tools.`, truncated: false };
+    const output = `[research agent failed: ${reason}] Continue researching this area yourself with your own tools.`;
+    deps.onProgress?.({ type: 'subagent_finished', subagentId: deps.subagentId, outcome: 'failed', digest: output, usage: deps.usage?.() });
+    return { success: false, output, truncated: false };
   }
 }
 
