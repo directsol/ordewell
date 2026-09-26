@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-09-26
+
 ### Added
 
 - **A conflicted task repairs its own conflict first (ADR-0015).** A passed
