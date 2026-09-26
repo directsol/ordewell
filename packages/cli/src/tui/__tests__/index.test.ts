@@ -110,7 +110,8 @@ describe('handleTui', () => {
 
     await vi.waitFor(() => expect(fakeTerminal.draw).toHaveBeenCalled());
     expect(daemonClient.ensureDaemonOwned).toHaveBeenCalledWith(4000, { detached: false });
-    expect(daemonClient.ApiClient).toHaveBeenCalledWith(4000);
+    // With its workspace, so a session a restarted daemon dropped is re-adopted from there.
+    expect(daemonClient.ApiClient).toHaveBeenCalledWith(4000, process.cwd());
     const frame = fakeTerminal.draw.mock.calls[0][0] as string[];
     expect(frame).toHaveLength(24);
     expect(frame.join('\n')).toContain('Ordewell');

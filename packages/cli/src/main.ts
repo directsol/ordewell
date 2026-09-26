@@ -2,7 +2,7 @@
 import { migrateOldConfigDir } from '@ordewell/core';
 import { loadEnvFile } from './utils/env';
 import { printHelp } from './help';
-import { describeConnectionRefused, isConnectionRefused, resolvePort } from './daemonClient';
+import { ApiClient, describeConnectionRefused, isConnectionRefused, resolvePort } from './daemonClient';
 import { COMMANDS } from './commands/registry';
 import { cliVersion } from './version';
 import { expandSessionId, flag } from './utils';
@@ -30,6 +30,7 @@ async function main(): Promise<void> {
     console.log(cliVersion());
     return;
   }
+  ApiClient.defaultWorkspace = flag(argv, '--workspace') || undefined;
   const sessionAt = argv.indexOf('--session-id');
   if (sessionAt > 0 && argv[sessionAt + 1]) {
     argv[sessionAt + 1] = expandSessionId(argv[sessionAt + 1], flag(argv, '--workspace') || process.cwd());

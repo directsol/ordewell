@@ -117,6 +117,19 @@ describe('handlePlan', () => {
     srv.close();
   });
 
+  it('--no-chat counts the tasks of the stored plan state the one-shot endpoint answers with', async () => {
+    const hits: string[] = [];
+    const stored = { pendingTasks: COMMITTED.tasks, executionLog: [], runners: ['claude-code'] };
+    const srv = await planServer({ '/generate': { plan: stored, models: [] } }, hits);
+    const { handlePlan } = await import('../plan');
+    const { stdout } = await capture(() =>
+      handlePlan(['--goal', 'ship it', '--workspace', '/tmp', '--no-chat'], { api: new ApiClient(srv.port) }),
+    );
+    expect(stdout).toContain('Plan: 1 task (1 AI, 0 Manual)');
+    expect(stdout).toContain('Do the thing');
+    srv.close();
+  });
+
   it('renders subtasks as indented dotted-label lines', async () => {
     const hits: string[] = [];
     const srv = await planServer({ '/converse/start': { plan: WITH_SUBTASKS } }, hits);

@@ -51,7 +51,7 @@ export async function handleTui(subArgs: string[]): Promise<void> {
   // Not const: a daemon we did not start can die and be replaced by one we
   // did, and only the one we started may be stopped on the way out.
   let owned = ownedAtLaunch;
-  const api = new ApiClient(port) as unknown as OrdewellApi;
+  const api = new ApiClient(port, workspace) as unknown as OrdewellApi;
   const conversationQueue = new ConversationQueue();
 
   // eslint-disable-next-line prefer-const

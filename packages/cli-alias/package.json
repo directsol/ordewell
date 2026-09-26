@@ -31,7 +31,7 @@
     "access": "public"
   },
   "bin": {
-    "ordewell": "./bin/ordewell.js"
+    "ordewell": "bin/ordewell.js"
   },
   "files": [
     "bin",

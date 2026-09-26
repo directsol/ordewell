@@ -1,5 +1,5 @@
 import { createInterface } from 'readline';
-import { flag, flags, hasFlag, saveLastSession } from '../utils';
+import { allTasksOf, flag, flags, hasFlag, saveLastSession } from '../utils';
 import { ensureDaemon, ApiClient, resolvePort } from '../daemonClient';
 import { createApprovalHandler } from '../approvals';
 import { formatStepLine, isTransient } from './researchLog';
@@ -7,8 +7,11 @@ import type { SerializedPlan, SerializedTask, DiscoveredModel } from '@ordewell/
 import { mintSessionId, taskOrderLabel } from '@ordewell/core';
 import type { WsEvent } from '../apiClient';
 
+// The one-shot endpoint answers with the stored plan state (`pendingTasks`),
+// the conversation with the wire plan (`tasks`); read as `tasks` alone, a
+// one-shot plan printed as "Plan: 0 tasks" over the tasks it had just made.
 function planTasks(plan: SerializedPlan): SerializedTask[] {
-  return plan?.tasks || [];
+  return plan ? allTasksOf(plan as unknown as Record<string, unknown>) as unknown as SerializedTask[] : [];
 }
 
 /** The planner committed once it has actual tasks; before that it's still talking. */
@@ -96,7 +99,7 @@ function printPlan(plan: SerializedPlan, sessionId: string, runners: string[], m
       : ` (${task.assignedModel.modelLabel})`;
   };
 
-  console.log(`\nPlan: ${tasks.length} tasks (${aiCount} AI, ${manCount} Manual) — ${(plan.runners || runners).join(', ')}`);
+  console.log(`\nPlan: ${tasks.length} task${tasks.length === 1 ? '' : 's'} (${aiCount} AI, ${manCount} Manual) — ${(plan.runners || runners).join(', ')}`);
   console.log(`Session: ${sessionId}\n`);
 
   for (const t of tasks) {

@@ -36,6 +36,47 @@ describe('ApiClient', () => {
   const servers: Array<{ close: () => void }> = [];
   afterEach(() => { servers.splice(0).forEach((s) => s.close()); });
 
+  it('adopts a saved session a restarted daemon no longer holds, then retries the call once', async () => {
+    const hits: string[] = [];
+    let adopted = false;
+    const srv = await startCustomServer((req, res) => {
+      hits.push(`${req.method} ${req.url}`);
+      res.setHeader('Content-Type', 'application/json');
+      if (req.url?.startsWith('/api/sessions/session-1/load')) {
+        adopted = true;
+        return res.end(JSON.stringify({ ok: true }));
+      }
+      if (!adopted) {
+        res.statusCode = 404;
+        return res.end(JSON.stringify({ error: 'Session not found' }));
+      }
+      res.end(JSON.stringify({ ok: true }));
+    });
+    servers.push(srv);
+
+    await new ApiClient(srv.port, '/work/app').taskControl('session-1', 't1', 'retry');
+
+    expect(hits).toEqual([
+      'POST /api/plans/session-1/tasks/t1/retry',
+      'POST /api/sessions/session-1/load?workspace=%2Fwork%2Fapp',
+      'POST /api/plans/session-1/tasks/t1/retry',
+    ]);
+  });
+
+  it('leaves a session that cannot be adopted as not found, without retrying', async () => {
+    const hits: string[] = [];
+    const srv = await startCustomServer((req, res) => {
+      hits.push(`${req.method} ${req.url}`);
+      res.statusCode = 404;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Session not found' }));
+    });
+    servers.push(srv);
+
+    await expect(new ApiClient(srv.port, '/work/app').taskControl('session-9', 't1', 'retry')).rejects.toThrow('Session not found');
+    expect(hits).toHaveLength(2);
+  });
+
   it('keeps each instance bound to its own port (no shared static clobbering)', async () => {
     const a = await startServer('server-a');
     const b = await startServer('server-b');

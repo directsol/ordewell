@@ -91,11 +91,19 @@ export interface ExecutionSummary {
  */
 export type WsEvent = SessionMessage | SessionNotice;
 
-export class ApiClient {
-  private port: number;
+/** `/api/plans/<id>/…` and `/api/sessions/<id>/…`: the session a request is about. */
+const SESSION_PATH = /^\/api\/(?:plans|sessions)\/([^/?]+)/;
 
-  constructor(port?: number) {
+export class ApiClient {
+  /** Where a CLI invocation's sessions live, when a client is built without one: `--workspace`, else the cwd. */
+  static defaultWorkspace: string | undefined;
+
+  private port: number;
+  private workspace: string;
+
+  constructor(port?: number, workspace?: string) {
     this.port = port || DEFAULT_PORT;
+    this.workspace = workspace ?? ApiClient.defaultWorkspace ?? process.cwd();
   }
 
   /**
@@ -107,7 +115,28 @@ export class ApiClient {
     return readDaemonToken(this.port);
   }
 
-  private httpRequest<T = unknown>(
+  /**
+   * A daemon holds only the sessions adopted since it started, so after a
+   * restart every session-scoped call answered "Session not found" until the
+   * user ran `ordewell sessions load`. The saved session is adopted here
+   * instead — idempotent for one the daemon still holds — and the call made
+   * once more; a 404 means the first attempt never ran, so the retry cannot
+   * act twice.
+   */
+  private async httpRequest<T = unknown>(
+    method: string,
+    urlPath: string,
+    body?: object,
+  ): Promise<{ status: number; data: T }> {
+    const res = await this.rawRequest<T>(method, urlPath, body);
+    const sessionId = urlPath.match(SESSION_PATH)?.[1];
+    const missing = res.status === 404 && (res.data as { error?: unknown } | undefined)?.error === 'Session not found';
+    if (!missing || !sessionId || urlPath.split('?')[0].endsWith('/load')) return res;
+    const adopted = await this.rawRequest('POST', `/api/sessions/${sessionId}/load?workspace=${encodeURIComponent(this.workspace)}`);
+    return adopted.status === 200 ? this.rawRequest<T>(method, urlPath, body) : res;
+  }
+
+  private rawRequest<T = unknown>(
     method: string,
     urlPath: string,
     body?: object,

@@ -8,6 +8,17 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **CLI commands work after the daemon restarts.** A session the new daemon
+  had not adopted answered "Session not found" to every task command until
+  you ran `ordewell sessions load`; it is now adopted from the workspace and
+  the command goes through. The TUI recovers the same way after it restarts a
+  stopped server.
+- **`ordewell plan --no-chat` counts its tasks.** It printed "Plan: 0 tasks"
+  over the tasks it had just made; it now reports them, and says "1 task".
+- **npm no longer rewrites the `ordewell` package's `bin` path on publish.**
+
 ## [0.5.2] — 2026-09-26
 
 ### Added
