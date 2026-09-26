@@ -5,7 +5,7 @@ import { fakeConfig, fakeFileSystem } from '../../testing';
 import type { IConfig } from '../../interfaces/IConfig';
 import type { ConversationRequest } from '../AiService';
 import type { ResearchProgress, ResearchStep } from '../../models/Task';
-import { fakeSpawn, fixture, planJson, scriptedAdapter, type FakeSpawnOptions, type ScriptedReply } from './harnessTestKit';
+import { fakeSpawn, fixture, openCodeFixture, planJson, scriptedAdapter, type FakeSpawnOptions, type ScriptedReply } from './harnessTestKit';
 import type { AgentEvent } from '../harness/AgentAdapter';
 import { addPlannerUsage, plannerContextFill } from '../../models/Usage';
 
@@ -994,6 +994,23 @@ describe('CliAgentAiService — OpenCode', () => {
     expect(turn.text).toContain('cannot read outside the workspace');
   });
 
+  it('rejects a permission a subagent’s child session raises', async () => {
+    const posted: string[] = [];
+    const child = { type: 'session.created', properties: { sessionID: 'ses_child', info: { id: 'ses_child', parentID: 'ses_parent' } } };
+    const ask = { type: 'permission.asked', properties: { id: 'per_child', sessionID: 'ses_child', permission: 'bash', patterns: ['rm -rf *'] } };
+    const { svc } = openCodeService(
+      (url) => {
+        posted.push(url);
+        if (url.endsWith('/session')) return { id: 'ses_parent' };
+        return new Promise((resolve) => setTimeout(() => resolve({ info: { id: 'msg_a' }, parts: [{ id: 'p1', messageID: 'msg_a', type: 'text', text: 'ok' }] }), 0));
+      },
+      [`data: ${JSON.stringify(child)}\n`, `data: ${JSON.stringify(ask)}\n`],
+    );
+    await svc.startConversation(request({ runners: ['opencode'] }));
+
+    expect(posted).toContain('http://127.0.0.1:44100/session/ses_child/permissions/per_child');
+  });
+
   it('ignores a permission raised for a different session', async () => {
     const posted: string[] = [];
     const ask = {
@@ -1052,6 +1069,44 @@ describe('CliAgentAiService — OpenCode', () => {
     expect(seen).toContain('GET /session/ses_first');
     expect(seen.filter((s) => s === 'POST /session')).toHaveLength(2);
     expect(turn.text).toBe('ok');
+  });
+
+  /**
+   * Replays of turns recorded from `opencode serve`. The settled response is
+   * held back a macrotask, so every recorded frame reaches the adapter first —
+   * the order the live server produced them in.
+   */
+  function replayOpenCode(name: string) {
+    const { sessionId, frames, response } = openCodeFixture(name);
+    return openCodeService((url) => {
+      if (url.endsWith('/session')) return { id: sessionId };
+      return new Promise((resolve) => setTimeout(() => resolve(response), 0));
+    }, frames);
+  }
+
+  it('streams the recorded reply token by token and keeps it once in the turn text', async () => {
+    const { svc } = replayOpenCode('prose');
+
+    const { events, onProgress } = collector();
+    const turn = await svc.startConversation(request({ onProgress, runners: ['opencode'] }));
+
+    const final = 'math.ts exports a single `add` function (`(a, b) => a + b`).';
+    expect(turn.text).toBe(final);
+    expect(events.flatMap((e) => (e.type === 'plan_token' && e.planToken ? [e.planToken] : [])).join('')).toBe(final);
+    expect(events.filter((e) => e.type === 'usage')).toHaveLength(3);
+  });
+
+  it('closes a recorded subagent with its own usage and keeps its report out of the reply', async () => {
+    const { svc } = replayOpenCode('subagent');
+
+    const { events, onProgress } = collector();
+    const turn = await svc.startConversation(request({ onProgress, runners: ['opencode'] }));
+
+    expect(turn.text).toBe('`math.ts` exports a single function `add(a: number, b: number): number`.');
+    const finished = events.find((e) => e.type === 'subagent_finished');
+    // The child session's own totals as the server reported them when the
+    // recording was made: input 5244 + cache reads 9472, output 314.
+    expect(finished?.usage).toMatchObject({ inputTokens: 14716, outputTokens: 314 });
   });
 
   it('connects the event stream before sending, so an early permission is not missed', async () => {

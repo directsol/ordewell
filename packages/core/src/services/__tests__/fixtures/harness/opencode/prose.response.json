@@ -1,0 +1,71 @@
+{
+  "info": {
+    "parentID": "msg_0e01556f3001ai1Ulp443UYe5G",
+    "role": "assistant",
+    "mode": "plan",
+    "agent": "plan",
+    "path": {
+      "cwd": "/repo",
+      "root": "/repo"
+    },
+    "cost": 0.00007914,
+    "tokens": {
+      "total": 14257,
+      "input": 154,
+      "output": 23,
+      "reasoning": 0,
+      "cache": {
+        "write": 0,
+        "read": 14080
+      }
+    },
+    "modelID": "deepseek-v4-flash",
+    "providerID": "opencode-go",
+    "time": {
+      "created": 1790465894567,
+      "completed": 1790465895434
+    },
+    "finish": "stop",
+    "id": "msg_0e01568a70024X3wRO0JAnsj7G",
+    "sessionID": "ses_f1feaa975ffe52pDDnUq86j1E6"
+  },
+  "parts": [
+    {
+      "snapshot": "5a35957392aae27795d99e135560561fa9407afc",
+      "type": "step-start",
+      "id": "prt_0e0156b83001jbiLjq3ZTNxd9l",
+      "sessionID": "ses_f1feaa975ffe52pDDnUq86j1E6",
+      "messageID": "msg_0e01568a70024X3wRO0JAnsj7G"
+    },
+    {
+      "type": "text",
+      "text": "math.ts exports a single `add` function (`(a, b) => a + b`).",
+      "time": {
+        "start": 1790465895306,
+        "end": 1790465895381
+      },
+      "id": "prt_0e0156b8a001O26Nh2U7lsZljn",
+      "sessionID": "ses_f1feaa975ffe52pDDnUq86j1E6",
+      "messageID": "msg_0e01568a70024X3wRO0JAnsj7G"
+    },
+    {
+      "reason": "stop",
+      "snapshot": "5a35957392aae27795d99e135560561fa9407afc",
+      "type": "step-finish",
+      "tokens": {
+        "total": 14257,
+        "input": 154,
+        "output": 23,
+        "reasoning": 0,
+        "cache": {
+          "write": 0,
+          "read": 14080
+        }
+      },
+      "cost": 0.00007914,
+      "id": "prt_0e0156be8001KheHK6ZJsi9wuO",
+      "sessionID": "ses_f1feaa975ffe52pDDnUq86j1E6",
+      "messageID": "msg_0e01568a70024X3wRO0JAnsj7G"
+    }
+  ]
+}

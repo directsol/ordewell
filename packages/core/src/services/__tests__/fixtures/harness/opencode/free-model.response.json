@@ -1,0 +1,82 @@
+{
+  "info": {
+    "parentID": "msg_0e016de14001B3acQYmjJ0WWMC",
+    "role": "assistant",
+    "mode": "plan",
+    "agent": "plan",
+    "path": {
+      "cwd": "/repo",
+      "root": "/repo"
+    },
+    "cost": 0,
+    "tokens": {
+      "total": 14586,
+      "input": 14472,
+      "output": 0,
+      "reasoning": 127,
+      "cache": {
+        "write": 0,
+        "read": 0
+      }
+    },
+    "modelID": "nemotron-3.5-lightning-free",
+    "providerID": "opencode",
+    "time": {
+      "created": 1790465991121,
+      "completed": 1790465994976
+    },
+    "finish": "stop",
+    "id": "msg_0e016e1d1002gyJ4KiGwM7kIum",
+    "sessionID": "ses_f1fe92237ffeVjoUJeit9DBvZd"
+  },
+  "parts": [
+    {
+      "snapshot": "5a35957392aae27795d99e135560561fa9407afc",
+      "type": "step-start",
+      "id": "prt_0e016ecee001sesx2vjRbf0C7u",
+      "sessionID": "ses_f1fe92237ffeVjoUJeit9DBvZd",
+      "messageID": "msg_0e016e1d1002gyJ4KiGwM7kIum"
+    },
+    {
+      "type": "reasoning",
+      "text": "The user wants me to say hello in three words. This is a very simple request that doesn't require any tools or code exploration. I should just respond with three words that say hello.\n\nThe constraint says \"Do not use tools\" and I'm in plan mode which is read-only, but this is such a simple request that I can just answer directly without needing any tools.\n\nThree words to say hello: \"Hello there friend\" or \"Hi how are you\" or something similar.\n\nLet me just give a simple three-word hello response.",
+      "time": {
+        "start": 1790465993972,
+        "end": 1790465994762
+      },
+      "id": "prt_0e016ecf4001cGvSvuJ05P1Tmk",
+      "sessionID": "ses_f1fe92237ffeVjoUJeit9DBvZd",
+      "messageID": "msg_0e016e1d1002gyJ4KiGwM7kIum"
+    },
+    {
+      "type": "text",
+      "text": "Hello there friend",
+      "time": {
+        "start": 1790465994767,
+        "end": 1790465994872
+      },
+      "id": "prt_0e016f00f001G9xxsonNb514xn",
+      "sessionID": "ses_f1fe92237ffeVjoUJeit9DBvZd",
+      "messageID": "msg_0e016e1d1002gyJ4KiGwM7kIum"
+    },
+    {
+      "reason": "stop",
+      "snapshot": "5a35957392aae27795d99e135560561fa9407afc",
+      "type": "step-finish",
+      "tokens": {
+        "total": 14586,
+        "input": 14472,
+        "output": 0,
+        "reasoning": 127,
+        "cache": {
+          "write": 0,
+          "read": 0
+        }
+      },
+      "cost": 0,
+      "id": "prt_0e016f0a8001NT9hcUnBE4vvc8",
+      "sessionID": "ses_f1fe92237ffeVjoUJeit9DBvZd",
+      "messageID": "msg_0e016e1d1002gyJ4KiGwM7kIum"
+    }
+  ]
+}
