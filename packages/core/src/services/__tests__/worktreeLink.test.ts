@@ -150,4 +150,18 @@ describe('mirrorDir', () => {
     expect(copied).toEqual([join('.bin', 'pad')]);
     expect(readFileSync(join(task, 'node_modules', '.bin', 'pad'), 'utf8')).toBe('module.exports = 1;\n');
   });
+
+  it('repoints a workspace link to a package the main checkout no longer has, so the task resolves its own code', () => {
+    const { main, task } = checkouts();
+    // The link was installed when the package lived in the main checkout; the task has since moved it.
+    symlinkSync('../packages/a', join(main, 'node_modules', 'a'));
+    rmSync(join(main, 'packages', 'a'), { recursive: true });
+    mkdirSync(join(task, 'packages', 'a'), { recursive: true });
+    writeFileSync(join(task, 'packages', 'a', 'index.js'), 'module.exports = \'task\';\n');
+
+    mirrorDir(join(main, 'node_modules'), join(task, 'node_modules'), { platform: 'linux', from: main, to: task });
+
+    expect(realpathSync(join(task, 'node_modules', 'a'))).toBe(join(task, 'packages', 'a'));
+    expect(readFileSync(join(task, 'packages', 'a', 'index.js'), 'utf8')).toBe('module.exports = \'task\';\n');
+  });
 });
