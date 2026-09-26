@@ -1,4 +1,6 @@
 import type { AgentEvent, AgentStartOptions } from './AgentAdapter';
+import type { SubagentOutcome } from '../../models/Task';
+import type { UsageRecord } from '../../models/Usage';
 import { StdioAgentAdapter, type SpawnSpec } from './StdioAgentAdapter';
 import { probeCodexSandbox, codexSandboxUnavailableMessage, type CodexSandboxDecision } from './codexSandbox';
 
@@ -37,6 +39,46 @@ interface ThreadItem {
   query?: string;
   /** `final_answer` vs `commentary`; both are prose the user should see. */
   phase?: string;
+  /** `collabAgentToolCall`: the brief a spawned subagent was given. */
+  prompt?: string | null;
+  /** `collabAgentToolCall`: the model a spawned subagent runs. */
+  model?: string | null;
+  /** `collabAgentToolCall`: threads on the receiving end of the call. */
+  receiverThreadIds?: string[];
+  /** `collabAgentToolCall`: last known status of each target thread. */
+  agentsStates?: Record<string, { status?: string; message?: string | null } | undefined>;
+}
+
+/** One model call's usage, from `thread/tokenUsage/updated` — see {@link emitUsage}. */
+interface TokenUsageBreakdown {
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  reasoningOutputTokens?: number;
+}
+
+interface ThreadTokenUsageParams {
+  threadId?: string;
+  tokenUsage?: {
+    last?: TokenUsageBreakdown;
+    modelContextWindow?: number | null;
+  };
+}
+
+/**
+ * The terminal `CollabAgentStatus` a subagent has reached, or undefined while it
+ * is still working. `notFound` is terminal the only way it can be: the thread
+ * the planner asked about is not there, so the work will not report.
+ */
+function subagentOutcome(status: string | undefined): SubagentOutcome | undefined {
+  switch (status) {
+    case 'completed': return 'done';
+    case 'errored':
+    case 'notFound': return 'failed';
+    case 'interrupted':
+    case 'shutdown': return 'stopped';
+    default: return undefined;
+  }
 }
 
 /**
@@ -103,6 +145,8 @@ export class CodexAdapter extends StdioAgentAdapter {
   readonly agentId = 'codex';
 
   private threadId: string | null = null;
+  /** The model Codex opened the thread with — usage records name it. */
+  private threadModel: string | null = null;
   private nextRequestId = 100;
   private settleHandshake: ((ok: boolean) => void) | null = null;
   private handshakeError: string | null = null;
@@ -112,6 +156,16 @@ export class CodexAdapter extends StdioAgentAdapter {
   private resumeAttempted = false;
   private resumeFallbackSent = false;
   private sandbox: CodexSandboxDecision = 'default';
+  /**
+   * Subagent threads this session has spawned, keyed by the child thread id.
+   * Codex runs a subagent in its own thread and replays both threads' events on
+   * one stream; the thread id is what tells them apart (see {@link subagentOf}).
+   */
+  private readonly subagents = new Map<string, { model?: string }>();
+  /** Subagents whose `subagent_started` has been emitted, so a second sighting cannot repeat it. */
+  private readonly startedSubagents = new Set<string>();
+  /** Subagents already reported finished, so a later status update cannot repeat it. */
+  private readonly finishedSubagents = new Set<string>();
 
   protected spawnSpec(opts: AgentStartOptions): SpawnSpec {
     this.startOpts = opts;
@@ -225,6 +279,8 @@ export class CodexAdapter extends StdioAgentAdapter {
       }
       this.threadId = thread.id;
       this.sessionId = thread.id;
+      const model = msg.result?.model;
+      this.threadModel = typeof model === 'string' ? model : null;
       this.settleHandshake?.(true);
       return;
     }
@@ -241,13 +297,45 @@ export class CodexAdapter extends StdioAgentAdapter {
 
     switch (msg.method) {
       case 'item/started':
-        this.emitItemStart(msg.params?.item as ThreadItem | undefined, emit);
+        this.emitItemStart(msg.params?.item as ThreadItem | undefined, emit, this.subagentOf(msg.params?.threadId));
         return;
       case 'item/completed':
-        this.emitItemDone(msg.params?.item as ThreadItem | undefined, emit);
+        this.emitItemDone(msg.params?.item as ThreadItem | undefined, emit, this.subagentOf(msg.params?.threadId));
+        return;
+      // Reply text streams before its completed item. The completed item is
+      // authoritative — the service replaces the deltas with it — so both are
+      // forwarded and no run is counted twice.
+      case 'item/agentMessage/delta': {
+        const params = msg.params as { threadId?: string; delta?: string } | undefined;
+        // A subagent's words are addressed to the planner, not the user: let
+        // them through and the planner's reply becomes an answer to a prompt
+        // the user never sent.
+        if (!params?.delta || this.subagentOf(params.threadId)) return;
+        emit({ type: 'assistant_text_delta', text: params.delta });
+        return;
+      }
+      // `summaryTextDelta` streams a reasoning summary part, `textDelta` the raw
+      // reasoning. Both are thinking; the completed item repeats whichever it
+      // carries and is superseded by what streamed.
+      case 'item/reasoning/summaryTextDelta':
+      case 'item/reasoning/textDelta': {
+        const params = msg.params as { threadId?: string; delta?: string } | undefined;
+        if (!params?.delta) return;
+        const subagentId = this.subagentOf(params.threadId);
+        emit({ type: 'thinking_delta', text: params.delta, ...(subagentId ? { subagentId } : {}) });
+        return;
+      }
+      // Marks where one summary part ends and the next begins. The text arrives
+      // as deltas; the boundary carries none of its own.
+      case 'item/reasoning/summaryPartAdded':
+        return;
+      case 'thread/tokenUsage/updated':
+        this.emitUsage(msg.params as ThreadTokenUsageParams | undefined, emit);
         return;
       case 'turn/started':
-        this.turnHasText = false;
+        // A subagent runs its own turn in its own thread; its start must not
+        // reset the planner turn's paragraph state.
+        if (!this.subagentOf(msg.params?.threadId)) this.turnHasText = false;
         return;
       // Codex reports a setup problem once, at startup, and then plans anyway.
       // Surfacing it is enough: the warning is not always fatal, and refusing to
@@ -271,12 +359,19 @@ export class CodexAdapter extends StdioAgentAdapter {
       // rate limit or an exhausted context window would otherwise hang until
       // the process died.
       case 'error': {
+        // A subagent's failure is reported by its own lifecycle, not by ending
+        // the planner's turn: the planner is still working and may recover.
+        if (this.subagentOf(msg.params?.threadId)) return;
         const failure = msg.params as { error?: { message?: string }; willRetry?: boolean } | undefined;
         if (failure?.willRetry) return;
         emit({ type: 'error', message: failure?.error?.message || 'Codex ended the turn with an error.' });
         return;
       }
       case 'turn/completed': {
+        // A subagent thread completes independently of the planner's turn.
+        // Settling the planner on a child's completion cut the turn short
+        // before the planner had read the subagent's report.
+        if (this.subagentOf(msg.params?.threadId)) return;
         const turn = msg.params?.turn as { status?: string; error?: { message?: string } } | undefined;
         if (turn?.status === 'failed') {
           emit({ type: 'error', message: turn.error?.message || 'Codex ended the turn with an error.' });
@@ -285,11 +380,58 @@ export class CodexAdapter extends StdioAgentAdapter {
         }
         return;
       }
-      // Deltas (`item/agentMessage/delta`, `item/reasoning/*Delta`) are skipped:
-      // the completed item follows and would otherwise be counted twice.
+      // Deltas for command output and MCP progress are skipped: the completed
+      // item follows and would otherwise be counted twice.
       default:
         return;
     }
+  }
+
+  /**
+   * The child thread id when `threadId` names a subagent's thread, or undefined
+   * for the planner's own. Codex replays both threads on one stream and only
+   * the thread id separates them; the first time a thread is seen it is
+   * registered so its usage and steps can be tagged with it as a subagent id.
+   */
+  private subagentOf(threadId: unknown): string | undefined {
+    if (typeof threadId !== 'string' || !this.threadId || threadId === this.threadId) return undefined;
+    this.subagents.set(threadId, this.subagents.get(threadId) ?? {});
+    return threadId;
+  }
+
+  /**
+   * One usage record per model call, from `thread/tokenUsage/updated`.
+   *
+   * The notification carries two breakdowns: `total` is cumulative for the
+   * thread and `last` is the model call that just finished (verified against
+   * the installed binary — a two-call turn ends with `last` equal to the second
+   * call and `total` equal to both summed). Emitting `total` on each update
+   * would count every earlier call again, so `last` is the record. Mapping
+   * `last.outputTokens` already includes `reasoningOutputTokens` — the thread
+   * total is `inputTokens + outputTokens`, not a sum of three — so reasoning is
+   * not added a second time. Codex reports no price.
+   */
+  private emitUsage(params: ThreadTokenUsageParams | undefined, emit: (e: AgentEvent) => void): void {
+    const last = params?.tokenUsage?.last;
+    if (!last) return;
+    const subagentId = this.subagentOf(params?.threadId);
+    const record: UsageRecord = { source: this.agentId };
+    const model = subagentId ? this.subagents.get(subagentId)?.model : this.threadModel ?? this.startOpts?.model;
+    if (model) record.model = model;
+    let hasMeasure = false;
+    if (last.inputTokens !== undefined) { record.inputTokens = last.inputTokens; hasMeasure = true; }
+    if (last.outputTokens !== undefined) { record.outputTokens = last.outputTokens; hasMeasure = true; }
+    if (last.cachedInputTokens !== undefined) { record.cachedInputTokens = last.cachedInputTokens; hasMeasure = true; }
+    if (!hasMeasure) return;
+    if (subagentId) {
+      record.subagentId = subagentId;
+    } else {
+      // A subagent's window says nothing about the planner's own context. A
+      // reported window of 0 means "not known", not "no room".
+      const window = params?.tokenUsage?.modelContextWindow;
+      if (typeof window === 'number' && window > 0) record.contextWindow = window;
+    }
+    emit({ type: 'usage', record });
   }
 
   /**
@@ -326,42 +468,56 @@ export class CodexAdapter extends StdioAgentAdapter {
   }
 
   /** A tool item entering `inProgress` — announce the call so the timeline moves. */
-  private emitItemStart(item: ThreadItem | undefined, emit: (e: AgentEvent) => void): void {
+  private emitItemStart(item: ThreadItem | undefined, emit: (e: AgentEvent) => void, subagentId?: string): void {
     if (!item?.id) return;
     switch (item.type) {
       case 'commandExecution':
-        emit({ type: 'tool_call', id: item.id, name: 'shell', args: { command: item.command, cwd: item.cwd } });
+        emit({ type: 'tool_call', id: item.id, name: 'shell', args: { command: item.command, cwd: item.cwd }, ...(subagentId ? { subagentId } : {}) });
         return;
       case 'mcpToolCall':
-        emit({ type: 'tool_call', id: item.id, name: item.tool ?? 'mcp_tool', args: item.arguments ?? {} });
+        emit({ type: 'tool_call', id: item.id, name: item.tool ?? 'mcp_tool', args: item.arguments ?? {}, ...(subagentId ? { subagentId } : {}) });
         return;
       case 'dynamicToolCall':
-        emit({ type: 'tool_call', id: item.id, name: item.tool ?? 'tool', args: item.arguments ?? {} });
+        emit({ type: 'tool_call', id: item.id, name: item.tool ?? 'tool', args: item.arguments ?? {}, ...(subagentId ? { subagentId } : {}) });
         return;
       case 'webSearch':
-        emit({ type: 'tool_call', id: item.id, name: 'web_search', args: { query: item.query } });
+        emit({ type: 'tool_call', id: item.id, name: 'web_search', args: { query: item.query }, ...(subagentId ? { subagentId } : {}) });
+        return;
+      // Delegation is a tool call like any other: the planner's own call is
+      // unparented, and shows in the timeline as the agent tool it really is.
+      case 'collabAgentToolCall':
+        emit({
+          type: 'tool_call', id: item.id, name: item.tool ?? 'collab',
+          args: { prompt: item.prompt, model: item.model, receiverThreadIds: item.receiverThreadIds },
+        });
         return;
       default:
         return;
     }
   }
 
-  private emitItemDone(item: ThreadItem | undefined, emit: (e: AgentEvent) => void): void {
+  private emitItemDone(item: ThreadItem | undefined, emit: (e: AgentEvent) => void, subagentId?: string): void {
     if (!item?.type) return;
     const id = item.id ?? '';
+    if (item.type === 'collabAgentToolCall') {
+      this.emitCollabItem(item, id, emit);
+      return;
+    }
     switch (item.type) {
       // A Codex turn is several whole messages — progress commentary, then the
       // final answer — not a token stream. Concatenated raw they run together
       // ("…as requested.`head` failed because…"), so each one after the first
       // opens a paragraph.
       case 'agentMessage':
-        if (!item.text) return;
+        // A subagent's message is addressed to the planner, not the user. Its
+        // report reaches the user through the planner's own synthesis.
+        if (subagentId || !item.text) return;
         emit({ type: 'assistant_text', text: this.turnHasText ? `\n\n${item.text}` : item.text });
         this.turnHasText = true;
         return;
       case 'reasoning': {
         const text = flattenText(item.summary) || flattenText(item.content) || item.text || '';
-        if (text.trim()) emit({ type: 'thinking', text });
+        if (text.trim()) emit({ type: 'thinking', text, ...(subagentId ? { subagentId } : {}) });
         return;
       }
       case 'commandExecution':
@@ -369,6 +525,7 @@ export class CodexAdapter extends StdioAgentAdapter {
           type: 'tool_result', id, name: 'shell',
           output: item.aggregatedOutput ?? '',
           success: (item.exitCode ?? 0) === 0,
+          ...(subagentId ? { subagentId } : {}),
         });
         return;
       case 'mcpToolCall':
@@ -377,20 +534,66 @@ export class CodexAdapter extends StdioAgentAdapter {
           type: 'tool_result', id, name: item.tool ?? 'tool',
           output: item.error ?? flattenText(item.result) ?? '',
           success: item.status !== 'error' && item.success !== false && !item.error,
+          ...(subagentId ? { subagentId } : {}),
         });
         return;
       // The query is empty when the search starts and filled when it lands, so
       // the result — not the call — is what carries what was actually searched.
       case 'webSearch':
-        emit({ type: 'tool_result', id, name: 'web_search', output: item.query ?? '', success: true });
+        emit({ type: 'tool_result', id, name: 'web_search', output: item.query ?? '', success: true, ...(subagentId ? { subagentId } : {}) });
         return;
       // `fileChange` can only appear if the read-only sandbox was bypassed;
       // reporting it keeps that visible rather than silent.
       case 'fileChange':
-        emit({ type: 'tool_result', id, name: 'file_change', output: JSON.stringify(item), success: false });
+        emit({ type: 'tool_result', id, name: 'file_change', output: JSON.stringify(item), success: false, ...(subagentId ? { subagentId } : {}) });
         return;
       default:
         return;
     }
+  }
+
+  /**
+   * A `collabAgentToolCall` — the planner spawning, waiting on or messaging a
+   * subagent. The call itself is planner-level tool activity; the lifecycle it
+   * carries becomes `subagent_started` / `subagent_finished`. Codex tags every
+   * collab item with the parent thread, so this one never runs for a subagent.
+   */
+  private emitCollabItem(item: ThreadItem, id: string, emit: (e: AgentEvent) => void): void {
+    if (item.tool === 'spawnAgent') {
+      // `receiverThreadIds` is empty while the call is in progress and names
+      // the child thread once it lands, which is the first moment the subagent
+      // has an id to report under.
+      for (const child of item.receiverThreadIds ?? []) {
+        if (this.startedSubagents.has(child)) continue;
+        const model = item.model || undefined;
+        this.startedSubagents.add(child);
+        this.subagents.set(child, { model });
+        emit({ type: 'subagent_started', subagentId: child, brief: item.prompt ?? '', ...(model ? { model } : {}) });
+      }
+    }
+    // The subagent's outcome arrives on the call that observed it — a `wait`, or
+    // any later collab call's `agentsStates` — as the child's last words.
+    for (const [child, state] of Object.entries(item.agentsStates ?? {})) {
+      if (!state || this.finishedSubagents.has(child)) continue;
+      const outcome = subagentOutcome(state.status);
+      if (!outcome) continue;
+      this.subagents.set(child, this.subagents.get(child) ?? {});
+      this.finishedSubagents.add(child);
+      emit({ type: 'subagent_finished', subagentId: child, outcome, digest: state.message ?? '' });
+    }
+    emit({
+      type: 'tool_result', id, name: item.tool ?? 'collab',
+      output: this.collabSummary(item),
+      success: item.status !== 'failed' && item.status !== 'interrupted',
+    });
+  }
+
+  /** The readable result of a collab call: the brief it sent, or what came back. */
+  private collabSummary(item: ThreadItem): string {
+    const agents = Object.values(item.agentsStates ?? {})
+      .map((state) => state?.message)
+      .filter((message): message is string => !!message);
+    if (agents.length) return agents.join('\n');
+    return item.prompt ?? '';
   }
 }
