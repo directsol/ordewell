@@ -1,3 +1,5 @@
+import type { SubagentOutcome } from '../../models/Task';
+import type { UsageRecord } from '../../models/Usage';
 import type { AgentEvent, AgentStartOptions } from './AgentAdapter';
 import { StdioAgentAdapter, type SpawnSpec } from './StdioAgentAdapter';
 
@@ -29,6 +31,22 @@ interface ClaudeBlock {
   is_error?: boolean;
 }
 
+interface ClaudeUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
+/** One Anthropic Messages streaming event, as `--include-partial-messages` relays it. */
+interface ClaudeStreamEvent {
+  type: string;
+  message?: { model?: string };
+  usage?: ClaudeUsage;
+  content_block?: { type: string };
+  delta?: { type?: string; text?: string; thinking?: string };
+}
+
 interface ClaudeLine {
   type: string;
   subtype?: string;
@@ -37,9 +55,60 @@ interface ClaudeLine {
   is_error?: boolean;
   request_id?: string;
   request?: { subtype?: string; tool_name?: string; input?: Record<string, unknown> };
-  message?: { content?: ClaudeBlock[] | string };
+  message?: { id?: string; model?: string; usage?: ClaudeUsage; content?: ClaudeBlock[] | string };
   /** Non-null on every line produced inside a subagent the planner spawned. */
   parent_tool_use_id?: string | null;
+  event?: ClaudeStreamEvent;
+  /** The tool's structured result beside its text; for an `Agent` call it holds the subagent's last call's usage. */
+  tool_use_result?: unknown;
+  /** Cumulative over the whole agent session — including turns before a `--resume`. */
+  total_cost_usd?: number;
+  modelUsage?: Record<string, { contextWindow?: number }>;
+  /** `task_notification`: which `Agent` call finished, how, and what it reported. */
+  tool_use_id?: string;
+  status?: string;
+  summary?: string;
+}
+
+/** The tool Claude Code delegates to a subagent with — `Task` before it was renamed `Agent`. */
+const SUBAGENT_TOOLS = new Set(['Agent', 'Task']);
+
+/**
+ * Anthropic's `input_tokens` counts only the uncached tail of the prompt: cache
+ * reads and cache writes are reported beside it, not inside it. The prompt the
+ * model saw is all three, and only the reads were served from cache — a cache
+ * write is billed as fresh input, above the base rate.
+ */
+function usageRecord(usage: ClaudeUsage, model: string | undefined, subagentId?: string): UsageRecord {
+  const cached = usage.cache_read_input_tokens ?? 0;
+  const record: UsageRecord = {
+    source: 'claude-code',
+    inputTokens: (usage.input_tokens ?? 0) + cached + (usage.cache_creation_input_tokens ?? 0),
+    cachedInputTokens: cached,
+  };
+  if (model) record.model = model;
+  if (usage.output_tokens !== undefined) record.outputTokens = usage.output_tokens;
+  if (subagentId) record.subagentId = subagentId;
+  return record;
+}
+
+/** The last call's usage an `Agent` result carries, and the model that made it. */
+function subagentFinalCall(result: unknown): { usage: ClaudeUsage; model?: string } | null {
+  if (typeof result !== 'object' || result === null) return null;
+  const { usage, resolvedModel } = result as { usage?: unknown; resolvedModel?: unknown };
+  if (typeof usage !== 'object' || usage === null) return null;
+  return { usage: usage as ClaudeUsage, model: typeof resolvedModel === 'string' ? resolvedModel : undefined };
+}
+
+/** Anything but a clean finish is not reported as one. */
+function notificationOutcome(status: string | undefined): SubagentOutcome {
+  if (status === 'completed') return 'done';
+  if (status === 'killed' || status === 'stopped') return 'stopped';
+  return 'failed';
+}
+
+function blocksOf(msg: ClaudeLine): ClaudeBlock[] {
+  return Array.isArray(msg.message?.content) ? msg.message.content : [];
 }
 
 /** Tool results arrive as a string, or as a content-block array. Flatten both. */
@@ -69,6 +138,23 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
 
   /** Whether this turn has already emitted reply text — see {@link handleLine}. */
   private turnHasText = false;
+  /** The text block streaming now follows earlier reply text, so its first delta opens the paragraph. */
+  private pendingBreak = false;
+  /** The model answering the planner's current message, as its `message_start` named it. */
+  private plannerModel: string | undefined;
+  /**
+   * The session's `total_cost_usd` as last reported. Undefined after a resume:
+   * the CLI restores the resumed session's running total, and what Ordewell
+   * already counted of it is not ours to know here.
+   */
+  private reportedCostUsd: number | undefined = 0;
+  /**
+   * Subagents started and not yet finished, keyed by the `Agent` call's id.
+   * Kept across turns: a backgrounded one reports after its turn has ended.
+   */
+  private readonly openSubagents = new Map<string, { background: boolean }>();
+  /** Subagent messages already counted. A message arrives as one line per content block, each repeating its usage. */
+  private readonly countedSubagentMessages = new Set<string>();
 
   protected spawnSpec(opts: AgentStartOptions): SpawnSpec {
     const args = [
@@ -89,7 +175,10 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
     // that offers it. Passing nothing is the same run without the warning on
     // stderr.
     if (opts.effort && opts.effort !== 'adaptive') args.push('--effort', opts.effort);
-    if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
+    if (opts.resumeSessionId) {
+      args.push('--resume', opts.resumeSessionId);
+      this.reportedCostUsd = undefined;
+    }
     return { command: 'claude', args };
   }
 
@@ -108,12 +197,11 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
     if (msg.session_id) this.sessionId = msg.session_id;
 
     // Subagent traffic, replayed on the same stream with the spawning tool call
-    // named. It is not the planner talking: forwarded verbatim, a subagent's
-    // running commentary lands in the planner's own reply, and the user reads
-    // an answer addressed to a prompt they never sent. The parent's `Agent`
-    // call and its result are the planner-level record of that work, and they
-    // arrive unparented like every other tool call.
-    if (msg.parent_tool_use_id) return;
+    // named. It is not the planner talking: forwarded as the planner's own, a
+    // subagent's running commentary lands in the reply, and the user reads an
+    // answer addressed to a prompt they never sent. So its steps are tagged
+    // with the subagent and its text is never reply text.
+    const subagentId = msg.parent_tool_use_id ?? undefined;
 
     switch (msg.type) {
       // The control channel: Claude asks whether a tool may run when its mode
@@ -139,7 +227,11 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
       }
 
       case 'assistant':
-        for (const block of Array.isArray(msg.message?.content) ? msg.message!.content as ClaudeBlock[] : []) {
+        if (subagentId) {
+          this.handleSubagentMessage(msg, subagentId, emit);
+          return;
+        }
+        for (const block of blocksOf(msg)) {
           // A turn is several whole messages — narration between tool rounds,
           // then the final answer — not a token stream. Concatenated raw they
           // run together ("…in parallel.That agent returned…"), so each one
@@ -149,26 +241,36 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
             this.turnHasText = true;
           } else if (block.type === 'thinking' && block.thinking) emit({ type: 'thinking', text: block.thinking });
           else if (block.type === 'tool_use' && block.name) {
-            emit({ type: 'tool_call', id: block.id ?? block.name, name: block.name, args: block.input ?? {} });
+            const id = block.id ?? block.name;
+            emit({ type: 'tool_call', id, name: block.name, args: block.input ?? {} });
+            if (SUBAGENT_TOOLS.has(block.name) && block.id) this.startSubagent(block.id, block.input ?? {}, emit);
           }
         }
         return;
 
       case 'user':
         // The transport echoes tool results back as a synthetic user message.
-        for (const block of Array.isArray(msg.message?.content) ? msg.message!.content as ClaudeBlock[] : []) {
+        for (const block of blocksOf(msg)) {
           if (block.type !== 'tool_result') continue;
+          const id = block.tool_use_id ?? '';
           const output = flattenContent(block.content);
-          if (output.includes(ASYNC_LAUNCH_MARKER)) {
-            emit({ type: 'background_agent', id: block.tool_use_id ?? '' });
+          const subagent = subagentId ? undefined : this.openSubagents.get(id);
+          if (!subagentId && output.includes(ASYNC_LAUNCH_MARKER)) {
+            emit({ type: 'background_agent', id });
+            if (subagent) subagent.background = true;
+          } else if (subagent) {
+            this.finishForegroundSubagent(id, msg.tool_use_result, output, block.is_error === true, emit);
           }
-          emit({
-            type: 'tool_result',
-            id: block.tool_use_id ?? '',
-            name: '',
-            output,
-            success: block.is_error !== true,
-          });
+          emit({ type: 'tool_result', id, name: '', output, success: block.is_error !== true, subagentId });
+        }
+        return;
+
+      case 'system':
+        // A backgrounded subagent's only completion signal: its `Agent` call
+        // returned at launch, long before the work ended.
+        if (msg.subtype === 'task_notification' && msg.tool_use_id && this.openSubagents.get(msg.tool_use_id)?.background) {
+          this.openSubagents.delete(msg.tool_use_id);
+          emit({ type: 'subagent_finished', subagentId: msg.tool_use_id, outcome: notificationOutcome(msg.status), digest: msg.summary ?? '' });
         }
         return;
 
@@ -176,6 +278,7 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
         // `result` closes every turn — success or failure. The final assistant
         // text (which carries the plan JSON) already arrived as assistant
         // blocks, so this only settles the turn.
+        this.reportSessionCost(msg, emit);
         if (msg.is_error || (msg.subtype && msg.subtype !== 'success')) {
           emit({ type: 'error', message: msg.result?.trim() || `Claude Code ended the turn: ${msg.subtype ?? 'error'}` });
         } else {
@@ -183,11 +286,96 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
         }
         return;
 
-      // `system`/`stream_event` carry init metadata and partial deltas. The
-      // session id is picked up above; partials are ignored because the
-      // complete blocks follow and would otherwise be counted twice.
+      case 'stream_event':
+        // Only the planner's own messages stream; a subagent's arrive whole.
+        if (msg.event && !subagentId) this.handleStreamEvent(msg.event, emit);
+        return;
+
       default:
         return;
     }
+  }
+
+  private startSubagent(id: string, input: Record<string, unknown>, emit: (event: AgentEvent) => void): void {
+    this.openSubagents.set(id, { background: false });
+    const brief = typeof input.description === 'string' ? input.description : typeof input.prompt === 'string' ? input.prompt : '';
+    emit({ type: 'subagent_started', subagentId: id, brief, model: typeof input.model === 'string' ? input.model : undefined });
+  }
+
+  /**
+   * A subagent's messages do not stream, so each line's usage is the snapshot
+   * taken before generation: the prompt is real, the output a placeholder.
+   * Only the prompt side is reported — an absent output count reads as "not
+   * reported", a placeholder would read as a measurement.
+   */
+  private handleSubagentMessage(msg: ClaudeLine, subagentId: string, emit: (event: AgentEvent) => void): void {
+    const messageId = msg.message?.id;
+    if (msg.message?.usage && messageId && !this.countedSubagentMessages.has(messageId)) {
+      this.countedSubagentMessages.add(messageId);
+      emit({ type: 'usage', record: usageRecord({ ...msg.message.usage, output_tokens: undefined }, msg.message.model, subagentId) });
+    }
+    for (const block of blocksOf(msg)) {
+      if (block.type === 'thinking' && block.thinking) emit({ type: 'thinking', text: block.thinking, subagentId });
+      else if (block.type === 'tool_use' && block.name) {
+        emit({ type: 'tool_call', id: block.id ?? block.name, name: block.name, args: block.input ?? {}, subagentId });
+      }
+    }
+  }
+
+  /**
+   * The `Agent` call returned, so the subagent is done. Its last call — the
+   * report — never appears as a line of its own; the result carries its
+   * complete usage instead.
+   */
+  private finishForegroundSubagent(id: string, result: unknown, output: string, failed: boolean, emit: (event: AgentEvent) => void): void {
+    this.openSubagents.delete(id);
+    const finalCall = subagentFinalCall(result);
+    if (finalCall) emit({ type: 'usage', record: usageRecord(finalCall.usage, finalCall.model, id) });
+    emit({ type: 'subagent_finished', subagentId: id, outcome: failed ? 'failed' : 'done', digest: output });
+  }
+
+  /**
+   * Partial output of the planner's own message. The complete `assistant` line
+   * for each block follows its deltas and is authoritative for that block (see
+   * {@link AgentEvent}), so nothing here has to reconcile with it.
+   */
+  private handleStreamEvent(event: ClaudeStreamEvent, emit: (event: AgentEvent) => void): void {
+    // Token counts come from `message_delta` alone. The `assistant` lines carry
+    // a usage snapshot taken at `message_start`, before any output — its
+    // `output_tokens` is a placeholder — and the result's `usage` re-sums these
+    // same calls, so either would count them twice.
+    if (event.type === 'message_start') this.plannerModel = event.message?.model;
+    else if (event.type === 'message_delta' && event.usage) emit({ type: 'usage', record: usageRecord(event.usage, this.plannerModel) });
+    else if (event.type === 'content_block_start' && event.content_block?.type === 'text') {
+      this.pendingBreak = this.turnHasText;
+    } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta.text) {
+      if (this.pendingBreak) emit({ type: 'assistant_text_delta', text: '\n\n' });
+      this.pendingBreak = false;
+      emit({ type: 'assistant_text_delta', text: event.delta.text });
+    } else if (event.type === 'content_block_delta' && event.delta?.type === 'thinking_delta' && event.delta.thinking) {
+      emit({ type: 'thinking_delta', text: event.delta.thinking });
+    }
+  }
+
+  /**
+   * What only the result line knows: the cost, which covers every call the
+   * session made — subagents included, since none of their lines carries one —
+   * and the planner model's window. `total_cost_usd` is a running total, so a
+   * turn reports its growth. The first turn after a resume only sets the
+   * baseline: its total includes turns counted before, and a turn's own share
+   * cannot be told apart from them.
+   */
+  private reportSessionCost(msg: ClaudeLine, emit: (event: AgentEvent) => void): void {
+    const record: UsageRecord = { source: 'claude-code' };
+    const total = msg.total_cost_usd;
+    if (typeof total === 'number') {
+      if (this.reportedCostUsd !== undefined && total > this.reportedCostUsd) {
+        record.reportedCost = { amount: total - this.reportedCostUsd, currency: 'USD' };
+      }
+      this.reportedCostUsd = total;
+    }
+    const contextWindow = this.plannerModel ? msg.modelUsage?.[this.plannerModel]?.contextWindow : undefined;
+    if (contextWindow !== undefined) record.contextWindow = contextWindow;
+    if (record.reportedCost || record.contextWindow !== undefined) emit({ type: 'usage', record });
   }
 }
