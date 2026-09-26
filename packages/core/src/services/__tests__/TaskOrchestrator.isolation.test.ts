@@ -520,6 +520,30 @@ describe('TaskOrchestrator with worktree isolation', () => {
         const { notifications } = await settled({ outcome: 'merged' });
         expect(said(notifications.info)).toContain('Merged ordewell/run1/integration into the checked-out branch of every repository.');
       });
+
+      it('names a task that only landed after a conflict repair, and its files (ADR-0015)', async () => {
+        const isolation = new FakeWorktreeIsolation();
+        isolation.repos = ['api', 'web'];
+        isolation.outcomes.set('t1', 'conflict');
+        isolation.stopsIn.set('t1', 'web');
+        isolation.conflictFiles.set('t1', ['web.txt']);
+        const { orchestrator, notifications, pass, passLatest, spawn } =
+          setup({ isolation, workspace: '/group', config: { conflictRepairAttempts: 2 } });
+        const t1 = task('t1', 1);
+        orchestrator.loadPlan([t1]);
+        await orchestrator.approveReview();
+        pass(t1);
+        await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+
+        isolation.outcomes.set('t1', 'merged');
+        passLatest(t1);
+        await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
+
+        await orchestrator.mergeRun();
+        expect(said(notifications.info)).toContain(
+          'Merged ordewell/run1/integration into the checked-out branch of every repository. Task t1 (web/web.txt) landed through a conflict repair.',
+        );
+      });
     });
 
     it('runs in the workspace root when no repository of the group could be isolated after all', async () => {

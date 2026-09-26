@@ -7,6 +7,7 @@ import {
 import { chatEditorRoom, chatPaneWidth, paneColumns, planPaneWidth } from './geometry';
 import { diffRoom, handoffActions } from './handoff';
 import { handoffBase, handoffBranch, isRepoGroup, repoResultLines } from '../isolation';
+import { capConflictFiles } from '@ordewell/core';
 import { SKILL_IDS, visibleItems, type Overlay, type PickerState, type TuiState } from './state';
 
 /**
@@ -462,7 +463,12 @@ function renderHandoff(
 
   const landed = handoff.landed.length === 0
     ? [style.grey('Nothing landed on it.')]
-    : handoff.landed.map((task) => `  ${style.green('✓')} #${task.order} ${task.title}`);
+    : handoff.landed.map((task) => {
+      const repaired = task.repairedFiles?.length
+        ? style.yellow(` — repaired (${capConflictFiles(task.repairedFiles)})`)
+        : '';
+      return `  ${style.green('✓')} #${task.order} ${task.title}${repaired}`;
+    });
   const actions = handoffActions(handoff).map((action, index) => {
     const active = index === overlay.index;
     const caret = active ? style.cyan('❯') : ' ';

@@ -168,6 +168,24 @@ describe('ordewell handoff', () => {
     expect(stdout).toMatch(/worktrees and task branches; ordewell\/r1\/integration is kept/);
   });
 
+  it('names a task that only landed after a conflict repair, before asking to merge (ADR-0015)', async () => {
+    const repairedPlan = {
+      tasks: [],
+      isolation: {
+        resolvers: {},
+        run: {
+          id: 'r1', workspaceRoot: '/tmp/ws', baseRef: 'abcdef1234567890', integrationBranch: 'ordewell/r1/integration',
+          tasks: { t1: { taskId: 't1', order: 1, title: 'One', branch: 'ordewell/r1/1-t1', worktree: '/w', status: 'merged', linked: [], repairs: 1, repairedFiles: ['a.ts'] } },
+        },
+      },
+    };
+    const srv = await isolatedDaemon({ '/isolation/merge': { body: { outcome: 'merged' } } }, repairedPlan);
+    const { confirm } = await run(['merge'], srv);
+    srv.close();
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('One (a.ts) landed through a conflict repair.'));
+  });
+
   it('says so when the session never isolated', async () => {
     const srv = await daemon(({ url }) => ({ body: url.includes('/load') ? { plan: { tasks: [] }, goal: 'g' } : { meta: {}, plan: { tasks: [] } } }));
     const { stderr, exitCode } = await run(['merge', '--yes'], srv);

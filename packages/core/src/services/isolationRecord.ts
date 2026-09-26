@@ -65,7 +65,10 @@ export function handoffOf(run: IsolationRun): IsolationHandoff {
   const merged = Object.values(run.tasks)
     .filter((r) => r.status === 'merged')
     .sort((a, b) => a.order - b.order);
-  const entry = (r: IsolationTaskRecord): IsolationLandedTask => ({ taskId: r.taskId, order: r.order, title: r.title });
+  const entry = (r: IsolationTaskRecord): IsolationLandedTask => ({
+    taskId: r.taskId, order: r.order, title: r.title,
+    ...(r.repairedFiles?.length ? { repairedFiles: r.repairedFiles } : {}),
+  });
   return {
     repos: run.repos.map((repo) => ({
       path: repo.path,

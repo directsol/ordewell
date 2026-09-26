@@ -1,5 +1,5 @@
-import type { IsolationMergeBlock, IsolationMergeResult } from '../interfaces/IWorktreeIsolation';
-import { SELF_REPO } from './isolationRecord';
+import type { IsolationLandedTask, IsolationMergeBlock, IsolationMergeResult } from '../interfaces/IWorktreeIsolation';
+import { capConflictFiles, SELF_REPO } from './isolationRecord';
 
 /** One repo that kept "Merge all" from touching anything, as part of one line. */
 function blockNotice({ repo, reason, files }: IsolationMergeBlock): string {
@@ -18,24 +18,33 @@ function landedNotice(landed: string[]): string {
   return landed.length === 1 ? `${landed[0]} was merged already and stays merged.` : `${landed.join(', ')} were merged already and stay merged.`;
 }
 
+/** So the reviewer knows where to look (ADR-0015): which landed tasks only landed after a repair, and their files. */
+function repairedNotice(repaired: IsolationLandedTask[]): string {
+  const named = repaired.map((t) => `${t.title} (${capConflictFiles(t.repairedFiles ?? [])})`);
+  const list = named.length === 1 ? named[0] : `${named.slice(0, -1).join(', ')} and ${named[named.length - 1]}`;
+  return `${list} landed through ${repaired.length === 1 ? 'a conflict repair' : 'conflict repairs'}.`;
+}
+
 /**
  * How "Merge all" went, in words every surface shares. `group` is whether the
  * run spans more than a lone repo at `.`; only a merge into every repository
- * has something to say about that.
+ * has something to say about that. `repaired` names the landed tasks that only
+ * landed after a conflict repair (ADR-0015), so a clean-looking merge still
+ * points review at what changed to get there.
  */
 export function describeMergeResult(
   result: IsolationMergeResult,
   branch: string,
   group: boolean,
+  repaired: IsolationLandedTask[] = [],
 ): { level: 'info' | 'warn' | 'error'; message: string } {
   switch (result.outcome) {
-    case 'merged':
-      return {
-        level: 'info',
-        message: group
-          ? `Merged ${branch} into the checked-out branch of every repository.`
-          : `Merged ${branch} into your checked-out branch.`,
-      };
+    case 'merged': {
+      const base = group
+        ? `Merged ${branch} into the checked-out branch of every repository.`
+        : `Merged ${branch} into your checked-out branch.`;
+      return { level: 'info', message: repaired.length > 0 ? `${base} ${repairedNotice(repaired)}` : base };
+    }
     case 'blocked':
       return { level: 'warn', message: `Merged nothing, so every tree is as it was: ${result.blocked.map(blockNotice).join('; ')}.` };
     case 'conflict':

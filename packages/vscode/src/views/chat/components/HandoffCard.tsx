@@ -1,10 +1,18 @@
 import React from 'react';
+import { capConflictFiles } from '@ordewell/core/plan-utils';
 import type { IsolationMergeBlock, IsolationMergeResult } from '@ordewell/core';
 
 export interface HandoffLandedTask {
   taskId: string;
   order: number;
   title: string;
+  /** Set when the task landed only after a conflict repair (ADR-0015): the files it was started for. */
+  repairedFiles?: string[];
+}
+
+/** So the reviewer knows where to look (ADR-0015). */
+function RepairedNote({ files }: { files: string[] }) {
+  return <span className="isolation-handoff-repaired"> — repaired ({capConflictFiles(files)})</span>;
 }
 
 export interface HandoffRepo {
@@ -113,6 +121,7 @@ export default function HandoffCard({ repos, landed, mergeResult, onAction }: Ha
                       <li key={t.taskId}>
                         <span className="isolation-handoff-order">{t.order}</span>
                         {t.title}
+                        {t.repairedFiles && t.repairedFiles.length > 0 && <RepairedNote files={t.repairedFiles} />}
                       </li>
                     ))}
                   </ul>
@@ -132,6 +141,7 @@ export default function HandoffCard({ repos, landed, mergeResult, onAction }: Ha
                 <li key={t.taskId}>
                   <span className="isolation-handoff-order">{t.order}</span>
                   {t.title}
+                  {t.repairedFiles && t.repairedFiles.length > 0 && <RepairedNote files={t.repairedFiles} />}
                 </li>
               ))}
             </ul>

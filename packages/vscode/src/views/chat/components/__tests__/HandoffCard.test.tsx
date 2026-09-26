@@ -51,6 +51,20 @@ describe('HandoffCard (ADR-0013)', () => {
   });
 });
 
+describe('HandoffCard — conflict repair (ADR-0015)', () => {
+  it('marks a landed task that only landed after repairing a conflict, and its files', () => {
+    const repaired = {
+      repos: handoff.repos,
+      landed: [{ taskId: 't1', order: 1, title: 'First task', repairedFiles: ['a.ts', 'b.ts'] }, handoff.landed[0]],
+    };
+    render(<HandoffCard {...repaired} onAction={vi.fn()} />);
+
+    const items = [...document.querySelectorAll('.isolation-handoff-landed li')];
+    expect(items[0].textContent).toContain('repaired (a.ts, b.ts)');
+    expect(items[1].textContent).not.toContain('repaired');
+  });
+});
+
 describe('HandoffCard — repo group (ADR-0014)', () => {
   it('shows one row per repository and offers Merge all', () => {
     render(<HandoffCard {...groupHandoff} onAction={vi.fn()} />);

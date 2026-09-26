@@ -195,6 +195,8 @@ export interface IsolationLandedTask {
   taskId: string;
   order: number;
   title: string;
+  /** Set when the task landed only after a conflict repair (ADR-0015): the files it was started for. */
+  repairedFiles?: string[];
 }
 
 export interface IsolationHandoffRepo {

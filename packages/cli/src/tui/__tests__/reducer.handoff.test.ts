@@ -124,6 +124,22 @@ describe('the handoff overlay', () => {
     expect(confirmed.state.overlay).toBeNull();
   });
 
+  it('carries a repaired landed task on the merge effect, so the result can name it too (ADR-0015)', () => {
+    const repaired = { ...handoff, landed: [{ ...handoff.landed[0], repairedFiles: ['a.ts'] }, handoff.landed[1]] };
+    const asked = press(press(session({ handoff: repaired, overlay: { kind: 'handoff', index: 0, diff: null } }), 'down').state, 'enter');
+
+    expect(press(asked.state, 'enter').effects).toEqual([
+      { type: 'isolationMerge', sessionId: 's1', branch: 'ordewell/r1/integration', repaired: [{ ...handoff.landed[0], repairedFiles: ['a.ts'] }] },
+    ]);
+  });
+
+  it('names a task that only landed after a conflict repair, before asking to merge (ADR-0015)', () => {
+    const repaired = { ...handoff, landed: [{ ...handoff.landed[0], repairedFiles: ['a.ts'] }, handoff.landed[1]] };
+    const asked = press(press(session({ handoff: repaired, overlay: { kind: 'handoff', index: 0, diff: null } }), 'down').state, 'enter');
+
+    expect((asked.state.overlay as { message: string }).message).toContain('Add the route (a.ts) landed through a conflict repair.');
+  });
+
   it('escape on the merge question merges nothing', () => {
     const asked = press(press(open(), 'down').state, 'enter');
 
@@ -275,6 +291,18 @@ describe('per-task isolation on the plan', () => {
     expect(state.tasks[0].isolation).toEqual(conflict);
   });
 
+  it('notices a repair attempt or its repaired files changing even when the state did not (ADR-0015)', () => {
+    const repairing = { state: 'repairing' as const, branch: 'b', worktree: 'w', repair: { attempt: 1, limit: 2 } };
+    const before = session({ tasks: [task({ id: 't2', status: 'in_progress', isolation: repairing })] });
+
+    const { state } = apply(before, {
+      type: 'tasksStatus', sessionId: 's1',
+      updates: { t2: { status: 'in_progress', isolation: { ...repairing, repair: { attempt: 2, limit: 2 } } } },
+    });
+
+    expect(state.tasks[0].isolation).toEqual({ ...repairing, repair: { attempt: 2, limit: 2 } });
+  });
+
   it('notices an isolation change even when the status did not', () => {
     const before = session({ tasks: [task({ id: 't2', status: 'awaiting_user', isolation: { state: 'active', branch: 'b', worktree: 'w' } })] });
 
@@ -307,6 +335,23 @@ describe('per-task isolation on the plan', () => {
 
     expect(state.tasks.map((t) => t.isolation?.state)).toEqual(['conflict', 'none']);
     expect(state.handoff).toEqual({ repos: [{ path: '.', integrationBranch: 'ordewell/r1/integration', baseRef: 'abc', landed: [] }], landed: [] });
+  });
+
+  it('reads a repairing task from a saved plan\'s run record (ADR-0015)', () => {
+    const repairingPlan = {
+      tasks: [{ id: 't2', order: 2, title: 'T2', type: 'ai', status: 'in_progress' }],
+      isolation: {
+        resolvers: {},
+        run: {
+          id: 'r1', workspaceRoot: '/ws', baseRef: 'abc', integrationBranch: 'ordewell/r1/integration',
+          tasks: { t2: { taskId: 't2', order: 2, title: 'T2', branch: 'ordewell/r1/2-t2', worktree: '/w/2-t2', status: 'repairing', linked: [], conflictFiles: ['a.ts'], repairs: 1, repairedFiles: ['a.ts'] } },
+        },
+      },
+    };
+
+    const { state } = apply(session(), { type: 'planUpdated', sessionId: 's1', plan: repairingPlan });
+
+    expect(state.tasks[0].isolation).toMatchObject({ state: 'repairing', conflictFiles: ['a.ts'], repairedFiles: ['a.ts'] });
   });
 
   it('a fork holds no run: switching to one drops the original\'s handoff and marks', () => {
