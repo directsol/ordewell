@@ -1,9 +1,11 @@
+import { v4 as uuidv4 } from 'uuid';
 import {
   GoogleGenerativeAI,
   GenerativeModel,
   Part,
 } from '@google/generative-ai';
 import { Task, DiscoveredModel, ResearchLogEntry, ResearchProgress, RunnerId } from '../models/Task';
+import type { UsageRecord } from '../models/Usage';
 import { IConfig } from '../interfaces/IConfig';
 import { IFileSystem } from '../interfaces/IFileSystem';
 import { IWebFetcher } from '../interfaces/IWebFetcher';
@@ -25,53 +27,67 @@ import type { LegacyPlanState } from '../models/Task';
 
 const TOOL_DEFINITIONS = toGeminiToolDeclarations();
 
-interface GeminiResult {
-  response: {
-    candidates?: Array<{
-      content?: { parts?: Array<Record<string, unknown>> };
-      finishReason?: string;
-    }>;
-    usageMetadata?: { promptTokenCount?: number };
-  };
+interface GeminiPart {
+  text?: string;
+  thought?: boolean;
+  functionCall?: { name: string; args: Record<string, unknown> };
 }
 
-function parseGeminiTurn(resultRaw: unknown): ResearchTurn {
-  const result = resultRaw as GeminiResult;
-  const candidate = result.response.candidates?.[0];
-  if (!candidate) return { text: '', toolCalls: [], hasToolCalls: false };
-  const parts = candidate.content?.parts || [];
-  let text = '';
-  let reasoning = '';
-  const toolCalls: ResearchTurn['toolCalls'] = [];
-  for (const part of parts) {
-    if ('text' in part) {
-      if ((part as { thought?: boolean }).thought) reasoning += (part as { text: string }).text;
-      else text += (part as { text: string }).text;
-    }
-    if ('functionCall' in part) {
-      const fc = part.functionCall as { name: string; args: Record<string, unknown> };
-      toolCalls.push({ name: fc.name, args: fc.args });
-    }
-  }
-  // Normalize Gemini's MAX_TOKENS to the OpenAI-style 'length' the
-  // conversation loop keys its truncation recovery on.
-  const finishReason = candidate.finishReason === 'MAX_TOKENS' ? 'length' : undefined;
-  const promptTokens = result.response.usageMetadata?.promptTokenCount;
-  return { text, toolCalls, hasToolCalls: toolCalls.length > 0, reasoning: reasoning || undefined, finishReason, promptTokens };
+interface GeminiStreamChunk {
+  candidates?: Array<{ content?: { parts?: GeminiPart[] }; finishReason?: string }>;
+  usageMetadata?: Record<string, unknown>;
+}
+
+/**
+ * Narrow one usage counter off the wire. The 0.21 typings predate several of
+ * the API's later counters (`thoughtsTokenCount` reaches this service at
+ * runtime but is untyped there), so the metadata is read as a raw record and
+ * every value is narrowed individually.
+ */
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * One model call's bill, straight from the stream's final usageMetadata —
+ * Gemini never prices calls, so no reportedCost is ever fabricated here.
+ *
+ * Thought tokens count as output: Gemini reports them separately from
+ * candidatesTokenCount (totalTokenCount sums both), and they are tokens the
+ * model ran and the invoice charges — leaving them out would understate every
+ * thinking-model call.
+ */
+function usageRecordFrom(usage: Record<string, unknown> | undefined): UsageRecord | undefined {
+  if (!usage) return undefined;
+  const inputTokens = tokenCount(usage.promptTokenCount);
+  const answerTokens = tokenCount(usage.candidatesTokenCount);
+  const thoughtTokens = tokenCount(usage.thoughtsTokenCount);
+  const reportedOutput = [answerTokens, thoughtTokens].filter((t) => t !== undefined) as number[];
+  const record: UsageRecord = {
+    source: 'google',
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(reportedOutput.length > 0 ? { outputTokens: reportedOutput.reduce((a, b) => a + b, 0) } : {}),
+    ...(tokenCount(usage.cachedContentTokenCount) !== undefined ? { cachedInputTokens: tokenCount(usage.cachedContentTokenCount) } : {}),
+  };
+  const anyReported = record.inputTokens !== undefined || record.outputTokens !== undefined || record.cachedInputTokens !== undefined;
+  return anyReported ? record : undefined;
 }
 
 class GeminiResearchChat implements ResearchChat {
   constructor(
     private chat: ReturnType<GenerativeModel['startChat']>,
-    /** Gemini's chat API is non-streaming here, so reasoning/content are emitted once per turn. */
-    private onReasoning?: (text: string) => void,
-    private onContent?: (text: string) => void,
+    /** Hooks absent = the call is assembled silently (one-shot research loop): nothing streams, the turn still forms. */
+    private hooks: {
+      onReasoning?: (text: string, segmentId: string) => void;
+      onContent?: (text: string, segmentId: string) => void;
+      onUsage?: (record: UsageRecord) => void;
+    } = {},
   ) {}
 
   async sendMessage(text: string, signal?: AbortSignal): Promise<ResearchTurn> {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    const result = await this.chat.sendMessage(text);
-    return this.emit(parseGeminiTurn(result));
+    const result = await this.chat.sendMessageStream(text);
+    return this.consume(result.stream);
   }
 
   async sendToolResults(results: ToolResult[], signal?: AbortSignal): Promise<ResearchTurn> {
@@ -82,14 +98,57 @@ class GeminiResearchChat implements ResearchChat {
         response: { output: r.output, truncated: r.truncated, totalChars: r.totalChars },
       },
     }));
-    const result = await this.chat.sendMessage(funcResponses);
-    return this.emit(parseGeminiTurn(result));
+    const result = await this.chat.sendMessageStream(funcResponses);
+    return this.consume(result.stream);
   }
 
-  private emit(turn: ResearchTurn): ResearchTurn {
-    if (turn.reasoning) this.onReasoning?.(turn.reasoning);
-    if (turn.text && !turn.hasToolCalls) this.onContent?.(turn.text);
-    return turn;
+  /**
+   * Drain one streaming chat call: thought parts answer on the reasoning
+   * channel, plain text on the reply channel, function calls accumulate into
+   * the turn exactly as the non-streaming parse used to produce. Each channel
+   * mints one fresh segmentId per call — thinking and reply never share, since
+   * a segment is one continuous run of model text — and the call produces
+   * exactly one usage record, from the final chunk: Gemini's streaming chunks
+   * each carry a running total, so the last one is the whole call's bill.
+   */
+  private async consume(stream: AsyncIterable<unknown>): Promise<ResearchTurn> {
+    const textSegmentId = uuidv4();
+    const thinkingSegmentId = uuidv4();
+    let text = '';
+    let reasoning = '';
+    let finishReason: string | undefined;
+    let usage: GeminiStreamChunk['usageMetadata'];
+    const toolCalls: ResearchTurn['toolCalls'] = [];
+
+    for await (const chunkRaw of stream) {
+      const chunk = chunkRaw as GeminiStreamChunk;
+      const candidate = chunk.candidates?.[0];
+      if (candidate?.finishReason) finishReason = candidate.finishReason;
+      if (chunk.usageMetadata) usage = chunk.usageMetadata;
+      for (const part of candidate?.content?.parts ?? []) {
+        if (part.text !== undefined) {
+          if (part.thought) { reasoning += part.text; this.hooks.onReasoning?.(part.text, thinkingSegmentId); }
+          else { text += part.text; this.hooks.onContent?.(part.text, textSegmentId); }
+        }
+        if (part.functionCall) {
+          toolCalls.push({ name: part.functionCall.name, args: part.functionCall.args });
+        }
+      }
+    }
+
+    const usageRecord = usageRecordFrom(usage);
+    if (usageRecord) this.hooks.onUsage?.(usageRecord);
+
+    // Normalize Gemini's MAX_TOKENS to the OpenAI-style 'length' the
+    // conversation loop keys its truncation recovery on.
+    return {
+      text,
+      toolCalls,
+      hasToolCalls: toolCalls.length > 0,
+      reasoning: reasoning || undefined,
+      finishReason: finishReason === 'MAX_TOKENS' ? 'length' : undefined,
+      promptTokens: usageRecord?.inputTokens,
+    };
   }
 }
 
@@ -172,11 +231,11 @@ export class GeminiService extends BaseAiService implements IAiService {
     });
 
     let currentProgress = req.onProgress;
-    const researchChat = new GeminiResearchChat(
-      chat,
-      (text) => currentProgress({ type: 'thinking', text }),
-      (text) => currentProgress({ type: 'plan_token', planToken: text }),
-    );
+    const researchChat = new GeminiResearchChat(chat, {
+      onReasoning: (text, segmentId) => currentProgress({ type: 'thinking', text, segmentId }),
+      onContent: (text, segmentId) => currentProgress({ type: 'text_delta', text, segmentId }),
+      onUsage: (record) => currentProgress({ type: 'usage', record }),
+    });
 
     const ctx: ConversationTurnContext = {
       chat: researchChat,
@@ -279,7 +338,12 @@ export class GeminiService extends BaseAiService implements IAiService {
       generationConfig: { temperature: 0.3, topP: 0.95, maxOutputTokens: 16384 },
     });
 
-    const researchChat: ResearchChat = new GeminiResearchChat(chat);
+    // A chat built without streaming hooks: the one-shot loop's replies are
+    // never planner chat prose, so they must not stream as text deltas — only
+    // the bill flows, one record per call.
+    const researchChat: ResearchChat = new GeminiResearchChat(chat, {
+      onUsage: (record) => onProgress({ type: 'usage', record }),
+    });
 
     const result = await this.runResearchLoop(researchChat, firstMessage, fs, onProgress, runners, undefined, fetcher, userDescription, runnerModes, autonomousDefault, signal);
     if (result.tasks) return { tasks: result.tasks, researchLog: result.researchLog, researchResults: result.researchResults };
