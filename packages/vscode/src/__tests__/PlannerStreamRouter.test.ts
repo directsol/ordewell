@@ -30,6 +30,14 @@ describe('routePlannerStream', () => {
     expect(sink.streamToken).not.toHaveBeenCalled();
   });
 
+  // Streamed thinking keeps the thinking display it had as plan_thinking,
+  // until the webview draws the shared view (#53).
+  it('routes planner_thinking_delta to the webview thinking display', () => {
+    const sink = fakeSink();
+    expect(routePlannerStream({ type: 'planner_thinking_delta', turnId: 't1', segmentId: 's1', text: 'weighing it' }, sink, true)).toBe(true);
+    expect(sink.sendResearchProgress).toHaveBeenCalledWith({ type: 'thinking', text: 'weighing it' });
+  });
+
   it('keeps a subagent\'s thinking tagged with its subagent', () => {
     const sink = fakeSink();
     routePlannerStream({ type: 'plan_thinking', text: 'grep first', subagentId: 'sa1' }, sink, true);

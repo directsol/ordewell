@@ -3,6 +3,7 @@ import { makeSession } from './sessionTestKit';
 import { BaseFileSystem } from '../BaseFileSystem';
 import { fakeConfig } from '../../testing';
 import type { SessionMessage } from '../SessionMessage';
+import type { ConversationRequest } from '../AiService';
 import type { GrepOptions, ReadFileOpts, ToolOutcome } from '../../interfaces/IFileSystem';
 
 /**
@@ -61,6 +62,30 @@ describe('Session approval flow', () => {
     // Leave nothing pending for the next test's timers.
     await vi.waitFor(() => expect(approvalRequests(messages)).toHaveLength(1));
     expect(await Promise.race([pending, Promise.resolve('still-blocked')])).toBe('still-blocked');
+  });
+
+  it('ties a request raised during a planner turn to that turn', async () => {
+    const messages: SessionMessage[] = [];
+    const fsAdapter = new ProbeFileSystem();
+    const session = makeSession({
+      fsAdapter,
+      broadcast: (msg) => { messages.push(msg); },
+      aiService: {
+        startConversation: vi.fn(async (req: ConversationRequest) => {
+          await req.fs.readFile('/tmp/dump/a.log');
+          return { kind: 'message' as const, text: 'Read it.', researchLog: [] };
+        }),
+        hasActiveConversation: () => true,
+      },
+    });
+
+    const planning = session.startPlanning('summarize the dump', ['claude-code']);
+    await vi.waitFor(() => expect(approvalRequests(messages)).toHaveLength(1));
+    session.resolveApproval(approvalRequests(messages)[0].id, true);
+    await planning;
+
+    const started = messages.find((m) => m.type === 'planner_turn_started');
+    expect(approvalRequests(messages)[0].turnId).toBe(started && 'turnId' in started ? started.turnId : 'no turn');
   });
 
   it('unblocks the waiting research call when a surface grants it', async () => {
