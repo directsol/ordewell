@@ -5,8 +5,9 @@
 > [ADR-0014](../adr/0014-multi-repo-workspaces.md) widens it from one repository
 > to a repo group: a folder of repositories isolates them together, with the
 > `workspaceRepos` (`ORDEWELL_WORKSPACE_REPOS`) and `worktreeLinks`
-> (`ORDEWELL_WORKTREE_LINKS`) settings. Where they differ from this spec, the
-> ADRs are current.
+> (`ORDEWELL_WORKTREE_LINKS`) settings. [ADR-0015](../adr/0015-conflict-repair.md)
+> adds a bounded, evidenced conflict repair before a conflict reaches the user.
+> Where they differ from this spec, the ADRs are current.
 
 ## Problem Statement
 
@@ -143,11 +144,13 @@ the module serializes integration internally and merges in plan `order` using
 Runner made on its own, makes per-task attribution visible, and makes the task
 branch an ancestor of the integration branch so it can be deleted safely.
 
-**Conflicts are surfaced, never resolved by a model.** If the mechanical merge
-conflicts, the task becomes `awaiting_user`; the worktree and both refs are
-kept; the surface shows a conflict indicator with an explicit "resolve" action.
-Running that action as a task is opt-in. No automatic model merge is ever
-performed.
+**Conflicts get a bounded repair before they are surfaced.** If the mechanical
+merge conflicts, [ADR-0015](../adr/0015-conflict-repair.md) now runs a
+capped, evidenced conflict repair on the task's own attempt first; only a
+conflict that repair does not clear, or has none left to try, becomes
+`awaiting_user`, with the worktree and both refs kept and the surface showing
+a conflict indicator with an explicit "resolve" action. Running that action as
+a task is opt-in, same as before.
 
 **Dirty trees block isolated execution.** If tracked files are modified,
 isolated execution is unavailable for that run: the user is offered a stash, or
@@ -245,7 +248,9 @@ exercise the git path.
 - Overlap-aware scheduling from a declared per-task file scope. The concurrency
   policy trusts the dependency graph; conflicts are handled, not predicted.
 - Automatic merging into the user's checked-out branch.
-- Automatic, model-driven conflict resolution.
+- Unbounded or opinion-based conflict resolution — a repair
+  ([ADR-0015](../adr/0015-conflict-repair.md)) is capped and only counts as
+  having repaired a conflict once the evidence it requires holds.
 - OS-level sandboxing of runners (separate effort; see ADR-0011).
 - Pushing, pull requests, or any remote operation.
 - Redefining how Runners themselves use git; they continue to receive a `cwd`.

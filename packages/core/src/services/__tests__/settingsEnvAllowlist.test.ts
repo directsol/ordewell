@@ -30,6 +30,13 @@ describe('admitSettingsEnv', () => {
     expect(accepted).toEqual({ AI_PROVIDER: 'codex', ORCHESTRATOR_MODEL: 'gpt-x', ORDEWELL_PLANNER_EFFORT: 'high' });
   });
 
+  it('admits the conflict repair bound, so a live daemon can turn repair off or change it', () => {
+    expect(admitSettingsEnv({ ORDEWELL_CONFLICT_REPAIR_ATTEMPTS: '0' })).toEqual({
+      accepted: { ORDEWELL_CONFLICT_REPAIR_ATTEMPTS: '0' },
+      rejected: [],
+    });
+  });
+
   it('refuses an unknown upper-case key — the old rule admitted every one of these', () => {
     const { accepted, rejected } = admitSettingsEnv({ TOTALLY_MADE_UP: 'x' });
     expect(accepted).toEqual({});

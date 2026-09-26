@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isolationOfPlan, isRepoGroup, mergeOutcome, repoResultLines, taskRepoNames } from '../isolation';
+import { isolationOfPlan, isRepoGroup, mergeOutcome, repairedNotice, repoResultLines, taskRepoNames } from '../isolation';
 import type { HandoffView } from '../tui/state';
 
 const record = (taskId: string, order: number, status: string) => ({
@@ -73,6 +73,26 @@ describe('isolationOfPlan', () => {
   it.each([null, undefined, {}, { tasks: [] }, { isolation: {} }, 'nope'])('says nothing for %j', (payload) => {
     expect(isolationOfPlan(payload)).toBeNull();
   });
+
+  it('reads a repairing task, and the files a landed one was repaired for (ADR-0015)', () => {
+    const repairingPlan = {
+      tasks: [],
+      isolation: {
+        resolvers: {},
+        run: {
+          id: 'r1', workspaceRoot: '/ws', baseRef: 'abc123', integrationBranch: 'ordewell/r1/integration',
+          tasks: {
+            r: { ...record('r', 1, 'repairing'), conflictFiles: ['a.ts'], repairs: 1, repairedFiles: ['a.ts'] },
+            m: { ...record('m', 2, 'merged'), repairs: 1, repairedFiles: ['b.ts'] },
+          },
+        },
+      },
+    };
+
+    const { tasks, handoff } = isolationOfPlan(repairingPlan)!;
+    expect(tasks.r).toMatchObject({ state: 'repairing', conflictFiles: ['a.ts'], repairedFiles: ['a.ts'] });
+    expect(handoff.landed).toEqual([{ taskId: 'm', order: 2, title: 'Task m', repairedFiles: ['b.ts'] }]);
+  });
 });
 
 const t = (order: number) => ({ taskId: `t${order}`, order, title: `Task ${order}` });
@@ -145,5 +165,34 @@ describe('what Merge all says', () => {
 
     expect(message).toContain('conflicted in web (w.txt)');
     expect(message).toContain('api was merged already and stays merged.');
+  });
+
+  it('names a task that only landed after a conflict repair, and its files (ADR-0015)', () => {
+    const { message } = mergeOutcome(
+      { outcome: 'merged' }, branch, false, [{ taskId: 't1', order: 1, title: 'Task t1', repairedFiles: ['a.ts'] }],
+    );
+
+    expect(message).toBe(`Merged ${branch} into your checked-out branch. Task t1 (a.ts) landed through a conflict repair.`);
+  });
+});
+
+describe('repairedNotice', () => {
+  it('says nothing when no landed task was repaired', () => {
+    expect(repairedNotice(single)).toBe('');
+  });
+
+  it('names a repaired task and its files, before the merge lands it (ADR-0015)', () => {
+    const handoff: HandoffView = { ...single, landed: [{ ...single.landed[0], repairedFiles: ['a.ts', 'b.ts'] }] };
+
+    expect(repairedNotice(handoff)).toBe(' Task 1 (a.ts, b.ts) landed through a conflict repair.');
+  });
+
+  it('names more than one repaired task', () => {
+    const handoff: HandoffView = {
+      ...group,
+      landed: [{ ...group.landed[0], repairedFiles: ['a.ts'] }, { ...group.landed[1], repairedFiles: ['b.ts'] }, group.landed[2]],
+    };
+
+    expect(repairedNotice(handoff)).toBe(' Task 1 (a.ts) and Task 2 (b.ts) landed through conflict repairs.');
   });
 });

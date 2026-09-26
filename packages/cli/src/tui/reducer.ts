@@ -18,7 +18,7 @@ import { activeToken, findCommand, parseSlash, tokenCompletions, type ParsedComm
 import {
   findTask, initialState, SKILL_IDS, planRows, selectedPlanRow, visibleItems,
   type ApprovalRequestView, type Cell, type ChatMessage, type Focus, type ModeView,
-  type ConfirmOption, type HandoffView, type ModelView, type PickerItem, type PickerState, type RewindTargetView, type RunnerView, type Selection, type SessionView,
+  type ConfirmOption, type HandoffView, type LandedTaskView, type ModelView, type PickerItem, type PickerState, type RewindTargetView, type RunnerView, type Selection, type SessionView,
   type SkillId, type TaskIsolationView, type TaskView, type TuiState,
 } from './state';
 import { assignedModelFor, effortsForTask, modelsForRunner, modelsForTask, modesForTask, runnerAccepts } from './taskAssignment';
@@ -54,8 +54,8 @@ export type Effect =
   | { type: 'rewindConversation'; sessionId: string; index: number }
   | { type: 'compactConversation'; sessionId: string }
   | { type: 'isolationReviewDiff'; sessionId: string }
-  /** `branch` is only for the words the result is reported in. */
-  | { type: 'isolationMerge'; sessionId: string; branch: string; group?: boolean }
+  /** `branch` is only for the words the result is reported in; `repaired` likewise (ADR-0015). */
+  | { type: 'isolationMerge'; sessionId: string; branch: string; group?: boolean; repaired?: LandedTaskView[] }
   | { type: 'isolationDiscard'; sessionId: string; branch: string }
   | { type: 'isolationCleanup'; sessionId: string; branch: string }
   /** Replays a run a dirty tree parked; `stash` puts tracked changes aside first, `shared` runs in the working tree this once. */

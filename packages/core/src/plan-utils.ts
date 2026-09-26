@@ -8,3 +8,4 @@ export { canMergeTasks, canSplitTask, canSetDependencies, dependencyCandidates, 
 export type { TaskRef } from './services/TaskOps';
 export { summarizeToolCall } from './services/researchStepSummary';
 export { truncateCheckpointSummary, CHECKPOINT_TRUNCATE_LENGTH } from './services/SessionMessage';
+export { capConflictFiles } from './services/isolationRecord';

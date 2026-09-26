@@ -10,6 +10,7 @@ import type {
   IntegrationDisposal,
   PreparedTask,
   IWorktreeIsolation,
+  RepairEvidence,
 } from './interfaces/IWorktreeIsolation';
 import type { Task } from './models/Task';
 import { handoffOf, integrationBranchFor, SELF_REPO } from './services/isolationRecord';
@@ -40,6 +41,8 @@ export function fakeConfig(overrides: Partial<IConfig> = {}): IConfig {
     worktreeIsolation: false,
     workspaceRepos: [],
     worktreeLinks: [],
+    // Off so a scripted conflict stays a conflict unless a test opts into repairing it.
+    conflictRepairAttempts: 0,
     approvalMode: 'ask',
     approvalPreApproved: [],
     setProviderModelLists: () => {},
@@ -97,7 +100,7 @@ export type FakeIsolationCall =
   | { op: 'isActive'; workspaceRoot: string }
   | { op: 'stash'; workspaceRoot: string }
   | { op: 'startRun'; workspaceRoot: string }
-  | { op: 'prepare'; taskId: string }
+  | { op: 'prepare' | 'reopen' | 'verifyRepair'; taskId: string }
   | { op: 'integrate'; taskId: string }
   | { op: 'release'; taskId: string; keep: boolean }
   | { op: 'handoff' | 'pruneOrphans' | 'reviewDiff' | 'mergeIntoCheckedOut' | 'sweep' }
@@ -110,7 +113,8 @@ export type FakeIsolationCall =
  * to script a conflict, and `holdIntegration` to keep a task un-integrated so a
  * test can observe that its dependents wait. `repos` makes the run a group of
  * several; `changes` and `stopsIn` say which of them a task changes and where
- * its landing stops.
+ * its landing stops. `repairEvidence` scripts what a conflict repair's
+ * evidence check finds.
  */
 export class FakeWorktreeIsolation implements IWorktreeIsolation {
   availability: IsolationAvailability = { active: true };
@@ -120,6 +124,8 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
   changes = new Map<string, string[]>();
   /** Per task id, the repo its landing stops in when its outcome is not `merged`; its first changed repo when not listed. */
   stopsIn = new Map<string, string>();
+  /** Per task id, the files a `conflict` outcome names; empty when not listed. */
+  conflictFiles = new Map<string, string[]>();
   /** What `mergeIntoCheckedOut` answers. */
   mergeResult: IsolationMergeResult = { outcome: 'merged' };
   /** What `startRun` shares and `prepare` copies, to exercise their notices. */
@@ -133,6 +139,8 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
   sweepError: Error | null = null;
   /** Per task id; a task not listed integrates as `merged`. */
   outcomes = new Map<string, IsolationOutcome>();
+  /** Per task id, what `verifyRepair` finds; a task not listed passes. */
+  repairEvidence = new Map<string, RepairEvidence>();
   calls: FakeIsolationCall[] = [];
   private holds = new Map<string, Promise<void>>();
   private runCount = 0;
@@ -140,7 +148,7 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
   private log(call: FakeIsolationCall): void { this.calls.push(call); }
 
   /** Task ids in the order `op` was called for them. */
-  taskIdsFor(op: 'prepare' | 'integrate' | 'release'): string[] {
+  taskIdsFor(op: 'prepare' | 'reopen' | 'verifyRepair' | 'integrate' | 'release'): string[] {
     return this.calls.flatMap((c) => (c.op === op && 'taskId' in c ? [c.taskId] : []));
   }
 
@@ -190,6 +198,25 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
     return { cwd, branch, copied: [...this.copied] };
   }
 
+  /** Like git: the same cwd, each changed repo's tip recorded, the repair counted. */
+  async reopen(task: Task, run: IsolationRun): Promise<PreparedTask> {
+    this.log({ op: 'reopen', taskId: task.id });
+    const record = run.tasks[task.id];
+    if (record?.status !== 'conflict') throw new Error(`Task ${task.order} has no conflict to repair`);
+    const changed = Object.entries(record.repos).filter(([repo, entry]) => entry.changed || repo === record.conflictRepo).map(([repo]) => repo);
+    const files = (record.conflictFiles ?? []).map((file) => (record.conflictRepo && record.conflictRepo !== SELF_REPO ? `${record.conflictRepo}/${file}` : file));
+    record.repairs = (record.repairs ?? 0) + 1;
+    record.repairBase = Object.fromEntries(changed.map((repo) => [repo, `tip-${repo}`]));
+    record.repairedFiles = [...new Set([...(record.repairedFiles ?? []), ...files])];
+    record.status = 'repairing';
+    return { cwd: record.workspace, branch: record.branch, copied: [] };
+  }
+
+  async verifyRepair(task: Task, _run: IsolationRun): Promise<RepairEvidence> {
+    this.log({ op: 'verifyRepair', taskId: task.id });
+    return this.repairEvidence.get(task.id) ?? { ok: true };
+  }
+
   /** Like git: the landing is recorded and persisted before the (held) merge, and cleared once it settles. */
   async integrate(task: Task, run: IsolationRun, persist: () => void = () => undefined): Promise<IsolationOutcome> {
     this.log({ op: 'integrate', taskId: task.id });
@@ -205,8 +232,16 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
     delete run.landing;
     const outcome = this.outcomes.get(task.id) ?? 'merged';
     record.status = outcome;
-    if (outcome === 'merged') delete record.conflictRepo;
-    else record.conflictRepo = this.stopsIn.get(task.id) ?? changed[0] ?? SELF_REPO;
+    delete record.repairBase;
+    if (outcome === 'merged') {
+      delete record.conflictRepo;
+      delete record.conflictFiles;
+    } else {
+      record.conflictRepo = this.stopsIn.get(task.id) ?? changed[0] ?? SELF_REPO;
+      const files = this.conflictFiles.get(task.id);
+      if (files) record.conflictFiles = files;
+      else delete record.conflictFiles;
+    }
     return outcome;
   }
 
@@ -215,6 +250,10 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
     const record = run.tasks[taskId];
     if (!opts.keep) delete run.tasks[taskId];
     else if (record?.status === 'active') record.status = 'kept';
+    else if (record?.status === 'repairing') {
+      record.status = 'conflict';
+      delete record.repairBase;
+    }
   }
 
   async handoff(run: IsolationRun): Promise<IsolationHandoff> {

@@ -19,13 +19,14 @@ import type {
   IntegrationDisposal,
   IWorktreeIsolation,
   PreparedTask,
+  RepairEvidence,
 } from '../interfaces/IWorktreeIsolation';
 import type { Task } from '../models/Task';
 import { augmentedPath, withPath } from '../utils/shellPath';
 import { ensureStateDirIgnored, STATE_DIR } from '../utils/fsHelpers';
 import { sanitizeSlug } from '../utils/prdStore';
 import { handoffOf, integrationBranchFor, repoRootOf, SELF_REPO } from './isolationRecord';
-import { linkPath } from './worktreeLink';
+import { linkPath, mirrorDir } from './worktreeLink';
 
 export type GitExecFn = (
   file: string,
@@ -120,6 +121,18 @@ function statusPaths(porcelain: string): string[] {
   return paths;
 }
 
+/** The files `git diff --check` reports leftover conflict markers in; its whitespace warnings are not asked about. */
+function leftoverMarkerFiles(check: string): string[] {
+  const files = check.split(/\r?\n/).flatMap((line) => /^(.+):\d+: leftover conflict marker$/.exec(line)?.[1] ?? []);
+  return [...new Set(files)];
+}
+
+/** Where a landing or a release leaves a task; a repair in flight ends there too, whatever the outcome. */
+function settleStatus(record: IsolationTaskRecord, status: IsolationTaskRecord['status']): void {
+  record.status = status;
+  delete record.repairBase;
+}
+
 function sameDir(a: string, b: string): boolean {
   const real = (p: string) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
   return real(a) === real(b);
@@ -173,6 +186,26 @@ function segmentMatches(root: string, base: string, segment: string): string[] {
   if (!/[*?]/.test(segment)) return lexists(path.join(root, base, segment)) ? [under(segment)] : [];
   const pattern = new RegExp(`^${segment.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
   return listDir(path.join(root, base)).filter((name) => !NEVER_SCANNED.has(name) && pattern.test(name)).map(under);
+}
+
+/**
+ * The `node_modules` directories under `root`, relative to it: its own and
+ * those of the workspace packages its package.json lists.
+ */
+function installDirs(root: string): string[] {
+  const packages = matchLinks(root, workspaceGlobs(root)).map((pkg) => `${pkg}/node_modules`);
+  return ['node_modules', ...packages].filter((dir) => lexists(path.join(root, dir)));
+}
+
+function workspaceGlobs(root: string): string[] {
+  let manifest: unknown;
+  try { manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')); } catch { return []; }
+  if (typeof manifest !== 'object' || manifest === null || !('workspaces' in manifest)) return [];
+  // An array (npm, yarn) or yarn classic's `{ packages: [...] }`.
+  const { workspaces } = manifest;
+  const listed: unknown = typeof workspaces === 'object' && workspaces !== null && 'packages' in workspaces ? workspaces.packages : workspaces;
+  if (!Array.isArray(listed)) return [];
+  return listed.filter((glob): glob is string => typeof glob === 'string' && !glob.startsWith('!'));
 }
 
 class GitWorktreeIsolation implements IWorktreeIsolation {
@@ -440,6 +473,57 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     });
   }
 
+  reopen(task: Task, run: IsolationRun): Promise<PreparedTask> {
+    return this.admin(run.workspaceRoot, async () => {
+      const record = run.tasks[task.id];
+      if (record?.status !== 'conflict') throw new Error(`Task ${task.order} has no conflict to repair`);
+      let cwd = record.workspace;
+      const repairBase: Record<string, string> = {};
+      for (const repo of run.repos) {
+        const entry = record.repos[repo.path];
+        if (!entry) continue;
+        if (!fs.existsSync(entry.worktree)) throw new Error(`The worktree of task ${task.order} is gone: ${entry.worktree}`);
+        if (repo.path === SELF_REPO) cwd = await this.inWorkspacePlace(repo, entry.worktree);
+        // A record from before `changed` was kept names only the repo that stopped it.
+        if (entry.changed || repo.path === record.conflictRepo) {
+          repairBase[repo.path] = (await this.git(repo.root, ['rev-parse', '--verify', repo.integrationBranch])).trim();
+        }
+      }
+      const files = (record.conflictFiles ?? []).map((file) => (record.conflictRepo && record.conflictRepo !== SELF_REPO ? `${record.conflictRepo}/${file}` : file));
+      record.repairs = (record.repairs ?? 0) + 1;
+      record.repairBase = repairBase;
+      record.repairedFiles = [...new Set([...(record.repairedFiles ?? []), ...files])];
+      record.status = 'repairing';
+      return { cwd, branch: record.branch, copied: [] };
+    });
+  }
+
+  async verifyRepair(task: Task, run: IsolationRun): Promise<RepairEvidence> {
+    const record = run.tasks[task.id];
+    if (!record?.repairBase) return { ok: false, reason: 'failed', repo: record?.conflictRepo ?? SELF_REPO };
+    for (const repo of run.repos) {
+      const entry = record.repos[repo.path];
+      if (!entry) continue;
+      try {
+        await this.commitWorktree(repo, record, entry);
+      } catch {
+        return { ok: false, reason: 'failed', repo: repo.path };
+      }
+    }
+    for (const repo of run.repos) {
+      const base = record.repairBase[repo.path];
+      if (base === undefined) continue;
+      const contains = await this.tryGit(repo.root, ['merge-base', '--is-ancestor', base, record.branch]);
+      if (!contains.ok) return { ok: false, reason: contains.code === 1 ? 'not-merged' : 'failed', repo: repo.path };
+      const check = await this.tryGit(repo.root, ['-c', 'core.quotePath=false', 'diff', '--check', base, record.branch]);
+      // Exit 2 is "found something", which is whitespace just as often; anything else is git failing.
+      if (!check.ok && check.code !== 2) return { ok: false, reason: 'failed', repo: repo.path };
+      const files = leftoverMarkerFiles(check.stdout);
+      if (files.length > 0) return { ok: false, reason: 'conflict-markers', repo: repo.path, files };
+    }
+    return { ok: true };
+  }
+
   /**
    * The place in a repo's worktree that matches where the workspace sits in
    * the real repo: the worktree itself, or a subdirectory of it when the
@@ -473,6 +557,7 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
       if (opts.keep) {
         // Off `active` so a crash-recovery prune does not mistake a kept attempt for an orphan.
         if (record.status === 'active') record.status = 'kept';
+        else if (record.status === 'repairing') settleStatus(record, 'conflict');
         return;
       }
       await this.removeTask(run, record, { dropRecord: true });
@@ -499,6 +584,8 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
       for (const record of Object.values(run.tasks)) {
         if (record.status === 'active') await this.removeTask(run, record, { dropRecord: true });
         else if (record.status === 'merged') await this.removeTask(run, record, { dropRecord: false });
+        // The work a repair was given is committed on the branch; only the attempt died.
+        else if (record.status === 'repairing') settleStatus(record, 'conflict');
       }
       await this.removeUnowned(run);
       for (const repo of run.repos) await this.tryGit(repo.root, ['worktree', 'prune']);
@@ -727,43 +814,46 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
         return this.stopLanding(record, 'failed');
       }
       for (const repo of changed) {
-        const outcome = await this.mergeTask(run, repo, record);
+        const { outcome, files } = await this.mergeTask(run, repo, record);
         if (outcome === 'merged') continue;
-        return (await this.settleLanding(run)).length === 0 ? this.stopLanding(record, outcome, repo) : this.stopLanding(record, 'failed', repo);
+        return (await this.settleLanding(run)).length === 0 ? this.stopLanding(record, outcome, repo, files) : this.stopLanding(record, 'failed', repo);
       }
     }
 
     // No await between these: a persist must never see the landing cleared without the task merged.
     delete run.landing;
-    record.status = 'merged';
+    settleStatus(record, 'merged');
     delete record.conflictRepo;
+    delete record.conflictFiles;
     // The work is on the integration branches already; a stuck cleanup must
     // not turn that into a failure. `pruneOrphans` sweeps up whatever it leaves.
     await this.admin(run.workspaceRoot, () => this.removeTask(run, record, { dropRecord: false })).catch(() => undefined);
     return 'merged';
   }
 
-  private stopLanding(record: IsolationTaskRecord, outcome: Exclude<IsolationOutcome, 'merged'>, repo?: IsolationRepo): IsolationOutcome {
-    record.status = outcome;
+  private stopLanding(record: IsolationTaskRecord, outcome: Exclude<IsolationOutcome, 'merged'>, repo?: IsolationRepo, files?: string[]): IsolationOutcome {
+    settleStatus(record, outcome);
     if (repo) record.conflictRepo = repo.path;
     else delete record.conflictRepo;
+    if (files && files.length > 0) record.conflictFiles = files;
+    else delete record.conflictFiles;
     return outcome;
   }
 
   /** Merge the task branch into one repo's integration branch. A merge that does not complete is aborted: it is Ordewell's own. */
-  private async mergeTask(run: IsolationRun, repo: IsolationRepo, record: IsolationTaskRecord): Promise<IsolationOutcome> {
+  private async mergeTask(run: IsolationRun, repo: IsolationRepo, record: IsolationTaskRecord): Promise<{ outcome: IsolationOutcome; files: string[] }> {
     let dir: string;
     try {
       dir = await this.ensureIntegrationWorktree(run, repo);
     } catch {
-      return 'failed';
+      return { outcome: 'failed', files: [] };
     }
     const merge = await this.tryGit(dir, ['merge', '--no-ff', '--no-edit', '-m', `Merge task ${record.order}: ${firstLine(record.title)}`, record.branch]);
-    if (merge.ok) return 'merged';
+    if (merge.ok) return { outcome: 'merged', files: [] };
     // A hook that refuses the merge commit leaves a merge in progress with nothing unmerged: a failure, not a conflict.
-    const conflicted = (await this.unmergedPaths(dir)).length > 0;
+    const files = await this.unmergedPaths(dir);
     if (await this.mergeInProgress(dir)) await this.abortMerge(dir);
-    return conflicted ? 'conflict' : 'failed';
+    return { outcome: files.length > 0 ? 'conflict' : 'failed', files };
   }
 
   /**
@@ -918,8 +1008,13 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
 
   private async removeWorktreeDir(run: IsolationRun, repo: IsolationRepo, dir: string, linked: string[]): Promise<void> {
     // Links first, so no removal path can ever walk through one into the main
-    // worktree's node_modules.
-    for (const name of linked) this.unlinkIfLink(path.join(dir, name));
+    // worktree's node_modules. A mirrored install is a real directory of links;
+    // it is found again from package.json when no record names it.
+    for (const name of new Set([...linked, ...installDirs(dir)])) {
+      const target = path.join(dir, name);
+      this.unlinkIfLink(target);
+      this.unlinkLinksUnder(target);
+    }
     for (const name of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
       if (LINKED_ARTIFACTS.has(name) || isEnvFile(name)) this.unlinkIfLink(path.join(dir, name));
     }
@@ -971,10 +1066,25 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
       linked.push(name);
     };
 
+    // A whole-folder link would resolve a workspace link such as
+    // node_modules/@scope/pkg -> ../../packages/pkg from the main checkout,
+    // so the task would build against the main checkout's copy of the code it
+    // is changing. Mirroring entry by entry lets those links land in the worktree.
+    const mirror = (name: string): void => {
+      const target = path.join(cwd, name);
+      if (lexists(target) || !fs.existsSync(path.dirname(target))) return;
+      const source = path.join(repo.root, name);
+      if (!fs.lstatSync(source).isDirectory()) return link(name);
+      const mirrored = mirrorDir(source, target, { platform: this.platform, from: repo.root, to: cwd });
+      copied.push(...mirrored.map((entry) => path.join(name, entry)));
+      linked.push(name);
+    };
+
     if (!setup) {
       for (const name of fs.readdirSync(repo.root)) {
-        if (name !== STATE_DIR && (LINKED_ARTIFACTS.has(name) || isEnvFile(name))) link(name);
+        if (name !== STATE_DIR && name !== 'node_modules' && (LINKED_ARTIFACTS.has(name) || isEnvFile(name))) link(name);
       }
+      for (const dir of installDirs(repo.root)) mirror(dir);
     }
     for (const name of matchLinks(repo.root, this.deps.config.worktreeLinks)) link(name);
     if (setup) await this.runSetup(setup, repo, cwd);

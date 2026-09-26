@@ -157,6 +157,10 @@ const ISOLATED_PARALLELISM_RULE =
 
 const OVERLAP_AVOIDANCE_RULE = '- For parallel tasks, specify different target files to avoid merge conflicts.';
 
+/** Even under worktree isolation, tasks appending to one shared file still race each other's merges. */
+const SHARED_APPEND_FILE_RULE =
+  '- Tasks that run in parallel must not each append to the same shared file (changelogs, registries, index lists) — give that edit to the final task, or to one task the others depend on.';
+
 /**
  * What a planner must know about a repo group (ADR-0014), as a section of its
  * own; nothing for tasks in the shared root or a lone repository, whose
@@ -276,6 +280,7 @@ function buildConversationBody(
     'DEPENDENCY & PARALLELISM:',
     '- Independent slices should have NO dependencies — they run in parallel.',
     '- Only add dependencies when a slice truly depends on artifacts another slice creates.',
+    SHARED_APPEND_FILE_RULE,
     ...(variant.isolatedExecution ? [ISOLATED_PARALLELISM_RULE] : []),
     ...repoGroupSection(variant.isolatedExecution),
     '',
@@ -380,6 +385,7 @@ function corePlannerPrompt(isolatedExecution: IsolatedExecution): string {
     : '- Independent vertical slices (no shared files/modules) should have NO dependencies between them — they can run in parallel.',
   '- Only add dependencies when the second slice truly depends on artifacts (files, APIs) that the first slice creates.',
   '- Prefer parallelism over serial chains. A plan with 3 independent slices running in parallel is better than 3 sequential tasks.',
+  SHARED_APPEND_FILE_RULE,
   isolatedExecution ? ISOLATED_PARALLELISM_RULE : '- Slices that touch different areas of the codebase are naturally parallel.',
   ...repoGroupSection(isolatedExecution),
   '',
@@ -763,6 +769,42 @@ export function buildConflictResolutionPrompt(
     `Task #${task.order} "${task.title}" passed, but landing its branch \`${branch}\` on \`${integrationBranch}\` conflicted in ${conflict.conflictRepo ?? repos[0]}. A task lands in every repository it changed or in none, so none of its work has landed yet.`,
     `This workspace holds every repository at its usual path, each starting at the tip of \`${integrationBranch}\`. In each repository the task changed — ${repos.join(', ')} — run \`git merge --no-ff ${branch}\` inside that repository's directory, and resolve every conflict so that both sides' intent survives: keep the work already integrated and add what the task contributed. Do not drop either side wholesale.`,
     'Build and test the result the way this project does, then commit the merge in each repository.',
+    '',
+    asked,
+  ].join('\n');
+}
+
+/**
+ * Runner prompt for a conflict repair (ADR-0015): a new attempt of the
+ * conflicted task itself, in its kept worktree, so the merge runs the other
+ * way round from {@link buildConflictResolutionPrompt} — the integration tip
+ * into the task's branch. Whether it worked is decided by the evidence checks
+ * and the landing that follow, never by the agent's word.
+ */
+export function buildConflictRepairPrompt(
+  task: Task,
+  conflict: { branch: string; repos: string[]; conflictRepo?: string; conflictFiles?: string[] },
+  integrationBranch: string,
+): string {
+  const { branch } = conflict;
+  const files = conflict.conflictFiles ?? [];
+  const asked = `What the task was asked to do:\n${task.prompt ?? task.description}`;
+  const resolve = 'resolve every conflict so that both sides\' intent survives: keep the work already integrated and add what the task contributed.';
+  const repos = conflict.repos.filter((repo) => repo !== SELF_REPO);
+  if (repos.length === 0) {
+    return [
+      `Task #${task.order} "${task.title}" passed, but merging its branch \`${branch}\` into \`${integrationBranch}\` conflicted${files.length > 0 ? ` in ${files.join(', ')}` : ''}. None of its work has landed yet.`,
+      `This is the task's own worktree, on \`${branch}\`, with its work committed. Run \`git merge --no-edit ${integrationBranch}\` here and ${resolve} Never drop either side wholesale, and never abort the merge or reset it away.`,
+      'Build and test the result the way this project does, commit the merge, and only then print the completion marker.',
+      '',
+      asked,
+    ].join('\n');
+  }
+  const stoppedIn = conflict.conflictRepo ?? repos[0];
+  return [
+    `Task #${task.order} "${task.title}" passed, but landing its branch \`${branch}\` on \`${integrationBranch}\` conflicted in ${stoppedIn}${files.length > 0 ? ` (${files.join(', ')})` : ''}. A task lands in every repository it changed or in none, so none of its work has landed yet.`,
+    `This is the task's own workspace, with each repository at its usual path on \`${branch}\` and the task's work committed. In each repository the task changed — ${repos.join(', ')} — run \`git merge --no-edit ${integrationBranch}\` inside that repository's directory, and ${resolve} Never drop either side wholesale, and never abort a merge or reset it away.`,
+    'Build and test the result the way this project does, commit the merge in each repository, and only then print the completion marker.',
     '',
     asked,
   ].join('\n');

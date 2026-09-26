@@ -79,6 +79,37 @@ describe('plan pane — isolation', () => {
     expect(footerHints(plan([task({ isolation: conflict })]))).toContain('x resolve conflict');
     expect(footerHints(plan([task({ isolation: active })]))).not.toContain('x resolve conflict');
   });
+
+  const repairing = { state: 'repairing' as const, branch: 'ordewell/r1/2-t2', worktree: '/ws/.ordewell/worktrees/r1/2-t2', conflictFiles: ['a.ts'], repair: { attempt: 1, limit: 2 } };
+
+  it('shows a repairing task as running, naming the files and the repair attempt (ADR-0015)', () => {
+    const out = frame(plan([task({ id: 't2', order: 2, status: 'in_progress', isolation: repairing })], { cols: 200 }));
+
+    expect(out).toContain('repairing conflict in a.ts (attempt 1/2)');
+  });
+
+  it('leaves off the attempt when it is not known yet, but still names the files', () => {
+    const withoutAttempt = { state: 'repairing' as const, branch: repairing.branch, worktree: repairing.worktree, conflictFiles: repairing.conflictFiles };
+    const out = frame(plan([task({ id: 't2', order: 2, status: 'in_progress', isolation: withoutAttempt })], { cols: 200 }));
+
+    expect(out).toContain('repairing conflict in a.ts');
+    expect(out).not.toContain('attempt');
+  });
+
+  it('offers no resolve key on a repairing task: a repair is already running', () => {
+    expect(footerHints(plan([task({ isolation: repairing })]))).not.toContain('x resolve conflict');
+  });
+
+  it('marks a landed task that only landed after repairing a conflict', () => {
+    const landedRepaired = { ...integrated, repairedFiles: ['a.ts', 'b.ts'] };
+    const out = frame(plan([task({ isolation: landedRepaired })], { cols: 200 }));
+
+    expect(out).toContain('landed after repairing conflict in a.ts, b.ts');
+  });
+
+  it('says nothing about a repair for a landed task that never needed one', () => {
+    expect(frame(plan([task({ isolation: integrated })]))).not.toContain('repair');
+  });
 });
 
 describe('handoff overlay frame over a repo group', () => {
@@ -155,6 +186,16 @@ describe('handoff overlay frame', () => {
 
   it('says plainly when nothing landed', () => {
     expect(frame(open({ handoff: { ...handoff, landed: [] } }))).toContain('Nothing landed on it.');
+  });
+
+  it('marks a landed task that only landed after a conflict repair, with its files (ADR-0015)', () => {
+    const repaired = { ...handoff, landed: [{ ...handoff.landed[0], repairedFiles: ['a.ts', 'b.ts'] }, handoff.landed[1]] };
+    const out = frame(open({ handoff: repaired }));
+
+    expect(out).toContain('#1 Add the route');
+    expect(out).toContain('repaired (a.ts, b.ts)');
+    expect(out.indexOf('#2 Write the tests')).toBeGreaterThan(-1);
+    expect(out.split('\n').find((l) => l.includes('#2 Write the tests'))).not.toContain('repaired');
   });
 
   it('marks the highlighted action', () => {

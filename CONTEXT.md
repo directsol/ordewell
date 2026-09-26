@@ -381,7 +381,10 @@ conflicted task's worktree is kept so its work can be inspected; a retry
 discards it and starts a fresh one from the current integration tip. Ignored
 artifacts (`node_modules`, `.env*`, `.claude`, …) are linked in from the main
 worktree so it is runnable at once — never `.ordewell/`, which stays at the main
-root. Under ADR-0014 a task has one worktree per repo of the group, gathered in
+root. `node_modules` (the root's and each workspace package's) is a real
+directory whose entries are linked one by one, and whose own links are
+recreated, so a workspace package resolves to the worktree's code rather than
+the main checkout's (ADR-0013, update of 2026-09-26). Under ADR-0014 a task has one worktree per repo of the group, gathered in
 its *task workspace*; each is bootstrapped from its own repo, with the
 `worktreeLinks` matches linked beside the defaults, and `worktreeSetupCommand`
 runs once per repo with `ORDEWELL_REPO` and `ORDEWELL_MAIN_REPO` set.
@@ -430,8 +433,11 @@ work lands on (in each repo of the group, under ADR-0014, where landing a task i
 atomic across the repos it changed). Each task that passes its Verdict is merged into it with
 `git merge --no-ff`, one at a time, lowest plan order first among the tasks
 waiting, so the history is reproducible and each task is attributable to a merge
-commit. A merge conflict is aborted and reported, never resolved for the user
-and never by a model; in a group, it undoes the task's whole *landing*. It is never merged into the checked-out branch until the
+commit. A merge conflict is aborted and reported; before it reaches the user it
+gets a bounded, evidenced *conflict repair* (ADR-0015), and only an unrepaired
+or exhausted conflict is left for a person to resolve by hand, or as
+`resolveConflictAsTask`. In a group, a conflict undoes the task's whole
+*landing*. It is never merged into the checked-out branch until the
 user asks. It outlives its run's worktrees (clean-up keeps it) and is deleted
 only when given up (discard), or once it is merged into the checked-out branch:
 right after a *Merge all* that merged everything, or at a later run's start,
@@ -457,6 +463,29 @@ landed, and a dependent starts only then. `conflictRepo` names the repo that
 stopped it.
 *Avoid:* "merge" for the whole of it — a landing is one merge per changed repo;
 "rollback" for anything done to a user's branch — Ordewell never resets one.
+
+**Conflict repair** — a bounded, automatic response to a conflicted landing
+(ADR-0015): a new attempt of the same task, in its kept worktree, on its own
+runner, model and mode (ADR-0001 — a repair is not a new task, so nothing
+about it is rewritten). Its prompt is to `git merge` the current integration
+tip into the task's branch, resolve the named files so both sides' intent
+survives, build, test, commit, and emit the task's own completion marker. It
+counts as having repaired the conflict only once all of: the marker appears;
+the task branch now contains the tip the repair started from
+(`git merge-base --is-ancestor`); `git diff --check` finds no leftover
+conflict markers; and the landing that follows goes through clean — a repair
+that fails that last check is a fresh conflict, not a claim taken at its word.
+Capped per task by `conflictRepairAttempts` (default 2, persisted on the run
+so a restart cannot re-spend it; 0 turns repair off). While one runs the task
+is `in_progress` and its record `repairing`; each repair is counted when it
+starts, and the files every repair was started for gather in `repairedFiles`. A repair that fails
+evidence or exhausts its cap goes back to an unrepaired conflict — `awaiting_user`,
+worktree and refs kept, every existing way out still open — and never halts
+the run on its own. Every repair is logged as a notice, and a landed one is
+named, with its files, in the *Isolation handoff*.
+*Avoid:* "auto-merge" (there is still a real merge conflict to resolve, not a
+fast-forward); "resolver" (that names `resolveConflictAsTask`, the explicit
+`x` action a person asks for — a repair runs before anyone is asked); "auto-resolve" (implies the model's word stands in for the Verdict, which it never does).
 
 **Merge all** — the handoff's one merge, `mergeRun`: every repo's integration
 branch into what the user has checked out there, all or nothing. Each repo with
@@ -510,10 +539,13 @@ checked-out branch, only ever on that explicit call; once everything merged, the
 run is cleared up and forgotten, so no surface offers its handoff again), `cleanupRun` (worktrees and
 task branches go, the integration branch stays) and `discardRun` (everything
 goes, and the plan forgets the run; task statuses are left as they are). A
-conflicted task leaves by a hand resolution plus Mark complete, a retry, or
-`resolveConflictAsTask` — an added task that merges the branch by hand and
-through whose landing the conflicted task lands, if it is still conflicted by
-then (a retry in the meantime replaces the conflict with a new attempt).
+conflicted task's first way out is automatic: a *conflict repair* (ADR-0015)
+runs on the task's own attempt before anyone is asked, up to
+`conflictRepairAttempts`. Only a conflict that repair does not clear leaves by
+a hand resolution plus Mark complete, a retry, or `resolveConflictAsTask` — an
+added task that merges the branch by hand and through whose landing the
+conflicted task lands, if it is still conflicted by then (a retry in the
+meantime replaces the conflict with a new attempt).
 *Avoid:* "result", "output branch" for the handoff — it is a branch to review,
 not an outcome.
 Under ADR-0014 the handoff covers every repo of the group: one *Merge all*, and a

@@ -35,10 +35,12 @@ export type IsolationOutcome = 'merged' | 'conflict' | 'failed';
  * `active` — worktree exists, a runner may be writing to it.
  * `kept` — released with its worktree and branch preserved for inspection.
  * `conflict` — integration stopped on a merge conflict; worktree and refs kept.
+ * `repairing` — a conflict repair (ADR-0015) is working in the kept worktree;
+ *   one that ends without landing leaves the task `conflict` again.
  * `failed` — integration hit a git error other than a conflict; refs kept.
  * `merged` — landed on the integration branch; worktree and task branch removed.
  */
-export type IsolationTaskStatus = 'active' | 'kept' | 'conflict' | 'failed' | 'merged';
+export type IsolationTaskStatus = 'active' | 'kept' | 'conflict' | 'repairing' | 'failed' | 'merged';
 
 /** One repo's share of a task: its worktree inside the task workspace. */
 export interface IsolationTaskRepo {
@@ -72,6 +74,24 @@ export interface IsolationTaskRecord {
   repos: Record<string, IsolationTaskRepo>;
   /** The repo whose merge stopped the task from landing, while `status` is `conflict` or `failed`. */
   conflictRepo?: string;
+  /** Repo-relative paths, in `conflictRepo`, that conflicted; set only while `status` is `conflict` or `repairing`. */
+  conflictFiles?: string[];
+  /**
+   * Conflict repairs started for this task (ADR-0015). Counted when one starts,
+   * so a crash cannot hand the spent attempt back; absent reads as none.
+   */
+  repairs?: number;
+  /**
+   * Keyed by repo path: each changed repo's integration tip when the repair in
+   * flight started — what the task branch must contain before it may land.
+   * Set only while `status` is `repairing`.
+   */
+  repairBase?: Record<string, string>;
+  /**
+   * Every file a repair was started for, across all of them: as `conflictFiles`
+   * names it in a group of one, prefixed with its repo's path in a group.
+   */
+  repairedFiles?: string[];
 }
 
 /**
@@ -151,7 +171,7 @@ export interface PlanIsolation {
  * did not land and can be looked at. `none` is a task with no worktree in a plan
  * that has an isolation run.
  */
-export type TaskIsolationState = 'none' | 'active' | 'integrated' | 'conflict' | 'kept';
+export type TaskIsolationState = 'none' | 'active' | 'integrated' | 'conflict' | 'repairing' | 'kept';
 
 export type TaskIsolation =
   | { state: 'none' }
@@ -163,12 +183,20 @@ export type TaskIsolation =
     /** Paths of the repos the task changed. */
     repos: string[];
     conflictRepo?: string;
+    /** Repo-relative paths, in `conflictRepo`, that conflicted. */
+    conflictFiles?: string[];
+    /** The conflict repair running or last run, of the most a task may have; absent before its first. */
+    repair?: { attempt: number; limit: number };
+    /** What {@link IsolationTaskRecord.repairedFiles} says. */
+    repairedFiles?: string[];
   };
 
 export interface IsolationLandedTask {
   taskId: string;
   order: number;
   title: string;
+  /** Set when the task landed only after a conflict repair (ADR-0015): the files it was started for. */
+  repairedFiles?: string[];
 }
 
 export interface IsolationHandoffRepo {
@@ -231,6 +259,15 @@ export type IsolationMergeResult =
  */
 export type IntegrationDisposal = 'keep' | 'delete' | 'delete-merged';
 
+/**
+ * Whether a conflict repair's work may land. `not-merged`: the task branch in
+ * `repo` does not contain the tip the repair started from. `conflict-markers`:
+ * it adds leftover conflict markers to `files`. `failed`: git could not tell.
+ */
+export type RepairEvidence =
+  | { ok: true }
+  | { ok: false; reason: 'not-merged' | 'conflict-markers' | 'failed'; repo: string; files?: string[] };
+
 export interface PreparedTask {
   cwd: string;
   branch: string;
@@ -273,13 +310,32 @@ export interface IWorktreeIsolation {
   prepare(task: Task, run: IsolationRun): Promise<PreparedTask>;
 
   /**
+   * Hand a conflicted task's kept workspace to a conflict repair (ADR-0015)
+   * as it is — nothing is re-cut — and return the same cwd. Records each
+   * changed repo's integration tip as `repairBase`, counts the repair, and
+   * moves the task to `repairing`. Throws for a task that is not `conflict`.
+   */
+  reopen(task: Task, run: IsolationRun): Promise<PreparedTask>;
+
+  /**
+   * The evidence a repair must show before it lands: its work committed, and
+   * in each repo of `repairBase` the task branch containing that tip
+   * (`git merge-base --is-ancestor`) and adding no leftover conflict markers
+   * (`git diff --check`; whitespace warnings do not count). Changes nothing
+   * else: a task that fails stays `repairing` until released.
+   */
+  verifyRepair(task: Task, run: IsolationRun): Promise<RepairEvidence>;
+
+  /**
    * Land the task atomically across the repos it changed: commit each
    * worktree, then `git merge --no-ff` the task branch into each changed
    * repo's integration branch. If any merge conflicts or fails, it is aborted
    * and the merges already made for the task are reset away, so `merged`
    * always means the whole task landed. Serialized inside the module; among
    * tasks waiting at once the lowest plan order goes first. On anything but
-   * `merged` the worktrees and refs stay, and nothing is ever auto-resolved.
+   * `merged` the worktrees and refs stay, and nothing is resolved here: a
+   * conflict is repaired, if at all, by a new attempt of the task in its own
+   * worktree (ADR-0015), never inside this queue.
    *
    * `persist` is called once `run.landing` is set and before the first
    * merge; the caller saves the run there, synchronously, which is what
@@ -291,7 +347,8 @@ export interface IWorktreeIsolation {
    * `keep: false` removes the task's worktree, branch and record (cancel, task
    * removal). `keep: true` leaves the worktree and branch exactly as they are
    * for inspection — a failed verdict — and only moves the task off `active`,
-   * so a crash-recovery prune does not sweep it away. Takes the run rather than
+   * so a crash-recovery prune does not sweep it away; a repair it ends leaves
+   * the task `conflict`, as it was before the repair. Takes the run rather than
    * a bare task id: ids are only unique within one plan, and one daemon serves
    * many (ADR-0007).
    */
@@ -302,7 +359,8 @@ export interface IWorktreeIsolation {
 
   /**
    * Drop what a crash left behind: a landing it interrupted is rolled back in
-   * every repo, then stale active worktrees and directories no record owns go.
+   * every repo, a repair it interrupted leaves its task `conflict`, then stale
+   * active worktrees and directories no record owns go.
    */
   pruneOrphans(run: IsolationRun): Promise<void>;
 

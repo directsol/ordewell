@@ -36,18 +36,28 @@ const ISOLATION_STATE: Record<IsolationTaskStatus, Exclude<TaskIsolation['state'
   active: 'active',
   merged: 'integrated',
   conflict: 'conflict',
+  repairing: 'repairing',
   kept: 'kept',
   failed: 'kept',
 };
 
-export function taskIsolationOf(record: IsolationTaskRecord): TaskIsolation {
+/** `repairLimit` is `conflictRepairAttempts` as it stands now, which is what the next repair will be held to. */
+export function taskIsolationOf(record: IsolationTaskRecord, repairLimit: number): TaskIsolation {
   return {
     state: ISOLATION_STATE[record.status],
     branch: record.branch,
     worktree: record.workspace,
     repos: Object.entries(record.repos).filter(([, r]) => r.changed).map(([repoPath]) => repoPath),
     ...(record.conflictRepo ? { conflictRepo: record.conflictRepo } : {}),
+    ...(record.conflictFiles?.length ? { conflictFiles: record.conflictFiles } : {}),
+    ...(record.repairs ? { repair: { attempt: record.repairs, limit: repairLimit } } : {}),
+    ...(record.repairedFiles?.length ? { repairedFiles: record.repairedFiles } : {}),
   };
+}
+
+/** A conflict's files as one surface shows them: every one, up to `max`, then how many more. */
+export function capConflictFiles(files: string[], max = 5): string {
+  return files.length <= max ? files.join(', ') : `${files.slice(0, max).join(', ')}, +${files.length - max} more`;
 }
 
 /** What a run hands over: each repo's integration branch and base, and what landed, in plan order. */
@@ -55,7 +65,10 @@ export function handoffOf(run: IsolationRun): IsolationHandoff {
   const merged = Object.values(run.tasks)
     .filter((r) => r.status === 'merged')
     .sort((a, b) => a.order - b.order);
-  const entry = (r: IsolationTaskRecord): IsolationLandedTask => ({ taskId: r.taskId, order: r.order, title: r.title });
+  const entry = (r: IsolationTaskRecord): IsolationLandedTask => ({
+    taskId: r.taskId, order: r.order, title: r.title,
+    ...(r.repairedFiles?.length ? { repairedFiles: r.repairedFiles } : {}),
+  });
   return {
     repos: run.repos.map((repo) => ({
       path: repo.path,

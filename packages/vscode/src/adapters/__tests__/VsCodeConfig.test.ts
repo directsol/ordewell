@@ -24,7 +24,7 @@ async function makeStore(initial: Record<string, string> = {}) {
   return store;
 }
 
-const ENV_KEYS = ['ORDEWELL_WORKTREE_ISOLATION', 'ORDEWELL_WORKSPACE_REPOS', 'ORDEWELL_WORKTREE_LINKS', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'ORCHESTRATOR_MODEL', 'AI_PROVIDER'];
+const ENV_KEYS = ['ORDEWELL_WORKTREE_ISOLATION', 'ORDEWELL_CONFLICT_REPAIR_ATTEMPTS', 'ORDEWELL_WORKSPACE_REPOS', 'ORDEWELL_WORKTREE_LINKS', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'ORCHESTRATOR_MODEL', 'AI_PROVIDER'];
 let savedEnv: Record<string, string | undefined>;
 
 beforeEach(() => {
@@ -84,6 +84,29 @@ describe('VsCodeConfig.worktreeIsolation', () => {
     __setConfig({ worktreeIsolation: true });
     process.env.ORDEWELL_WORKTREE_ISOLATION = 'false';
     expect(new VsCodeConfig(store).worktreeIsolation).toBe(false);
+  });
+});
+
+describe('VsCodeConfig.conflictRepairAttempts', () => {
+  it('allows two repairs by default', async () => {
+    __setConfig({});
+    expect(new VsCodeConfig(await makeStore({})).conflictRepairAttempts).toBe(2);
+  });
+
+  it('reads the setting, where 0 turns repair off', async () => {
+    __setConfig({ conflictRepairAttempts: 0 });
+    expect(new VsCodeConfig(await makeStore({})).conflictRepairAttempts).toBe(0);
+  });
+
+  it('keeps the default for a setting that is not a non-negative integer', async () => {
+    __setConfig({ conflictRepairAttempts: -1 });
+    expect(new VsCodeConfig(await makeStore({})).conflictRepairAttempts).toBe(2);
+  });
+
+  it('lets ORDEWELL_CONFLICT_REPAIR_ATTEMPTS override the setting', async () => {
+    __setConfig({ conflictRepairAttempts: 3 });
+    process.env.ORDEWELL_CONFLICT_REPAIR_ATTEMPTS = '0';
+    expect(new VsCodeConfig(await makeStore({})).conflictRepairAttempts).toBe(0);
   });
 });
 

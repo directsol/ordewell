@@ -95,6 +95,55 @@ describe('TaskCard — isolation conflict (ADR-0013)', () => {
   });
 });
 
+describe('TaskCard — conflict repair (ADR-0015)', () => {
+  it('shows a repairing indicator, naming the files and the repair attempt', () => {
+    render(
+      <TaskCard
+        task={makeTask({ status: 'in_progress' })}
+        models={emptyModels}
+        isExecuting={false}
+        isolation={{
+          state: 'repairing', branch: 'ordewell/r/1-a', worktree: '.ordewell/worktrees/r/1-a', repos: ['.'],
+          conflictFiles: ['a.ts'], repair: { attempt: 1, limit: 2 },
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/Repairing/)).toBeTruthy();
+    act(() => { fireEvent.click(screen.getByText('Test task')); });
+    expect(screen.getByText('a.ts')).toBeTruthy();
+    expect(screen.getByText('1 of 2')).toBeTruthy();
+  });
+
+  it('marks a landed task that only landed after repairing a conflict', () => {
+    render(
+      <TaskCard
+        task={makeTask({ status: 'completed' })}
+        models={emptyModels}
+        isExecuting={false}
+        isolation={{ state: 'integrated', branch: 'ordewell/r/1-a', worktree: '.ordewell/worktrees/r/1-a', repos: ['.'], repairedFiles: ['a.ts', 'b.ts'] }}
+      />,
+    );
+
+    act(() => { fireEvent.click(screen.getByText('Test task')); });
+    expect(screen.getByText(/repairing.*a\.ts, b\.ts/)).toBeTruthy();
+  });
+
+  it('says nothing about a repair for a landed task that never needed one', () => {
+    render(
+      <TaskCard
+        task={makeTask({ status: 'completed' })}
+        models={emptyModels}
+        isExecuting={false}
+        isolation={{ state: 'integrated', branch: 'ordewell/r/1-a', worktree: '.ordewell/worktrees/r/1-a', repos: ['.'] }}
+      />,
+    );
+
+    act(() => { fireEvent.click(screen.getByText('Test task')); });
+    expect(document.querySelector('.task-isolation-repaired-note')).toBeNull();
+  });
+});
+
 describe('TaskCard — repo group (ADR-0014)', () => {
   it('names the conflicting repo on a group conflict badge', () => {
     render(
