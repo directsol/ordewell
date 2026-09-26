@@ -7,6 +7,7 @@ import type { ConversationRequest } from '../AiService';
 import type { ResearchProgress, ResearchStep } from '../../models/Task';
 import { fakeSpawn, fixture, planJson, scriptedAdapter, type FakeSpawnOptions, type ScriptedReply } from './harnessTestKit';
 import type { AgentEvent } from '../harness/AgentAdapter';
+import { addPlannerUsage, plannerContextFill } from '../../models/Usage';
 
 /**
  * Harness planners, driven through the one seam the design commits to: the
@@ -148,7 +149,7 @@ describe('CliAgentAiService — Claude Code', () => {
   // stream, parented to the tool call that spawned it. Read as the planner
   // talking, an exploration agent's commentary became the first thing the user
   // saw — an answer to a prompt they never sent.
-  it('keeps subagent transcripts out of the planner reply and the research log', async () => {
+  it('keeps subagent text out of the planner reply, and tags its steps with the subagent', async () => {
     const { svc } = service('claude-code', [fixture('claude-code', 'subagent')]);
     const { events, onProgress } = collector();
     const turn = await svc.startConversation(request({ onProgress }));
@@ -156,26 +157,29 @@ describe('CliAgentAiService — Claude Code', () => {
     expect(turn.text).not.toContain('Tool loaded');
     expect(turn.text).toContain('explore the cache layer');
     expect(turn.text).toContain('in-process or Redis');
-    expect(events.filter((e) => e.type === 'thinking')).toHaveLength(0);
-    // Only the spawning call is the planner's; the subagent's own Read is not.
+    expect(events.filter((e) => e.type === 'thinking').map((e) => e.subagentId)).toEqual(['toolu_agent']);
+    // Only the spawning call is the planner's; the subagent's own Read is its.
     const calls = events.filter((e) => e.type === 'tool_call');
-    expect(calls.map((c) => c.toolCallId)).toEqual(['toolu_agent']);
-    expect(turn.researchLog.flatMap((s) => ('toolCallId' in s ? [s.toolCallId] : []))).toEqual(['toolu_agent']);
+    expect(calls.map((c) => [c.toolCallId, c.subagentId])).toEqual([['toolu_agent', undefined], ['toolu_sub_read', 'toolu_agent']]);
+    expect(turn.researchLog.flatMap((s) => ('toolCallId' in s ? [[s.toolCallId, s.subagentId]] : []))).toEqual([
+      ['toolu_sub_read', 'toolu_agent'],
+      ['toolu_agent', undefined],
+    ]);
   });
 
   // A VS Code idle watchdog resets on any progress event reaching the
-  // webview. The subagent's own thinking, tool call and tool result are
-  // filtered out (previous test) — if liveness rode along with those alone,
-  // a long subagent stretch would starve the watchdog and it would report a
-  // false "stopped responding" while the CLI process was still working.
-  it('pings liveness on every raw line, including the ones the subagent filter drops', async () => {
-    const { svc } = service('claude-code', [fixture('claude-code', 'subagent')]);
+  // webview. Some lines — a subagent's prompt, its commentary, init and
+  // status chatter — yield no event at all; if liveness rode along with
+  // events alone, a long stretch of them would starve the watchdog and it
+  // would report a false "stopped responding" while the CLI was still working.
+  it('pings liveness on every raw line, including the ones that yield no event', async () => {
+    const recorded = fixture('claude-code', 'stream-subagent');
+    const { svc } = service('claude-code', [recorded]);
     const { events, onProgress } = collector();
     await svc.startConversation(request({ onProgress }));
 
-    const liveness = events.filter((e) => e.type === 'liveness').length;
-    const visible = events.filter((e) => e.type !== 'liveness').length;
-    expect(liveness).toBeGreaterThan(visible);
+    const lines = recorded.split('\n').filter((l) => l.trim()).length;
+    expect(events.filter((e) => e.type === 'liveness').length).toBeGreaterThanOrEqual(lines);
   });
 
   it('opens a paragraph for each message after the first, instead of running them together', async () => {
@@ -1125,6 +1129,196 @@ describe('CliAgentAiService — one-shot plan generation', () => {
 
     const args = spawned.lastArgs();
     expect(args[args.indexOf('--resume') + 1]).toBe('sess-chat');
+  });
+});
+
+/**
+ * The `stream-*` fixtures are recorded from Claude Code 2.1.283 with the
+ * adapter's own flags, then scrubbed of session ids and paths. Their numbers
+ * are the CLI's, which is why the expectations below are literals.
+ */
+describe('CliAgentAiService — Claude Code partial messages, usage and subagents', () => {
+  const plannerTokens = (events: ResearchProgress[]) => events.filter((e) => e.type === 'plan_token').map((e) => e.planToken);
+  const usageRecords = (events: ResearchProgress[]) => events.flatMap((e) => (e.type === 'usage' && e.record ? [e.record] : []));
+
+  it('streams reply deltas that add up to the final text, paragraph break included', async () => {
+    const { svc } = service('claude-code', [fixture('claude-code', 'stream-tool-rounds')]);
+    const { events, onProgress } = collector();
+    const turn = await svc.startConversation(request({ onProgress }));
+
+    expect(plannerTokens(events)).toEqual([
+      'I\'ll read README.md now', '.', '\n\n', 'The first line of README.md is', ' "hello".',
+    ]);
+    expect(turn.text).toBe('I\'ll read README.md now.\n\nThe first line of README.md is "hello".');
+  });
+
+  // Claude Code in print mode redacts thinking: the blocks and their deltas
+  // arrive with empty text. An empty thinking row is noise, not reasoning.
+  it('shows nothing for redacted thinking and still streams the reply', async () => {
+    const { svc } = service('claude-code', [fixture('claude-code', 'stream-reasoning')]);
+    const { events, onProgress } = collector();
+    const turn = await svc.startConversation(request({ onProgress }));
+
+    expect(events.filter((e) => e.type === 'thinking')).toEqual([]);
+    expect(plannerTokens(events).join('')).toBe('No, 391 is not prime, because 17 × 23 = 391.');
+    expect(turn.text).toBe('No, 391 is not prime, because 17 × 23 = 391.');
+  });
+
+  // Anthropic's `input_tokens` excludes both cache reads and cache writes, so
+  // the prompt the model saw is the sum of all three; the read share is the
+  // cached one.
+  it('reports each planner call\'s usage once, and the turn\'s cost with the context window', async () => {
+    const { svc } = service('claude-code', [fixture('claude-code', 'stream-tool-rounds')]);
+    const { events, onProgress } = collector();
+    await svc.startConversation(request({ onProgress }));
+
+    expect(usageRecords(events)).toEqual([
+      { source: 'claude-code', model: 'claude-sonnet-5', inputTokens: 18604, cachedInputTokens: 9428, outputTokens: 162 },
+      { source: 'claude-code', model: 'claude-sonnet-5', inputTokens: 20025, cachedInputTokens: 18602, outputTokens: 14 },
+      { source: 'claude-code', reportedCost: { amount: 0.049754, currency: 'USD' }, contextWindow: 1000000 },
+    ]);
+    const usage = usageRecords(events).reduce(addPlannerUsage, { totals: {} });
+    expect(usage.totals).toEqual({
+      inputTokens: 38629, cachedInputTokens: 28030, outputTokens: 176, reportedCost: { USD: 0.049754 },
+    });
+    expect(plannerContextFill(usage)).toEqual({ usedTokens: 20025, windowTokens: 1000000 });
+  });
+
+  // `total_cost_usd` is the session's running total: 0.075482 after the first
+  // of these recorded turns, 0.0866244 after the second.
+  it('reports each turn\'s own share of the session cost', async () => {
+    const { svc } = service('claude-code', [
+      fixture('claude-code', 'stream-reasoning'),
+      fixture('claude-code', 'stream-reasoning-followup'),
+    ]);
+    const first = collector();
+    await svc.startConversation(request({ onProgress: first.onProgress }));
+    const second = collector();
+    await svc.continueConversation('And 397?', second.onProgress);
+
+    const costs = (events: ResearchProgress[]) => usageRecords(events).flatMap((r) => (r.reportedCost ? [r.reportedCost.amount] : []));
+    expect(costs(first.events)).toHaveLength(1);
+    expect(costs(first.events)[0]).toBeCloseTo(0.075482, 10);
+    expect(costs(second.events)).toHaveLength(1);
+    expect(costs(second.events)[0]).toBeCloseTo(0.0111424, 10);
+  });
+
+  // A resumed session restores its running total (recorded: 0.0943048 on the
+  // first turn after `--resume`, most of it spent before). Reporting it would
+  // count those turns again.
+  it('reports no cost for the first turn after a resume, rather than the whole session\'s', async () => {
+    const controller = new AbortController();
+    const { svc, spawned } = service('claude-code', [
+      (_written, proc) => {
+        proc.emitStdout('{"type":"system","subtype":"init","session_id":"sess-claude-stream-1"}\n');
+        controller.abort();
+      },
+      fixture('claude-code', 'stream-resumed'),
+    ]);
+    await svc.startConversation(request({ signal: controller.signal }));
+    const { events, onProgress } = collector();
+    const turn = await svc.continueConversation('Reply with just: ok', onProgress);
+
+    expect(spawned.lastArgs()).toContain('--resume');
+    expect(turn.text).toBe('ok');
+    expect(usageRecords(events).some((r) => r.reportedCost)).toBe(false);
+    expect(usageRecords(events).filter((r) => r.outputTokens !== undefined)).toHaveLength(1);
+  });
+
+  describe('a foreground subagent', () => {
+    const AGENT = 'toolu_01UCfgesRK1YbX7JNVCSJXJM';
+    const run = async () => {
+      const { svc } = service('claude-code', [fixture('claude-code', 'stream-subagent')]);
+      const { events, onProgress } = collector();
+      const turn = await svc.startConversation(request({ onProgress }));
+      return { events, turn };
+    };
+
+    it('nests the subagent\'s steps under the Agent call that started it', async () => {
+      const { events, turn } = await run();
+
+      const lifecycle = events.filter((e) => ['subagent_started', 'tool_call', 'tool_result', 'subagent_finished'].includes(e.type));
+      expect(lifecycle.map((e) => [e.type, e.toolCallId ?? null, e.subagentId ?? null])).toEqual([
+        ['tool_call', AGENT, null],
+        ['subagent_started', null, AGENT],
+        ['tool_call', 'toolu_016AyPnsMaJefcgUptD2hr6L', AGENT],
+        ['tool_result', 'toolu_016AyPnsMaJefcgUptD2hr6L', AGENT],
+        ['subagent_finished', null, AGENT],
+        ['tool_result', AGENT, null],
+      ]);
+      expect(events.find((e) => e.type === 'subagent_started')?.brief).toBe('Read README first line');
+      const finished = events.find((e) => e.type === 'subagent_finished');
+      expect(finished?.outcome).toBe('done');
+      expect(finished?.digest).toContain('The first line of README.md is exactly:');
+      expect(turn.researchLog.flatMap((s) => ('toolCallId' in s && s.subagentId ? [s.toolCallId] : []))).toEqual(['toolu_016AyPnsMaJefcgUptD2hr6L']);
+      expect(turn.text).toBe('The first line of README.md is `hello`.');
+    });
+
+    // The subagent's calls do not stream, and their lines carry the usage
+    // snapshot from before generation: its prompt, with a placeholder for
+    // output. Its last call is reported whole on the Agent tool's result.
+    it('counts the subagent\'s calls toward it, and the session cost once', async () => {
+      const { events } = await run();
+
+      expect(usageRecords(events).filter((r) => r.subagentId)).toEqual([
+        { source: 'claude-code', model: 'claude-sonnet-5', inputTokens: 12418, cachedInputTokens: 0, subagentId: AGENT },
+        { source: 'claude-code', model: 'claude-sonnet-5', inputTokens: 13952, cachedInputTokens: 12416, outputTokens: 380, subagentId: AGENT },
+      ]);
+      expect(events.find((e) => e.type === 'subagent_finished')?.usage).toEqual({ inputTokens: 26370, cachedInputTokens: 12416, outputTokens: 380 });
+      const usage = usageRecords(events).reduce(addPlannerUsage, { totals: {} });
+      expect(usage.totals.outputTokens).toBe(254 + 209 + 380);
+      expect(usage.totals.reportedCost?.USD).toBeCloseTo(0.0973464, 10);
+    });
+  });
+
+  // Recorded with stdin held open, as the planner holds it: the launch turn
+  // ends, then the subagent works, and its end is announced by a
+  // `task_notification` rather than by the `Agent` result, which returned at
+  // launch. Claude Code then opens a turn of its own to relay the report; the
+  // second fixture plays that stretch into the turn asking the planner to wait.
+  describe('a backgrounded subagent', () => {
+    const AGENT = 'toolu_01V8422dTKLiNaXutJaP8wKr';
+    const run = async () => {
+      const { svc, spawned } = service('claude-code', [
+        fixture('claude-code', 'stream-async-agent'),
+        fixture('claude-code', 'stream-async-agent-report'),
+      ]);
+      const { events, onProgress } = collector();
+      const turn = await svc.startConversation(request({ onProgress }));
+      return { events, turn, spawned };
+    };
+
+    it('stays open past its launch and finishes on the completion notice', async () => {
+      const { events, turn, spawned } = await run();
+
+      expect(spawned.processes[0].written).toHaveLength(2);
+      const lifecycle = events.filter((e) => ['subagent_started', 'tool_call', 'tool_result', 'subagent_finished'].includes(e.type));
+      expect(lifecycle.map((e) => [e.type, e.toolCallId ?? null, e.subagentId ?? null])).toEqual([
+        ['tool_call', AGENT, null],
+        ['subagent_started', null, AGENT],
+        ['tool_result', AGENT, null],
+        ['tool_call', 'toolu_014VcqikXMDUQjnnVumKeHQv', AGENT],
+        ['tool_result', 'toolu_014VcqikXMDUQjnnVumKeHQv', AGENT],
+        ['subagent_finished', null, AGENT],
+      ]);
+      const finished = events.find((e) => e.type === 'subagent_finished');
+      expect(finished?.outcome).toBe('done');
+      expect(finished?.digest).toBe('The first line of README.md is:\n\n`hello`');
+      expect(turn.text).toContain('Launched the Explore agent in the background');
+      expect(turn.text).toContain('The first line of README.md is `hello`.');
+      expect(turn.text).not.toContain('is:\n\n`hello`');
+    });
+
+    it('counts each subagent message once, however many lines it spans', async () => {
+      const { events } = await run();
+
+      expect(usageRecords(events).filter((r) => r.subagentId)).toEqual([
+        { source: 'claude-code', model: 'claude-sonnet-5', inputTokens: 11163, cachedInputTokens: 4271, subagentId: AGENT },
+        { source: 'claude-code', model: 'claude-sonnet-5', inputTokens: 12698, cachedInputTokens: 11161, subagentId: AGENT },
+      ]);
+      const usage = usageRecords(events).reduce(addPlannerUsage, { totals: {} });
+      expect(usage.totals.reportedCost?.USD).toBeCloseTo(0.0913891, 10);
+    });
   });
 });
 
