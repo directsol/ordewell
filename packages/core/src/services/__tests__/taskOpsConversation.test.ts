@@ -4,6 +4,7 @@ import * as sessionStore from '../../utils/sessionStore';
 import { FakeTerminalSession, makeSession, testWorkspace } from './sessionTestKit';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
 import type { ModelResolver } from '../ModelResolver';
+import type { SessionMessage } from '../SessionMessage';
 
 /** A runner double that records the order tasks were spawned in. */
 function recordingRunner(spawned: string[]): ITerminalRunner {
@@ -90,7 +91,9 @@ describe('task_ops conversation turns', () => {
 
   it('runs the mutatePlan ritual for an applied task_ops turn: persist strictly before broadcast', async () => {
     const order: string[] = [];
-    const broadcast = vi.fn(() => order.push('broadcast'));
+    // The turn's start and end mark the stream, not the plan: only what
+    // carries plan state is bound to follow the persist.
+    const broadcast = vi.fn((msg: SessionMessage) => { if (!msg.type.startsWith('planner_turn_')) order.push('broadcast'); });
     const session = makeSession({
       broadcast,
       aiService: {

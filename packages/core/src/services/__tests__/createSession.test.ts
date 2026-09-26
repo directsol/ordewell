@@ -735,29 +735,30 @@ describe('session id stability (persist seam)', () => {
     await session.startPlanning('add persistence', ['claude-code']);
 
     const types = broadcast.mock.calls.map((c: unknown[]) => (c[0] as { type: string }).type);
-    expect(types).toEqual(['plan_thinking', 'research_step', 'research_step_done', 'plan_token', 'planner_message']);
-    expect(broadcast).toHaveBeenCalledWith({ type: 'plan_thinking', text: 'exploring' });
-    expect(broadcast).toHaveBeenCalledWith({ type: 'research_step', tool: 'read_file', args: '{"path":"x"}' });
-    expect(broadcast).toHaveBeenCalledWith({ type: 'research_step_done', step });
-    expect(broadcast).toHaveBeenCalledWith({ type: 'plan_token', token: 'Question: ' });
+    expect(types).toEqual(['planner_turn_started', 'plan_thinking', 'research_step', 'research_step_done', 'plan_token', 'planner_message', 'planner_turn_ended']);
+    const { turnId } = broadcast.mock.calls[0][0] as { turnId: string };
+    expect(broadcast).toHaveBeenCalledWith({ type: 'plan_thinking', text: 'exploring', turnId });
+    expect(broadcast).toHaveBeenCalledWith({ type: 'research_step', tool: 'read_file', args: '{"path":"x"}', turnId });
+    expect(broadcast).toHaveBeenCalledWith({ type: 'research_step_done', step, turnId });
+    expect(broadcast).toHaveBeenCalledWith({ type: 'plan_token', token: 'Question: ', turnId });
   });
 
   describe('turn-scoped planner progress (#47)', () => {
+    // Through the one-shot planner, which hands progress to the session as it
+    // comes: the turn ids below stand in for the ones a turn's owner stamps.
     async function broadcastsFor(progress: import('../../models/Task').ResearchProgress[]): Promise<unknown[]> {
       const broadcast = vi.fn();
       const session = makeSession({
         broadcast,
-        aiService: {
-          startConversation: vi.fn(async (req: import('../../services/AiService').ConversationRequest) => {
-            for (const p of progress) req.onProgress(p);
-            return { kind: 'message' as const, text: 'done', researchLog: [] };
+        planner: {
+          generate: vi.fn(async (req: { onProgress?: (p: import('../../models/Task').ResearchProgress) => void }) => {
+            for (const p of progress) req.onProgress?.(p);
+            return { tasks: [], generatedAt: '', status: 'draft' as const, runners: ['claude-code' as const], lastUpdated: '' };
           }),
-          hasActiveConversation: () => true,
-          reset: vi.fn(),
         },
       });
-      await session.startPlanning('add persistence', ['claude-code']);
-      return broadcast.mock.calls.map((c: unknown[]) => c[0]).filter((m) => (m as { type: string }).type !== 'planner_message');
+      await session.generatePlan('add persistence', ['claude-code']);
+      return broadcast.mock.calls.map((c: unknown[]) => c[0]).filter((m) => !['plan_generated', 'status_update'].includes((m as { type: string }).type));
     }
 
     it('streams reply prose of a turn as text deltas, and retracts it', async () => {

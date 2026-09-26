@@ -45,6 +45,42 @@ export function stripModelNoise(raw: string): string {
     .trim();
 }
 
+const THINK_OPEN = '<think>';
+const THINK_CLOSE = '</think>';
+const FENCE = '```';
+const FENCE_JSON_TAG = 'json';
+
+/**
+ * Whether a reply that begins with `prefix` opens with a JSON object once the
+ * noise {@link stripModelNoise} removes is skipped — the streaming counterpart
+ * of it, answering from the start of a reply that has not finished arriving.
+ * Undefined while the prefix cannot tell yet: blank, inside an unclosed think
+ * block, or partway through a fence or a tag.
+ */
+export function opensWithJsonObject(prefix: string): boolean | undefined {
+  let rest = prefix;
+  for (;;) {
+    rest = rest.trimStart();
+    if (!rest) return undefined;
+    const head = rest.slice(0, THINK_OPEN.length).toLowerCase();
+    if (head === THINK_OPEN) {
+      const close = rest.toLowerCase().indexOf(THINK_CLOSE);
+      if (close < 0) return undefined;
+      rest = rest.slice(close + THINK_CLOSE.length);
+      continue;
+    }
+    if (rest.startsWith(FENCE)) {
+      rest = rest.slice(FENCE.length);
+      const tag = rest.slice(0, FENCE_JSON_TAG.length).toLowerCase();
+      if (tag === FENCE_JSON_TAG) rest = rest.slice(FENCE_JSON_TAG.length);
+      else if (tag === rest.toLowerCase() && FENCE_JSON_TAG.startsWith(tag)) return undefined;
+      continue;
+    }
+    if (THINK_OPEN.startsWith(head) || FENCE.startsWith(rest)) return undefined;
+    return rest.startsWith('{');
+  }
+}
+
 /**
  * Scan from `start` (which must point at a `{`) for the matching balanced close,
  * ignoring braces inside strings. Returns the object substring and whether it was

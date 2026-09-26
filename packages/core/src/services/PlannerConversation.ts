@@ -1,9 +1,11 @@
+import { v4 as uuidv4 } from 'uuid';
 import type { ConversationRequest, ConversationTurn, IAiService } from './AiService';
 import { repairLoop, taskOpsRejectedPrompt } from './PlanRepair';
 import { renderTaskQueryAnswer, taskQuerySignature, TASK_QUERY_ANSWER_OR_OPS, TASK_QUERY_REMINDER, type LiveOutputLookup, type TaskQuery, type TaskQueryCatalog } from './TaskQuery';
 import { taskOpsProtocol, type ApplyTaskOpsResult, type TaskOp } from './TaskOps';
 import { resolveDefaultMode } from './ModeResolver';
-import type { SessionBroadcaster } from './SessionMessage';
+import type { PlannerTurnOutcome, SessionBroadcaster } from './SessionMessage';
+import { TurnStream } from './replyStream';
 import type { ForkedDialogue } from './conversationFork';
 import { condensedNotice, extractSummary, keptTail, summaryRequest } from './conversationSummary';
 import type { ConversationMessage, LegacyPlanState, ResearchLogEntry, ResearchProgress, RunnerId, Task } from '../models/Task';
@@ -44,6 +46,18 @@ function freshReadBudget(): ReadBudget {
 /** A turn with every read already drained — what the settle path actually commits. */
 type SettleableTurn = Exclude<ConversationTurn, { kind: 'task_query' }>;
 type CommitTurn = Exclude<SettleableTurn, { kind: 'task_ops' }>;
+
+/** One user turn, from the message to its settled outcome: every backend call it makes streams through `stream`. */
+interface UserTurn {
+  stream: TurnStream;
+  signal?: AbortSignal;
+  reads: ReadBudget;
+}
+
+interface SettledTurn {
+  plan: LegacyPlanState;
+  outcome: Exclude<PlannerTurnOutcome, 'stopped' | 'error'>;
+}
 
 /** Everything (re)opening a conversation needs besides the dialogue itself. */
 export type ConversationOpening = Omit<ConversationRequest, 'goal' | 'onProgress' | 'signal' | 'priorHistory' | 'initialMessage'>;
@@ -172,6 +186,7 @@ export class PlannerConversation {
   private persisted = 0;
   private turnsInFlight = 0;
   private compacting = false;
+  private openTurnId: string | null = null;
 
   constructor(private readonly host: PlannerConversationHost) {}
 
@@ -182,6 +197,11 @@ export class PlannerConversation {
   /** Whether a user turn is between its transcript append and its settled outcome. */
   get isTurnInFlight(): boolean {
     return this.turnsInFlight > 0;
+  }
+
+  /** The user turn being answered, for what the host raises during it — an approval the turn's research asks for. */
+  get currentTurnId(): string | undefined {
+    return this.openTurnId ?? undefined;
   }
 
   /** Whether the model still holds this conversation in memory. */
@@ -379,15 +399,15 @@ export class PlannerConversation {
 
   /** Open the conversation on a fresh plan: the goal is its first message. */
   async start(goal: string, opening: ConversationOpening, signal?: AbortSignal): Promise<LegacyPlanState> {
-    return this.inTurn(async () => {
+    return this.userTurn(goal, signal, async (userTurn) => {
       this.recordUser(goal, new Date().toISOString());
       const turn = await this.host.aiService().startConversation({
         ...opening,
         goal,
-        onProgress: (p) => this.host.onProgress(p),
+        onProgress: userTurn.stream.sink(),
         signal,
       });
-      return this.settle(turn, signal);
+      return this.settle(turn, userTurn);
     });
   }
 
@@ -401,10 +421,10 @@ export class PlannerConversation {
     // compaction resets as it lands, and its message would be condensed away
     // unanswered or left dangling after the summary.
     if (this.compacting) throw new ConversationBusyError('send a message');
-    return this.inTurn(() => this.replyTurn(message, options));
+    return this.userTurn(options.verbatim ?? message, options.signal, (userTurn) => this.replyTurn(message, options, userTurn));
   }
 
-  private async replyTurn(message: string, options: ReplyOptions): Promise<LegacyPlanState> {
+  private async replyTurn(message: string, options: ReplyOptions, userTurn: UserTurn): Promise<SettledTurn> {
     const { signal } = options;
     const plan = this.requirePlan();
     const priorHistory = plan.conversationHistory ?? [];
@@ -425,15 +445,14 @@ export class PlannerConversation {
     const canContinueLive = ai.hasActiveConversation() && (ai.conversationMatchesConfig?.() ?? true);
     try {
       const turn = canContinueLive
-        ? await ai.continueConversation(outgoing, (p) => this.host.onProgress(p), signal)
-        : await this.resume(outgoing, priorHistory, signal);
+        ? await ai.continueConversation(outgoing, userTurn.stream.sink(), signal)
+        : await this.resume(outgoing, priorHistory, signal, userTurn.stream.sink());
 
       // Reads settle before the execution gate below, so a query is answered
       // on the spot even mid-run: it mutates nothing, and parking it behind a
       // batch boundary would strand the planner waiting on detail it needs to
       // write the very edit that gets queued.
-      const reads = freshReadBudget();
-      let settleable = await this.drainTaskQueries(turn, reads, signal);
+      let settleable = await this.drainTaskQueries(turn, userTurn);
 
       // Structural changes while tasks execute are queued, never applied live —
       // the orchestrator must not have the plan mutated under a running batch.
@@ -449,7 +468,7 @@ export class PlannerConversation {
         };
       }
 
-      return await this.settle(settleable, signal, reads);
+      return await this.settle(settleable, userTurn);
     } catch (err) {
       if (checkpoint) this.restore(checkpoint);
       throw err;
@@ -466,6 +485,29 @@ export class PlannerConversation {
       return await turn();
     } finally {
       this.turnsInFlight--;
+    }
+  }
+
+  /**
+   * Bracket one user turn with its start and end, under an id minted here:
+   * the turn is where the stream a surface draws begins and ends, and only the
+   * conversation sees all of it — every backend call, read and retry.
+   */
+  private async userTurn(prompt: string, signal: AbortSignal | undefined, run: (turn: UserTurn) => Promise<SettledTurn>): Promise<LegacyPlanState> {
+    const turnId = uuidv4();
+    const stream = new TurnStream(turnId, (p) => this.host.onProgress(p));
+    this.openTurnId = turnId;
+    this.host.broadcast({ type: 'planner_turn_started', turnId, prompt });
+    let outcome: PlannerTurnOutcome = 'error';
+    try {
+      const settled = await this.inTurn(() => run({ stream, signal, reads: freshReadBudget() }));
+      outcome = settled.outcome;
+      return settled.plan;
+    } finally {
+      if (this.openTurnId === turnId) this.openTurnId = null;
+      // A stop can still settle — a backend hands back what it had as a
+      // message — but the user asked for it to end, and that is what it did.
+      this.host.broadcast({ type: 'planner_turn_ended', turnId, outcome: signal?.aborted ? 'stopped' : outcome });
     }
   }
 
@@ -529,7 +571,7 @@ export class PlannerConversation {
    * ops JSON still gets its two corrective retries; charging it for the read
    * would cost it the chance to fix the edit.
    */
-  private async drainTaskQueries(turn: ConversationTurn, reads: ReadBudget, signal?: AbortSignal): Promise<SettleableTurn> {
+  private async drainTaskQueries(turn: ConversationTurn, { reads, signal, stream }: UserTurn): Promise<SettleableTurn> {
     const ai = this.host.aiService();
     const carried: ConversationTurn['researchLog'] = [];
     let current = turn;
@@ -551,7 +593,7 @@ export class PlannerConversation {
       const answer = this.taskQueryAnswer(current.query);
       current = await ai.continueConversation(
         insist ? `${answer}\n\n${TASK_QUERY_ANSWER_OR_OPS}` : answer,
-        (p) => this.host.onProgress(p),
+        stream.sink(),
         signal,
       );
     }
@@ -575,8 +617,9 @@ export class PlannerConversation {
    * silent retries, then surfaced as a message with the plan untouched. The
    * first turn and every later turn route through here — one path, not two.
    */
-  private async settle(turn: ConversationTurn, signal?: AbortSignal, reads = freshReadBudget()): Promise<LegacyPlanState> {
+  private async settle(turn: ConversationTurn, userTurn: UserTurn): Promise<SettledTurn> {
     type Settled = { plan: LegacyPlanState } | { turn: CommitTurn };
+    const { signal, stream } = userTurn;
     const ai = this.host.aiService();
     const invalidOps = (errors: string[], researchLog: ConversationTurn['researchLog']): Settled => ({
       turn: {
@@ -587,15 +630,14 @@ export class PlannerConversation {
     });
 
     const settled = await repairLoop<SettleableTurn, Settled>({
-      first: () => this.drainTaskQueries(turn, reads, signal),
-      resend: async (corrective) => this.drainTaskQueries(
-        await ai.continueConversation(corrective, (p) => this.host.onProgress(p), signal),
-        reads,
-        signal,
-      ),
+      first: () => this.drainTaskQueries(turn, userTurn),
+      resend: async (corrective) => {
+        stream.retract();
+        return this.drainTaskQueries(await ai.continueConversation(corrective, stream.sink(), signal), userTurn);
+      },
       interpret: (t) => {
         if (t.kind !== 'task_ops') return { done: { turn: t } };
-        const applied = this.applyTaskOps(t);
+        const applied = this.applyTaskOps(t, stream.turnId);
         if ('plan' in applied) return { done: { plan: applied.plan } };
         // No live conversation (or an abort) means no corrective re-send is
         // possible — surface the failure instead of retrying into the void.
@@ -613,13 +655,13 @@ export class PlannerConversation {
       // idle-paused, and nothing else will wake it — the queue-drain path never
       // runs, because nothing queued.
       await this.host.afterEdit();
-      return settled.plan;
+      return { plan: settled.plan, outcome: 'task_ops' };
     }
-    return this.commit(settled.turn);
+    return { plan: this.commit(settled.turn, stream.turnId), outcome: settled.turn.kind };
   }
 
   /** Validate + commit a task_ops turn atomically. Returns the errors on rejection (plan untouched). */
-  private applyTaskOps(turn: Extract<ConversationTurn, { kind: 'task_ops' }>): { plan: LegacyPlanState } | { errors: string[] } {
+  private applyTaskOps(turn: Extract<ConversationTurn, { kind: 'task_ops' }>, turnId: string): { plan: LegacyPlanState } | { errors: string[] } {
     this.requirePlan();
     const result = this.host.validateOps(turn.ops);
     if (!result.ok) return { errors: result.errors };
@@ -634,7 +676,7 @@ export class PlannerConversation {
         return true;
       },
       () => {
-        this.host.broadcast({ type: 'planner_message', content, timestamp: now });
+        this.host.broadcast({ type: 'planner_message', content, timestamp: now, turnId });
         this.host.broadcastPlan();
       },
     );
@@ -642,7 +684,7 @@ export class PlannerConversation {
   }
 
   /** Commit a settled (non-task_ops) turn through the host's mutation ritual. */
-  private commit(turn: CommitTurn): LegacyPlanState {
+  private commit(turn: CommitTurn, turnId: string): LegacyPlanState {
     this.requirePlan();
     const now = new Date().toISOString();
 
@@ -670,7 +712,7 @@ export class PlannerConversation {
         this.host.capturePrd(text);
         return true;
       },
-      () => this.host.broadcast({ type: 'planner_message', content: text, timestamp: now }),
+      () => this.host.broadcast({ type: 'planner_message', content: text, timestamp: now, turnId }),
     )!;
   }
 

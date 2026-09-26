@@ -691,7 +691,6 @@ async function converse(deps: EffectDeps, sessionId: string, call: () => Promise
     switch (event?.type) {
       case 'planner_turn_started':
       case 'planner_turn_ended':
-      case 'planner_thinking_delta':
       case 'planner_text_retracted':
       case 'planner_usage':
       case 'subagent_started':
@@ -743,7 +742,7 @@ async function converse(deps: EffectDeps, sessionId: string, call: () => Promise
       deps.dispatch({ type: 'plannerMessage', content: streamed, sessionId });
       return;
     }
-    if (event?.type === 'plan_thinking' && event.text) {
+    if ((event?.type === 'plan_thinking' || event?.type === 'planner_thinking_delta') && event.text) {
       deps.dispatch({ type: 'plannerThinking', text: event.text, sessionId });
     }
   });

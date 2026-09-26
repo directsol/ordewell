@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { v4 as uuidv4 } from 'uuid';
 import {
   Task,
   DiscoveredModel,
@@ -46,10 +47,10 @@ class OpenAiResearchChat implements ResearchChat {
     private tools: OpenAI.Chat.Completions.ChatCompletionTool[],
     /** Live reasoning deltas during a turn, so the UI isn't frozen while a reasoning
      * model thinks for tens of seconds before it emits any tool call or content. */
-    private onReasoning?: (delta: string) => void,
+    private onReasoning?: (delta: string, segmentId: string) => void,
     /** Live answer-content deltas, so planner messages stream into the chat as they
      * are produced instead of appearing all at once when the turn completes. */
-    private onContent?: (delta: string) => void,
+    private onContent?: (delta: string, segmentId: string) => void,
     /** The serving provider id, stamped on usage records. */
     private source = 'openai',
     /** One report per API call; a subagent leaves this off and reports through its run loop instead. */
@@ -94,6 +95,9 @@ class OpenAiResearchChat implements ResearchChat {
       stream_options: { include_usage: true },
     }, signal ? { signal } : undefined);
 
+    // One API call is one segment: the text a call streams ends where its tool
+    // calls begin, and the next call's text starts a segment of its own.
+    const segmentId = uuidv4();
     let content = '';
     let reasoning = '';
     let finishReason: string | undefined;
@@ -110,8 +114,8 @@ class OpenAiResearchChat implements ResearchChat {
         | { content?: string; reasoning?: string; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> }
         | undefined;
       if (!delta) continue;
-      if (delta.reasoning) { reasoning += delta.reasoning; this.onReasoning?.(delta.reasoning); }
-      if (delta.content) { content += delta.content; this.onContent?.(delta.content); }
+      if (delta.reasoning) { reasoning += delta.reasoning; this.onReasoning?.(delta.reasoning, segmentId); }
+      if (delta.content) { content += delta.content; this.onContent?.(delta.content, segmentId); }
       for (const tc of delta.tool_calls ?? []) {
         const acc = toolAcc.get(tc.index) ?? { id: '', name: '', args: '' };
         if (tc.id) acc.id = tc.id;
@@ -280,8 +284,8 @@ export class OpenAiService extends BaseAiService implements IAiService {
       client,
       this.requireModel('orchestratorModel', this.config.orchestratorModel),
       toOpenAiTools(),
-      (delta) => currentProgress({ type: 'thinking', text: delta }),
-      (delta) => currentProgress({ type: 'plan_token', planToken: delta }),
+      (delta, segmentId) => currentProgress({ type: 'thinking', text: delta, segmentId }),
+      (delta, segmentId) => currentProgress({ type: 'text_delta', text: delta, segmentId }),
       this.config.aiProvider,
       (record) => currentProgress({ type: 'usage', record }),
       req.contextWindow,
