@@ -259,7 +259,6 @@ describe('planning', () => {
           onEvent({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Hel' });
           onEvent({ type: 'planner_usage', turnId: 't1', totals: { inputTokens: 10 } });
           onEvent({ type: 'plan_token', turnId: 't1', token: 'lo' });
-          onEvent({ type: 'planner_thinking_delta', turnId: 't1', segmentId: 'th', text: 'hm' });
           onEvent({ type: 'planner_text_retracted', turnId: 't1' });
           onEvent({ type: 'subagent_started', subagentId: 'sa1', brief: 'look' });
           onEvent({ type: 'subagent_finished', subagentId: 'sa1', outcome: 'done', digest: 'ok' });
@@ -280,6 +279,26 @@ describe('planning', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // Streamed thinking keeps the thinking display it had as plan_thinking,
+  // until the TUI draws the shared view (#52).
+  it('shows planner_thinking_delta as planner thinking', async () => {
+    let onEvent: (e: any) => void = () => {};
+    const h = harness({
+      streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
+        onEvent = cb;
+        return { close: vi.fn() };
+      }),
+      startConversation: vi.fn().mockImplementation(async () => {
+        onEvent({ type: 'planner_thinking_delta', turnId: 't1', segmentId: 's1', text: 'weighing it' });
+        return { tasks: [] };
+      }),
+    });
+
+    await runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
+
+    expect(h.actions).toContainEqual({ type: 'plannerThinking', text: 'weighing it', sessionId: 'session-new' });
   });
 
   it('flushes a pending token burst before a research_step lands, preserving order', async () => {

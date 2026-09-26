@@ -268,6 +268,9 @@ export class CliAgentAiService implements IAiService {
           const refused = turn.researchLog.find((step) => step.outcome === 'denied');
           if (!emptyNudgeSent) {
             emptyNudgeSent = true;
+            // Deltas can stream for a run whose complete text then comes back
+            // empty; the nudged reply answers in their place.
+            onProgress({ type: 'text_retracted' });
             pending = refused
               ? `Your last reply was empty because "${refused.toolLabel ?? refused.tool}" was refused: you are planning read-only and confined to this workspace. Do not retry it. Answer the user now with what you already know, or ask your next question.`
               : 'Your last reply was empty. Respond to the user now: answer their last message directly, ask your next question, or emit the plan JSON.';
@@ -321,9 +324,12 @@ export class CliAgentAiService implements IAiService {
             this.conversation = null;
             return { kind: 'plan', tasks: reply.tasks, text: replyText(turn.text), researchLog };
 
+          // As in the API backend, the re-emit replaces what the botched
+          // attempt streamed.
           case 'broken_task_ops':
             if (jsonRepairAttempts < MAX_JSON_REPAIRS && !combined?.aborted) {
               jsonRepairAttempts++;
+              onProgress({ type: 'text_retracted' });
               pending = reEmitTaskOpsPrompt(reply.error.message);
               continue;
             }
@@ -332,6 +338,7 @@ export class CliAgentAiService implements IAiService {
           case 'broken_task_query':
             if (jsonRepairAttempts < MAX_JSON_REPAIRS && !combined?.aborted) {
               jsonRepairAttempts++;
+              onProgress({ type: 'text_retracted' });
               pending = reEmitTaskQueryPrompt(reply.error.message);
               continue;
             }
@@ -340,6 +347,7 @@ export class CliAgentAiService implements IAiService {
           case 'broken_plan':
             if (jsonRepairAttempts < MAX_JSON_REPAIRS && !combined?.aborted) {
               jsonRepairAttempts++;
+              onProgress({ type: 'text_retracted' });
               pending = reEmitPlanPrompt(reply.error.message);
               continue;
             }

@@ -281,6 +281,7 @@ export class Session {
         subject: request.subject,
         scope: request.scope,
         detail: request.detail,
+        turnId: this.conversation.currentTurnId,
       }),
       onSettled: (id, granted) => this.broadcast({ type: 'approval_settled', id, granted }),
     });

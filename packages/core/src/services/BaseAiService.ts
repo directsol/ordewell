@@ -441,10 +441,12 @@ export abstract class BaseAiService {
 
         // Botched attempts get a bounded corrective retry — otherwise the
         // broken JSON would surface as a prose bubble and the edit or plan
-        // would silently fail to commit.
+        // would silently fail to commit. What the attempt streamed is taken
+        // back: the retry answers in its place.
         case 'broken_task_ops':
           if (jsonRepairAttempts < MAX_JSON_REPAIRS && !signal?.aborted) {
             jsonRepairAttempts++;
+            onProgress({ type: 'text_retracted' });
             pending = reEmitTaskOpsPrompt(reply.error.message);
             continue;
           }
@@ -453,6 +455,7 @@ export abstract class BaseAiService {
         case 'broken_task_query':
           if (jsonRepairAttempts < MAX_JSON_REPAIRS && !signal?.aborted) {
             jsonRepairAttempts++;
+            onProgress({ type: 'text_retracted' });
             pending = reEmitTaskQueryPrompt(reply.error.message);
             continue;
           }
@@ -461,6 +464,7 @@ export abstract class BaseAiService {
         case 'broken_plan':
           if (jsonRepairAttempts < MAX_JSON_REPAIRS && !signal?.aborted) {
             jsonRepairAttempts++;
+            onProgress({ type: 'text_retracted' });
             if (reply.error.truncated || turn.finishReason === 'length') {
               // Output-limit truncation: re-asking in the same context would be
               // cut at the same point. Free input space first (raw transcripts

@@ -153,8 +153,11 @@ export interface ResearchProgress {
   //
   // The turn-scoped kinds below carry one planner turn's stream (#47); see the
   // matching SessionMessage variants for the invariants each one keeps.
-  // 'text_delta' is reply prose (`text`, `segmentId`) and 'text_retracted'
-  // takes back an attempt's prose (`segmentId`, or all of it when absent).
+  // 'text_delta' is reply text as the model streams it (`text`, `segmentId`),
+  // an envelope included: the turn's owner routes each segment to prose or to
+  // the plan display, so no backend has to tell them apart. 'text_retracted'
+  // takes back an attempt's text: `segmentId`'s, or when absent everything the
+  // backend call that sends it has streamed.
   // 'usage' reports one model call (`record`). 'subagent_started' carries
   // `brief` and `model`; 'subagent_finished' carries `outcome`, `digest` and
   // `usage`.

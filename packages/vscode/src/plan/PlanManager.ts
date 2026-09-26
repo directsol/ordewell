@@ -525,6 +525,7 @@ export function handleSessionMessage(
     case 'plan_token':
     case 'planner_text_delta':
     case 'plan_thinking':
+    case 'planner_thinking_delta':
     case 'planner_liveness':
     case 'research_step':
     case 'research_step_done':
@@ -534,7 +535,6 @@ export function handleSessionMessage(
     case 'task_started':
     case 'planner_turn_started':
     case 'planner_turn_ended':
-    case 'planner_thinking_delta':
     case 'planner_text_retracted':
     case 'planner_usage':
     case 'subagent_started':

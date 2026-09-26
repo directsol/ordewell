@@ -8,8 +8,8 @@ export interface PlannerStreamSink {
 
 /**
  * Routes the streaming SessionMessage variants (plan_token,
- * planner_text_delta, plan_thinking, research_step, research_step_done) onto the webview
- * protocol. Session owns the ResearchProgress → SessionMessage translation
+ * planner_text_delta, plan_thinking, planner_thinking_delta, research_step,
+ * research_step_done) onto the webview protocol. Session owns the ResearchProgress → SessionMessage translation
  * behind its broadcast seam; this is the VS Code adapter's half — the only
  * place SessionMessage becomes webview messages.
  *
@@ -27,7 +27,9 @@ export function routePlannerStream(msg: SessionMessage, sink: PlannerStreamSink,
     case 'planner_text_delta':
       if (active) sink.streamToken(msg.text);
       return true;
+    // Streamed thinking joins the thinking display until the webview draws the shared view (#53).
     case 'plan_thinking':
+    case 'planner_thinking_delta':
       if (active) sink.sendResearchProgress({ type: 'thinking', text: msg.text, subagentId: msg.subagentId });
       return true;
     case 'planner_liveness':

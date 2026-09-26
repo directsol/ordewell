@@ -484,6 +484,33 @@ describe('CliAgentAiService — streamed events (#47)', () => {
     expect(steps.map((step) => [step.toolCallId, step.subagentId])).toEqual([['c1', 'sa1'], ['task-1', undefined]]);
   });
 
+  it('takes back an attempt the JSON repair discards before the corrected re-emit', async () => {
+    const broken = '{"tasks":[{"id":"t1","order":1,"title":"A","description":"d","type":"ai","dependencies":[],"subtasks":[]}]}';
+    const svc = scripted(
+      [{ type: 'assistant_text', text: broken }, { type: 'turn_end' }],
+      [{ type: 'assistant_text', text: planJson() }, { type: 'turn_end' }],
+    );
+    const { events, onProgress } = collector();
+
+    const turn = await svc.startConversation(request({ onProgress }));
+
+    expect(turn.kind).toBe('plan');
+    expect(events.map((e) => e.type)).toEqual(['plan_token', 'text_retracted', 'plan_token']);
+  });
+
+  it('takes back what an empty reply streamed before nudging the agent', async () => {
+    const svc = scripted(
+      [{ type: 'assistant_text_delta', text: '\n' }, { type: 'assistant_text', text: '' }, { type: 'turn_end' }],
+      [{ type: 'assistant_text', text: 'Which store?' }, { type: 'turn_end' }],
+    );
+    const { events, onProgress } = collector();
+
+    const turn = await svc.startConversation(request({ onProgress }));
+
+    expect(turn.text).toBe('Which store?');
+    expect(events.map((e) => e.type)).toEqual(['plan_token', 'text_retracted', 'plan_token']);
+  });
+
   it('reports subagent lifecycle and usage, the subagent\'s share carried on its finish', async () => {
     const svc = scripted([
       { type: 'subagent_started', subagentId: 'sa1', brief: 'find the cache', model: 'haiku' },
