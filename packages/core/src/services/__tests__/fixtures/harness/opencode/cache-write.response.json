@@ -1,0 +1,77 @@
+{
+  "info": {
+    "parentID": "msg_0e016de99001K1NwH1guE0nBXa",
+    "role": "assistant",
+    "mode": "plan",
+    "agent": "plan",
+    "path": {
+      "cwd": "/repo",
+      "root": "/repo"
+    },
+    "cost": 0.00306495,
+    "tokens": {
+      "total": 12173,
+      "input": 3,
+      "output": 23,
+      "reasoning": 0,
+      "cache": {
+        "write": 12147,
+        "read": 0
+      }
+    },
+    "modelID": "gpt-5.6-luna",
+    "providerID": "opencode-go",
+    "time": {
+      "created": 1790465991068,
+      "completed": 1790465993787
+    },
+    "finish": "stop",
+    "id": "msg_0e016e19c002qVnlouwrnuAR14",
+    "sessionID": "ses_f1fe921dbffeqdHUdtmtxntsV4"
+  },
+  "parts": [
+    {
+      "snapshot": "5a35957392aae27795d99e135560561fa9407afc",
+      "type": "step-start",
+      "id": "prt_0e016eb0c001t1hu85twAdzJja",
+      "sessionID": "ses_f1fe921dbffeqdHUdtmtxntsV4",
+      "messageID": "msg_0e016e19c002qVnlouwrnuAR14"
+    },
+    {
+      "type": "text",
+      "text": "No, 91 is not prime because \\(91 = 7 \\times 13\\).",
+      "time": {
+        "start": 1790465993486,
+        "end": 1790465993688
+      },
+      "metadata": {
+        "openai": {
+          "itemId": "msg_0fd62b0fb44d4376016ab857c9646c87d2a7a7cf39db9fd0de",
+          "phase": "final_answer"
+        }
+      },
+      "id": "prt_0e016eb0e001HkjI17XAgzffYR",
+      "sessionID": "ses_f1fe921dbffeqdHUdtmtxntsV4",
+      "messageID": "msg_0e016e19c002qVnlouwrnuAR14"
+    },
+    {
+      "reason": "stop",
+      "snapshot": "5a35957392aae27795d99e135560561fa9407afc",
+      "type": "step-finish",
+      "tokens": {
+        "total": 12173,
+        "input": 3,
+        "output": 23,
+        "reasoning": 0,
+        "cache": {
+          "write": 12147,
+          "read": 0
+        }
+      },
+      "cost": 0.00306495,
+      "id": "prt_0e016ec12001m3gSpNELmkSzDp",
+      "sessionID": "ses_f1fe921dbffeqdHUdtmtxntsV4",
+      "messageID": "msg_0e016e19c002qVnlouwrnuAR14"
+    }
+  ]
+}

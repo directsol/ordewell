@@ -217,3 +217,19 @@ export function scriptedAdapter(turns: AgentEvent[][], agentId = 'claude-code'):
     dispose: () => {},
   });
 }
+
+/**
+ * One recorded OpenCode turn. OpenCode answers over HTTP rather than stdio, so
+ * a turn is two recordings, not one transcript: the `/event` frames the server
+ * pushed while the turn ran, and the settled response to the message POST.
+ * Frames come back SSE-encoded, ready to hand to a fake `/event` body.
+ */
+export function openCodeFixture(name: string): { sessionId: string; frames: string[]; response: { info: { id: string; sessionID: string } } } {
+  const dir = join(__dirname, 'fixtures', 'harness', 'opencode');
+  const response = JSON.parse(readFileSync(join(dir, `${name}.response.json`), 'utf8')) as { info: { id: string; sessionID: string } };
+  const frames = readFileSync(join(dir, `${name}.events.jsonl`), 'utf8')
+    .split('\n')
+    .filter((line) => line.trim())
+    .map((line) => `data: ${line}\n\n`);
+  return { sessionId: response.info.sessionID, frames, response };
+}

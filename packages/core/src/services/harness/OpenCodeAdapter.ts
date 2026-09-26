@@ -4,6 +4,7 @@ import { planDirectLaunch, isExecutableResolved, ExecutableNotFoundError } from 
 import { assertWorkspaceExists } from '../../utils/workspace';
 import { killTree } from '../../utils/processTree';
 import { workspaceEnvOf } from '../workspaceEnv';
+import type { UsageRecord } from '../../models/Usage';
 import type { AgentAdapter, AgentEvent, AgentProcessDeps, AgentStartOptions } from './AgentAdapter';
 
 const SERVER_READY_TIMEOUT_MS = 30000;
@@ -38,7 +39,16 @@ interface OpenCodePart {
   tool?: string;
   callID?: string;
   messageID?: string;
-  state?: { status?: string; input?: Record<string, unknown>; output?: string; error?: string };
+  /** Set on a text or reasoning part once it is complete. */
+  time?: { start?: number; end?: number };
+  state?: {
+    status?: string;
+    input?: Record<string, unknown>;
+    output?: string;
+    error?: string;
+    /** On a `task` call once its child session exists: that session's id and the model it runs. */
+    metadata?: { sessionId?: string; model?: { providerID?: string; modelID?: string } };
+  };
 }
 
 /** `permission.asked` (and its v2 spelling) — the only server→client request OpenCode makes. */
@@ -58,6 +68,46 @@ interface OpenCodeMessageInfo {
   time?: { created?: number; completed?: number };
   /** `AssistantMessage.error` is a tagged union: `{ name, data: { message } }`. */
   error?: { name?: string; data?: { message?: string } };
+  providerID?: string;
+  modelID?: string;
+  /** USD, as OpenCode prices the call. */
+  cost?: number;
+  tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } };
+}
+
+/** One `/event` frame, narrowed to the fields this adapter reads. */
+interface OpenCodeEvent {
+  type?: string;
+  properties?: OpenCodePermissionAsk & {
+    part?: OpenCodePart;
+    info?: OpenCodeMessageInfo & { parentID?: string };
+    /** `message.part.delta`: an append to one field of a part already announced. */
+    messageID?: string;
+    partID?: string;
+    field?: string;
+    delta?: string;
+  };
+}
+
+/**
+ * What one turn has learned from `/event` so far. The stream names a part's
+ * message but never its role, and a delta names neither its part's type nor
+ * whether it belongs to the reply — so each is remembered from the frame that
+ * announced it.
+ */
+interface TurnState {
+  seen: Set<string>;
+  /** Assistant message ids, from `message.updated`. A part of any other message is the user's own words. */
+  assistantMessages: Set<string>;
+  partTypes: Map<string, string>;
+  /** Reply text parts that have started streaming — see {@link OpenCodeAdapter.onTextDelta}. */
+  textRuns: Map<string, { held: string; lead: string | null }>;
+  /** Child sessions of the planner's, mapped to the `task` call that spawned each once its part names it. */
+  children: Map<string, string | null>;
+  /** Frames from a child session that arrived before its `task` call named it. */
+  heldFrames: Map<string, OpenCodeEvent[]>;
+  /** `task` calls whose subagent has started, so a finish is reported only for one that began. */
+  subagents: Set<string>;
 }
 
 interface OpenCodeMessageResponse {
@@ -99,6 +149,44 @@ function describeError(err: unknown): string {
   return lines.join(': ');
 }
 
+function flatModelId(providerID: string | undefined, modelID: string | undefined): string | undefined {
+  return providerID && modelID ? `${providerID}/${modelID}` : undefined;
+}
+
+/**
+ * OpenCode's `input` counts only the uncached prompt — cache reads and writes
+ * sit beside it, as with Anthropic: in the recordings `tokens.total` is input +
+ * output + both cache counts. Its `output` excludes `reasoning` (a recorded
+ * reply with text reports output 0 beside reasoning 127), and reasoning is
+ * billed as output, so it is counted as output.
+ */
+function usageRecord(info: OpenCodeMessageInfo, subagentId?: string): UsageRecord | null {
+  const tokens = info.tokens;
+  if (!tokens) return null;
+  const cached = tokens.cache?.read ?? 0;
+  const inputTokens = (tokens.input ?? 0) + cached + (tokens.cache?.write ?? 0);
+  const outputTokens = (tokens.output ?? 0) + (tokens.reasoning ?? 0);
+  // A call that failed before the provider answered reports all zeros. That
+  // is no measurement, and a zero prompt would read as an empty context.
+  if (inputTokens + outputTokens === 0) return null;
+  const record: UsageRecord = { source: 'opencode', inputTokens, outputTokens, cachedInputTokens: cached };
+  const model = flatModelId(info.providerID, info.modelID);
+  if (model) record.model = model;
+  // OpenCode prices a call itself, from its model catalog, so a reported 0
+  // means a free model or one the catalog has no price for. Those cannot be
+  // told apart, so 0 is left unreported: a ledger may not claim a bill of
+  // nothing.
+  if (typeof info.cost === 'number' && info.cost > 0) record.reportedCost = { amount: info.cost, currency: 'USD' };
+  if (subagentId) record.subagentId = subagentId;
+  return record;
+}
+
+/** The subagent's report without the `<task>` envelope the tool wraps it in. */
+function taskDigest(output: string): string {
+  const inner = output.match(/<task_result>\n?([\s\S]*?)\n?<\/task_result>/);
+  return inner ? inner[1] : output;
+}
+
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -116,10 +204,12 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
  * talks to it through the injected `fetch`. Both are part of the one seam the
  * tests drive.
  *
- * The turn ends when the message POST resolves. Live events stream from the
- * server's `/event` channel, but the POST is what settles the turn: an event
- * name that changes between OpenCode versions then costs liveness, not
- * correctness.
+ * The turn ends when the message POST resolves, and its response is the
+ * authoritative copy of the reply's last message. Everything else — reply text
+ * as it streams, earlier model calls' text and reasoning, per-call usage, the
+ * subagents a `task` call runs — arrives only on the server's `/event` channel.
+ * An event name that changes between OpenCode versions therefore costs that
+ * detail, never the final reply.
  */
 export class OpenCodeAdapter implements AgentAdapter {
   readonly agentId = 'opencode';
@@ -217,24 +307,20 @@ export class OpenCodeAdapter implements AgentAdapter {
       return;
     }
 
-    const seen = new Set<string>();
+    const turn: TurnState = {
+      seen: new Set(),
+      assistantMessages: new Set(),
+      partTypes: new Map(),
+      textRuns: new Map(),
+      children: new Map(),
+      heldFrames: new Map(),
+      subagents: new Set(),
+    };
     this.turnHasText = false;
     const streamAbort = new AbortController();
     let connected: () => void = () => {};
     const streamReady = new Promise<void>((resolve) => { connected = resolve; });
-    // The live stream carries tool activity only. It also replays the user's
-    // own message back as text parts, and the event frame gives no role to
-    // filter on — so prose is taken from the settled response instead, where
-    // `info.id` says exactly which message is the assistant's. Letting the
-    // echo through would put the user's goal into the planner's reply text,
-    // and a goal containing JSON would then be parsed as the plan.
-    const live = this.streamEvents(
-      streamAbort.signal,
-      (part) => { if (part.type === 'tool') this.emitPart(part, seen, onEvent); },
-      (ask) => this.denyPermission(ask, seen, onEvent),
-      connected,
-      onActivity,
-    );
+    const live = this.streamEvents(streamAbort.signal, (frame) => this.onFrame(frame, turn, onEvent), connected, onActivity);
 
     // The stream stopped being best-effort the moment permission denial moved
     // onto it: a request raised before we connect is one nobody answers, and
@@ -256,7 +342,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       const reply = await this.json<OpenCodeMessageResponse>('POST', `/session/${this.sessionId}/message`, body, signal);
 
       if (signal?.aborted) { this.dispose(); return; }
-      this.settle(reply, seen, onEvent);
+      this.settle(reply, turn, onEvent);
     } catch (err) {
       if (signal?.aborted) { this.dispose(); return; }
       // The POST is the turn's transport, not its work: the server plans on
@@ -264,7 +350,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       // reads the reply back out of the session rather than losing a turn the
       // server already finished (or is still finishing).
       const recovered = this.exited ? null : await this.recoverReply(signal, onActivity);
-      if (recovered) { this.settle(recovered, seen, onEvent); return; }
+      if (recovered) { this.settle(recovered, turn, onEvent); return; }
       onEvent({ type: 'error', message: `The OpenCode planner turn failed: ${describeError(err)}` });
     } finally {
       streamAbort.abort();
@@ -275,11 +361,16 @@ export class OpenCodeAdapter implements AgentAdapter {
   /**
    * Turn one settled assistant message into events. The settled response is
    * authoritative: it names the assistant message, so its parts are the ones
-   * that make up the reply. Tool parts already seen live are deduplicated by
-   * call id; anything the stream missed (including a stream that never
-   * connected) arrives here.
+   * that make up the reply. Parts already completed live are deduplicated;
+   * anything the stream missed (including a stream that never connected)
+   * arrives here.
+   *
+   * It is only the turn's *last* message, though. OpenCode writes one
+   * assistant message per model call, so the calls before the final one —
+   * their text, reasoning and usage — reach Ordewell over the stream or not at
+   * all.
    */
-  private settle(reply: OpenCodeMessageResponse | null, seen: Set<string>, onEvent: (e: AgentEvent) => void): void {
+  private settle(reply: OpenCodeMessageResponse | null, turn: TurnState, onEvent: (e: AgentEvent) => void): void {
     const failure = typeof reply?.error === 'string'
       ? reply.error
       : (reply?.error as { message?: string } | undefined)?.message ?? reply?.info?.error?.data?.message;
@@ -290,8 +381,9 @@ export class OpenCodeAdapter implements AgentAdapter {
     const assistantId = reply?.info?.id;
     for (const part of reply?.parts ?? []) {
       if (part.type !== 'tool' && assistantId && part.messageID !== assistantId) continue;
-      this.emitPart(part, seen, onEvent);
+      this.emitPart(part, turn, onEvent);
     }
+    if (reply?.info) this.countUsage(reply.info, turn, onEvent);
     if (assistantId) this.lastAssistantId = assistantId;
     onEvent({ type: 'turn_end' });
   }
@@ -332,27 +424,35 @@ export class OpenCodeAdapter implements AgentAdapter {
   }
 
   /**
-   * Emit one message part, once. OpenCode reports a tool part repeatedly as it
-   * moves through pending → running → completed, so parts are keyed by id and
-   * only the terminal state produces a result.
+   * Emit one complete message part, once. OpenCode reports a tool part
+   * repeatedly as it moves through pending → running → completed, so parts are
+   * keyed by id and only the terminal state produces a result. A subagent's
+   * text is its report to the planner, not the reply, so it is dropped; the
+   * `task` call's result carries it.
    */
-  private emitPart(part: OpenCodePart, seen: Set<string>, onEvent: (e: AgentEvent) => void): void {
+  private emitPart(part: OpenCodePart, turn: TurnState, onEvent: (e: AgentEvent) => void, subagentId?: string): void {
     if (!part?.type) return;
+    const { seen } = turn;
     const id = part.id ?? part.callID ?? '';
 
-    if (part.type === 'text' && part.text) {
+    if (part.type === 'text' && part.text && !subagentId) {
       if (seen.has(`text:${id}`)) return;
       seen.add(`text:${id}`);
+      // Some models open a message with a text part of nothing but newlines
+      // before calling a tool. It says nothing, and as a paragraph of its own
+      // it would push the real reply down by a blank one.
+      if (!part.text.trim()) return;
       // One message can carry text on both sides of a tool call. Concatenated
       // raw they run together, so each part after the first opens a paragraph.
-      onEvent({ type: 'assistant_text', text: this.turnHasText ? `\n\n${part.text}` : part.text });
+      const lead = turn.textRuns.get(id)?.lead ?? (this.turnHasText ? '\n\n' : '');
+      onEvent({ type: 'assistant_text', text: `${lead}${part.text}` });
       this.turnHasText = true;
       return;
     }
     if (part.type === 'reasoning' && part.text) {
       if (seen.has(`reasoning:${id}`)) return;
       seen.add(`reasoning:${id}`);
-      onEvent({ type: 'thinking', text: part.text });
+      onEvent({ type: 'thinking', text: part.text, subagentId });
       return;
     }
     if (part.type !== 'tool') return;
@@ -366,8 +466,9 @@ export class OpenCodeAdapter implements AgentAdapter {
     // input costs a moment of liveness and buys a readable timeline.
     if (!seen.has(`call:${callId}`) && (status !== 'pending' || (input && Object.keys(input).length > 0))) {
       seen.add(`call:${callId}`);
-      onEvent({ type: 'tool_call', id: callId, name, args: input ?? {} });
+      onEvent({ type: 'tool_call', id: callId, name, args: input ?? {}, subagentId });
     }
+    if (name === 'task' && !subagentId) this.trackSubagent(part, callId, turn, onEvent);
     if ((status === 'completed' || status === 'error') && !seen.has(`result:${callId}`)) {
       seen.add(`result:${callId}`);
       onEvent({
@@ -376,8 +477,130 @@ export class OpenCodeAdapter implements AgentAdapter {
         name,
         output: part.state?.output ?? part.state?.error ?? '',
         success: status === 'completed',
+        subagentId,
       });
     }
+  }
+
+  /**
+   * A `task` call runs a subagent in a child session. The call's part names
+   * that session once it exists, which is what ties the child's frames to the
+   * call; the subagent ends when the call does.
+   */
+  private trackSubagent(part: OpenCodePart, callId: string, turn: TurnState, onEvent: (e: AgentEvent) => void): void {
+    const state = part.state;
+    const child = state?.metadata?.sessionId;
+    if (child && !turn.subagents.has(callId)) {
+      turn.subagents.add(callId);
+      const input = state?.input ?? {};
+      const brief = typeof input.description === 'string' ? input.description : typeof input.prompt === 'string' ? input.prompt : '';
+      const model = flatModelId(state?.metadata?.model?.providerID, state?.metadata?.model?.modelID);
+      onEvent({ type: 'subagent_started', subagentId: callId, brief, ...(model ? { model } : {}) });
+      turn.children.set(child, callId);
+      const held = turn.heldFrames.get(child) ?? [];
+      turn.heldFrames.delete(child);
+      for (const frame of held) this.onFrame(frame, turn, onEvent);
+    }
+    const status = state?.status;
+    if ((status === 'completed' || status === 'error') && turn.subagents.delete(callId)) {
+      onEvent({
+        type: 'subagent_finished',
+        subagentId: callId,
+        outcome: status === 'completed' ? 'done' : 'failed',
+        digest: taskDigest(state?.output ?? state?.error ?? ''),
+      });
+    }
+  }
+
+  /**
+   * One message's usage, once, when it has completed. Every assistant message
+   * is one model call; until it completes its counts are zeros.
+   */
+  private countUsage(info: OpenCodeMessageInfo, turn: TurnState, onEvent: (e: AgentEvent) => void, subagentId?: string): void {
+    if (info.role !== 'assistant' || !info.id || !info.time?.completed || turn.seen.has(`usage:${info.id}`)) return;
+    turn.seen.add(`usage:${info.id}`);
+    const record = usageRecord(info, subagentId);
+    if (record) onEvent({ type: 'usage', record });
+  }
+
+  /**
+   * One `/event` frame. Only the planner's session and its children are
+   * followed: the server's stream is global, and another client's session is
+   * none of this turn's business.
+   */
+  private onFrame(frame: OpenCodeEvent, turn: TurnState, onEvent: (e: AgentEvent) => void): void {
+    const props = frame.properties;
+    if (!props) return;
+    if (frame.type === 'session.created') {
+      if (props.info?.parentID === this.sessionId && props.info.id && !turn.children.has(props.info.id)) turn.children.set(props.info.id, null);
+      return;
+    }
+    const session = props.sessionID;
+    if (session && session !== this.sessionId && !turn.children.has(session)) return;
+    // Answered before anything waits on the `task` call naming its session: a
+    // subagent's request blocks the planner's turn exactly as the planner's own does.
+    if (frame.type === 'permission.asked' || frame.type === 'permission.v2.asked') {
+      this.denyPermission(props, turn.seen, onEvent);
+      return;
+    }
+    let subagentId: string | undefined;
+    if (session && session !== this.sessionId) {
+      const owner = turn.children.get(session);
+      if (!owner) {
+        turn.heldFrames.set(session, [...(turn.heldFrames.get(session) ?? []), frame]);
+        return;
+      }
+      subagentId = owner;
+    }
+
+    if (frame.type === 'message.updated' && props.info) {
+      if (props.info.role === 'assistant' && props.info.id) turn.assistantMessages.add(props.info.id);
+      this.countUsage(props.info, turn, onEvent, subagentId);
+      return;
+    }
+    if (frame.type === 'message.part.delta') {
+      if (props.field !== 'text' || !props.partID || !props.delta) return;
+      if (!props.messageID || !turn.assistantMessages.has(props.messageID)) return;
+      const type = turn.partTypes.get(props.partID);
+      if (type === 'reasoning') onEvent({ type: 'thinking_delta', text: props.delta, subagentId });
+      else if (type === 'text' && !subagentId) this.onTextDelta(props.partID, props.delta, turn, onEvent);
+      return;
+    }
+    const part = props.part;
+    if (!part) return;
+    if (part.type === 'tool') {
+      this.emitPart(part, turn, onEvent, subagentId);
+      return;
+    }
+    // The server replays the user's own message back as text parts, with no
+    // role on the frame. Letting it through would put the user's goal into the
+    // planner's reply, and a goal containing JSON would be parsed as the plan
+    // — so a part counts only once `message.updated` has named its message an
+    // assistant's.
+    if (!part.id || !part.messageID || !turn.assistantMessages.has(part.messageID)) return;
+    if (part.type === 'text' || part.type === 'reasoning') turn.partTypes.set(part.id, part.type);
+    if (part.time?.end) this.emitPart(part, turn, onEvent, subagentId);
+  }
+
+  /**
+   * Stream one piece of a reply text part. The part's paragraph break goes out
+   * with its first visible delta, so the deltas add up to exactly the text the
+   * completed part then re-sends; a part that is only whitespace so far is
+   * held back, for the reason {@link emitPart} drops one.
+   */
+  private onTextDelta(partId: string, delta: string, turn: TurnState, onEvent: (e: AgentEvent) => void): void {
+    if (turn.seen.has(`text:${partId}`)) return;
+    const run = turn.textRuns.get(partId) ?? { held: '', lead: null };
+    turn.textRuns.set(partId, run);
+    if (run.lead !== null) {
+      onEvent({ type: 'assistant_text_delta', text: delta });
+      return;
+    }
+    run.held += delta;
+    if (!run.held.trim()) return;
+    run.lead = this.turnHasText ? '\n\n' : '';
+    this.turnHasText = true;
+    onEvent({ type: 'assistant_text_delta', text: `${run.lead}${run.held}` });
   }
 
   /**
@@ -404,14 +627,13 @@ export class OpenCodeAdapter implements AgentAdapter {
   }
 
   /**
-   * Server-sent events from `/event`. Tool activity on it is liveness only —
-   * the settled POST repeats it — but permission requests arrive nowhere else,
+   * Server-sent events from `/event`: the turn's live text, reasoning, tool
+   * activity and usage, and the only channel permission requests arrive on —
    * so the stream is load-bearing for {@link denyPermission}.
    */
   private async streamEvents(
     signal: AbortSignal,
-    onPart: (part: OpenCodePart) => void,
-    onPermission: (ask: OpenCodePermissionAsk) => void,
+    onFrame: (frame: OpenCodeEvent) => void,
     onConnected: () => void,
     onActivity?: () => void,
   ): Promise<void> {
@@ -437,15 +659,7 @@ export class OpenCodeAdapter implements AgentAdapter {
         buffer = buffer.slice(newline + 1);
         if (!line.startsWith('data:')) continue;
         try {
-          const event = JSON.parse(line.slice(5).trim()) as {
-            type?: string;
-            properties?: (OpenCodePermissionAsk & { part?: OpenCodePart });
-          };
-          const props = event.properties;
-          if (!props) continue;
-          if (props.sessionID && props.sessionID !== this.sessionId) continue;
-          if (event.type === 'permission.asked' || event.type === 'permission.v2.asked') onPermission(props);
-          else if (props.part) onPart(props.part);
+          onFrame(JSON.parse(line.slice(5).trim()) as OpenCodeEvent);
         } catch {
           // A partial or unrecognized frame costs one event, not the turn.
         }
