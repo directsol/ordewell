@@ -242,7 +242,8 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
   the dependent task now reads the agent's actual prose; the cleaned terminal
   capture remains the fallback when no transcript exists (#16). The terminal
   is untouched as the source of verdict evidence — this changes only what is
-  summarized for downstream consumers.
+  summarized for downstream consumers. Thanks to @directsol for verifying the
+  Codex reader against a live rollout store.
 
 ## [0.4.20] — 2026-09-22
 
