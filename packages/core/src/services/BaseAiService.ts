@@ -13,6 +13,7 @@ import { executeTool } from './executeTool';
 import { runResearchAgent, mapWithConcurrency, SUBAGENT_LIMITS } from './ResearchSubagents';
 import { SPAWN_RESEARCH_AGENT } from './researchTools';
 import { classifyOutcome } from './researchStepSummary';
+import { addUsage, type UsageTotals } from '../models/Usage';
 import type { ConversationTurn } from './AiService';
 
 /**
@@ -163,6 +164,10 @@ export abstract class BaseAiService {
     if (!prompt) {
       return { success: false, output: 'spawn_research_agent requires a non-empty "prompt" string: a self-contained task for the agent, including what its digest must report back.', truncated: false };
     }
+    // Every usage record that surfaces from this subagent's own loop belongs to
+    // it, so the finish event can carry the totals. Providers that report none
+    // simply leave the getter undefined.
+    let usage: UsageTotals | undefined;
     return runResearchAgent(prompt, {
       createChat: (onReasoning) => {
         const chat = this.createSubagentChat(onReasoning);
@@ -171,7 +176,13 @@ export abstract class BaseAiService {
       },
       fs,
       signal,
-      onProgress: (progress) => onProgress({ ...progress, subagentId }),
+      subagentId,
+      model: this.config.researchSubagentModel,
+      usage: () => usage,
+      onProgress: (progress) => {
+        if (progress.type === 'usage' && progress.record) usage = addUsage(usage ?? {}, progress.record);
+        onProgress(progress);
+      },
     });
   }
 
