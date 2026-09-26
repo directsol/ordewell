@@ -1,7 +1,7 @@
 import { createInterface } from 'readline';
 import { hasFlag, positionals } from '../utils';
 import type { ApiClient } from '../daemonClient';
-import { handoffBase, handoffBranch, isolationOfPlan, isRepoGroup, mergeOutcome, repoResultLines, reposWithWork } from '../isolation';
+import { handoffBase, handoffBranch, isolationOfPlan, isRepoGroup, mergeOutcome, repairedLanded, repairedNotice, repoResultLines, reposWithWork } from '../isolation';
 import { HANDOFF_ACTIONS } from '../tui/handoff';
 import { adopted } from './conversation';
 import { fail } from './shared';
@@ -68,10 +68,10 @@ export async function handleHandoff(
       return;
     }
     case 'merge': {
-      await confirmed(group
+      await confirmed((group
         ? `Merge ${branch} into the branch checked out in each of ${reposWithWork(handoff).join(', ')}? Nothing is merged unless every repository can take it; once all have, the run's worktrees and branches are removed.`
-        : `Merge ${branch} into the branch you have checked out? Once merged, the run's worktrees and branches are removed.`);
-      const { ok, message } = mergeOutcome(await attempt(() => api.mergeRun(sessionId)), branch, group);
+        : `Merge ${branch} into the branch you have checked out? Once merged, the run's worktrees and branches are removed.`) + repairedNotice(handoff));
+      const { ok, message } = mergeOutcome(await attempt(() => api.mergeRun(sessionId)), branch, group, repairedLanded(handoff));
       if (ok) console.log(message);
       else fail(message);
       return;

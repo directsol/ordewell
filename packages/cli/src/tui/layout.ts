@@ -601,6 +601,17 @@ function taskLines(state: TuiState, row: PlanRow, index: number, cols: number): 
     const files = task.isolation.conflictFiles?.length ? ` (${capConflictFiles(task.isolation.conflictFiles)})` : '';
     lines.push(style.red(truncate(`${bodyPad}⚠ merge conflict${where}${files} — its work is kept on its own branch`, cols)));
   }
+  // A repair in flight (ADR-0015): still running, so it reads as progress, not
+  // a blocker like `conflict` above. `repair` is absent only for a task shown
+  // straight from a reloaded plan, before the live stream has caught up.
+  if (task.isolation?.state === 'repairing') {
+    const files = task.isolation.conflictFiles?.length ? ` in ${capConflictFiles(task.isolation.conflictFiles)}` : '';
+    const attempt = task.isolation.repair ? ` (attempt ${task.isolation.repair.attempt}/${task.isolation.repair.limit})` : '';
+    lines.push(style.yellow(truncate(`${bodyPad}↻ repairing conflict${files}${attempt}`, cols)));
+  }
+  if (task.isolation?.state === 'integrated' && task.isolation.repairedFiles?.length) {
+    lines.push(style.grey(truncate(`${bodyPad}↻ landed after repairing conflict in ${capConflictFiles(task.isolation.repairedFiles)}`, cols)));
+  }
 
   let editorLine: number | undefined;
   if (expanded) {

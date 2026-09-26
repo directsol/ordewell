@@ -4571,6 +4571,17 @@ body {
   color: var(--red);
 }
 
+/* A repair in flight (ADR-0015) is still running, so it reads as progress,
+   not a blocker like `.conflict` above. */
+.task-isolation-badge.repairing {
+  background: var(--orange-subtle);
+  color: var(--orange);
+}
+
+.task-isolation-repaired-note {
+  color: var(--orange);
+}
+
 .task-isolation {
   margin-bottom: 8px;
   padding: 6px 10px;
@@ -4630,6 +4641,11 @@ body {
   font-family: var(--font-mono, monospace);
   font-size: 11px;
   color: var(--accent);
+}
+
+/* So the reviewer knows where to look (ADR-0015). */
+.isolation-handoff-repaired {
+  color: var(--orange);
 }
 
 .isolation-handoff-base {

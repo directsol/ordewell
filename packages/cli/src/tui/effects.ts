@@ -503,7 +503,7 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
     // tree is exactly as it was, and the words say what to do next. A full
     // merge leaves nothing to hand over — the daemon has cleared the run up.
     case 'isolationMerge': {
-      const { ok, message } = mergeOutcome(await api.mergeRun(effect.sessionId), effect.branch, effect.group === true);
+      const { ok, message } = mergeOutcome(await api.mergeRun(effect.sessionId), effect.branch, effect.group === true, effect.repaired ?? []);
       if (ok) dispatch({ type: 'runCleared', sessionId: effect.sessionId });
       dispatch({ type: ok ? 'notice' : 'failed', message });
       return;

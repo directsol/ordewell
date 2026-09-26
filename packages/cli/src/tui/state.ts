@@ -74,6 +74,8 @@ export interface LandedTaskView {
   taskId: string;
   order: number;
   title: string;
+  /** Set when the task landed only after a conflict repair (ADR-0015): the files it was started for. */
+  repairedFiles?: string[];
 }
 
 /** One repo's part of a handoff: its integration branch, where it forked, and what landed in it. */

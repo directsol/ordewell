@@ -382,7 +382,8 @@ export class TaskOrchestrator {
     const result = await this.isolation.mergeIntoCheckedOut(run);
     const branch = integrationBranchNameOf(run);
     const group = run.repos.some((r) => r.path !== SELF_REPO);
-    const { level, message } = describeMergeResult(result, branch, group);
+    const repaired = handoffOf(run).landed.filter((t) => t.repairedFiles?.length);
+    const { level, message } = describeMergeResult(result, branch, group, repaired);
     this.notifications[level](message);
     if (result.outcome === 'merged') await this.clearMergedRun(run);
     return result;

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { capConflictFiles, handoffOf, migratePlanIsolation, taskIsolationOf, type Adr0013PlanIsolation, type Adr0013TaskRecord } from '../isolationRecord';
-import type { IsolationTaskRecord, IsolationTaskStatus, PlanIsolation } from '../../interfaces/IWorktreeIsolation';
+import type { IsolationRun, IsolationTaskRecord, IsolationTaskStatus, PlanIsolation } from '../../interfaces/IWorktreeIsolation';
 
 const legacyTask = (taskId: string, order: number, status: IsolationTaskStatus, linked: string[] = []): Adr0013TaskRecord => ({
   taskId, order, title: `Task ${taskId}`, branch: `ordewell/r1/${order}-${taskId}`, worktree: `/work/app/.ordewell/worktrees/r1/${order}-${taskId}`, status, linked,
@@ -112,6 +112,35 @@ describe('migratePlanIsolation', () => {
     };
 
     expect(migratePlanIsolation(structuredClone(current))).toEqual(current);
+  });
+});
+
+describe('handoffOf', () => {
+  it('names the files a landed task was repaired for, and leaves other landed tasks without them', () => {
+    const repaired: IsolationTaskRecord = {
+      taskId: 'r', order: 1, title: 'Task r', branch: 'ordewell/r1/1-r', workspace: '/wt/1-r',
+      status: 'merged', repos: { '.': { worktree: '/wt/1-r', linked: [], changed: true } },
+      repairs: 1, repairedFiles: ['a.ts', 'b.ts'],
+    };
+    const plain: IsolationTaskRecord = {
+      taskId: 'p', order: 2, title: 'Task p', branch: 'ordewell/r1/2-p', workspace: '/wt/2-p',
+      status: 'merged', repos: { '.': { worktree: '/wt/2-p', linked: [], changed: true } },
+    };
+    const run: IsolationRun = {
+      id: 'r1', workspaceRoot: '/work/app',
+      repos: [{ path: '.', root: '/work/app', baseRef: '0123abcd', integrationBranch: 'ordewell/r1/integration' }],
+      shared: [], sharedRepos: [],
+      tasks: { r: repaired, p: plain },
+    };
+
+    const landed = [
+      { taskId: 'r', order: 1, title: 'Task r', repairedFiles: ['a.ts', 'b.ts'] },
+      { taskId: 'p', order: 2, title: 'Task p' },
+    ];
+    expect(handoffOf(run)).toEqual({
+      repos: [{ path: '.', integrationBranch: 'ordewell/r1/integration', baseRef: '0123abcd', landed }],
+      landed,
+    });
   });
 });
 

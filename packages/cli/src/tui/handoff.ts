@@ -2,7 +2,7 @@ import type { Effect, Step } from './reducer';
 import { say } from './transcript';
 import { sanitize } from './ansi';
 import type { Key } from './keys';
-import { handoffBase, handoffBranch, isRepoGroup, reposWithWork, type PlanIsolationView } from '../isolation';
+import { handoffBase, handoffBranch, isRepoGroup, repairedLanded, repairedNotice, reposWithWork, type PlanIsolationView } from '../isolation';
 import type { HandoffView, Overlay, PickerItem, TaskIsolationView, TaskView, TuiState } from './state';
 
 /**
@@ -79,13 +79,13 @@ export function runHandoffAction(state: TuiState, id: HandoffActionId): Step {
             ? {
               kind: 'confirm',
               title: 'Merge all into your branches?',
-              message: `Merge ${handoffBranch(handoff)} into whatever each of ${reposWithWork(handoff).join(', ')} has checked out. Ordewell never does this on its own. It checks every repository first and merges none unless every repository can take it; on git older than 2.38 it goes repository by repository and stops at the first that fails. A merge that conflicts is aborted, and your trees stay as they were. Once every repository has merged, the run's worktrees and branches are removed.`,
+              message: `Merge ${handoffBranch(handoff)} into whatever each of ${reposWithWork(handoff).join(', ')} has checked out. Ordewell never does this on its own. It checks every repository first and merges none unless every repository can take it; on git older than 2.38 it goes repository by repository and stops at the first that fails. A merge that conflicts is aborted, and your trees stay as they were. Once every repository has merged, the run's worktrees and branches are removed.${repairedNotice(handoff)}`,
               action: { kind: 'merge-run' },
             }
             : {
               kind: 'confirm',
               title: 'Merge into your branch?',
-              message: `Merge ${handoffBranch(handoff)} into whatever you have checked out. Ordewell never does this on its own. If it conflicts the merge is aborted and your tree stays as it was. Once it has merged, the run's worktrees and branches are removed.`,
+              message: `Merge ${handoffBranch(handoff)} into whatever you have checked out. Ordewell never does this on its own. If it conflicts the merge is aborted and your tree stays as it was. Once it has merged, the run's worktrees and branches are removed.${repairedNotice(handoff)}`,
               action: { kind: 'merge-run' },
             },
         },
@@ -112,8 +112,13 @@ export function confirmedHandoff(state: TuiState, kind: 'merge-run' | 'discard-r
   const closed: TuiState = { ...state, overlay: null };
   if (!state.sessionId || !state.handoff) return { state: closed, effects: [] };
   const { sessionId, handoff } = state;
+  const repaired = repairedLanded(handoff);
   const effect: Effect = kind === 'merge-run'
-    ? { type: 'isolationMerge', sessionId, branch: handoffBranch(handoff), ...(isRepoGroup(handoff) ? { group: true } : {}) }
+    ? {
+      type: 'isolationMerge', sessionId, branch: handoffBranch(handoff),
+      ...(isRepoGroup(handoff) ? { group: true } : {}),
+      ...(repaired.length > 0 ? { repaired } : {}),
+    }
     : { type: 'isolationDiscard', sessionId, branch: handoffBranch(handoff) };
   return { state: closed, effects: [effect] };
 }
@@ -211,7 +216,9 @@ export function chooseBlocked(state: TuiState, choice: BlockedChoice): Step {
 export function sameIsolation(a: TaskIsolationView | undefined, b: TaskIsolationView | undefined): boolean {
   return a?.state === b?.state && a?.branch === b?.branch && a?.worktree === b?.worktree
     && a?.conflictRepo === b?.conflictRepo && (a?.repos ?? []).join('\0') === (b?.repos ?? []).join('\0')
-    && (a?.conflictFiles ?? []).join('\0') === (b?.conflictFiles ?? []).join('\0');
+    && (a?.conflictFiles ?? []).join('\0') === (b?.conflictFiles ?? []).join('\0')
+    && a?.repair?.attempt === b?.repair?.attempt && a?.repair?.limit === b?.repair?.limit
+    && (a?.repairedFiles ?? []).join('\0') === (b?.repairedFiles ?? []).join('\0');
 }
 
 function mapTasks(tasks: TaskView[], map: (task: TaskView) => TaskView): TaskView[] {
