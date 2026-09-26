@@ -591,7 +591,10 @@ function taskLines(state: TuiState, row: PlanRow, index: number, cols: number): 
     : '';
   const runner = task.assignedRunner ?? '';
   const bodyPad = parent ? '      ' : '    ';
-  const meta = [running ? 'working' : '', runner, model].filter(Boolean).join(' · ');
+  // "working" over an agent that has printed nothing for a minute hid the one
+  // case that needs the user: an agent stopped at a question in its terminal.
+  const activity = idle ? 'quiet — t opens its terminal' : running ? 'working' : '';
+  const meta = [activity, runner, model].filter(Boolean).join(' · ');
   if (meta) lines.push(style.grey(truncate(`${bodyPad}${meta}`, cols)));
   if (effort || mode) lines.push(style.grey(truncate(`${bodyPad}${[effort, mode].filter(Boolean).join(' · ')}`, cols)));
   // The one isolation state that needs the user; every other stays out of the

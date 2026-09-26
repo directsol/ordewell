@@ -8,6 +8,8 @@ export interface AppDeps {
   draw(frame: string[]): void;
   perform(effect: Effect): Promise<void>;
   onExit(): void;
+  /** Called whenever the session on screen becomes a different one. */
+  onSessionChange?(sessionId: string, state: TuiState): void;
 }
 
 export interface App {
@@ -48,7 +50,9 @@ export function createApp(deps: AppDeps): App {
     if (exited) return;
 
     const result = reduce(state, action);
+    const previousSession = state.sessionId;
     state = result.state;
+    if (state.sessionId && state.sessionId !== previousSession) deps.onSessionChange?.(state.sessionId, state);
 
     if (state.exiting) {
       exited = true;

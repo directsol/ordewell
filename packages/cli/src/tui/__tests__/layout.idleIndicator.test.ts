@@ -34,6 +34,13 @@ describe('plan pane — idle indicator', () => {
     expect(idleFrame).not.toContain('?');
   });
 
+  it('points a quiet task at its terminal instead of calling it working', () => {
+    const idle = plain(planState({ tasks: [task({ idleSince: '2026-08-18T00:00:00.000Z' })] }));
+
+    expect(idle).toContain('quiet — t opens its terminal');
+    expect(idle).not.toContain('working');
+  });
+
   it('reverts to the spinner once idleSince clears', () => {
     const resumed = planState({ tasks: [task({ idleSince: null })] });
     const spinnerGlyphs = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

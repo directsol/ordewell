@@ -1,6 +1,6 @@
 import { assertWorkspaceExists, createSkillsService, mintSessionId } from '@ordewell/core';
 import { ApiClient, ensureDaemonOwned, findFreePort, resolvePort, stopDaemon } from '../daemonClient';
-import { flag } from '../utils';
+import { flag, saveLastSession } from '../utils';
 import { findEnvFile, writeEnvVar } from '../utils/env';
 import { createApp } from './app';
 import { ConversationQueue, runEffect, type OrdewellApi } from './effects';
@@ -98,6 +98,16 @@ export async function handleTui(subArgs: string[]): Promise<void> {
         exit: () => shutdown(0),
       }),
     onExit: () => shutdown(0),
+    // The same pointer `ordewell plan` leaves, so `ordewell handoff`,
+    // `terminal <n>` and the other one-shot commands act on the session this
+    // TUI is showing instead of saying there is none.
+    onSessionChange: (sessionId, state) => {
+      try {
+        saveLastSession(sessionId, state.goal, state.runners.filter((r) => r.enabled).map((r) => r.id), workspace);
+      } catch {
+        /* a read-only workspace only costs the CLI its default */
+      }
+    },
   });
 
   terminal = openTerminal({

@@ -783,7 +783,7 @@ function onExecutionEvent(dispatch: (action: Action) => void, event: WsEvent, se
     }
 
     case 'task_started':
-      dispatch({ type: 'researchStep', summary: `${event.title ?? event.taskId} · ${event.runner ?? ''}`.trim(), sessionId });
+      dispatch({ type: 'taskStarted', taskId: String(event.taskId), title: String(event.title ?? event.taskId), runner: event.runner, sessionId });
       return;
 
     // The extension shows these in its checkpoint panel; here they are

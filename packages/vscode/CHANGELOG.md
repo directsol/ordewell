@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **OpenCode tasks no longer die in narrow terminals.** OpenCode's TUI exits
+  with SIGILL (code 132) below about 45 columns, and each parallel task used to
+  open beside the last one, halving the width every time. The agent now always
+  gets at least 80 columns; task terminals open without taking focus, so
+  parallel tasks share one side group as tabs, each named after its task.
+- **A retry resumes a run its failure paused**, instead of only resetting the
+  task to pending.
+- **Finished agents are closed** when the run is merged, cleaned up or
+  discarded, and when a repair or retry replaces them.
+- **A task stopped at Claude Code's folder-trust or Bypass Permissions
+  confirmation warns that it is waiting for you** instead of looking busy.
+
 ## [0.5.1] — 2026-09-26
 
 ### Added

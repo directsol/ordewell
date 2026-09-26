@@ -16,7 +16,7 @@ import {
 import { selectedText } from './render';
 import { activeToken, findCommand, parseSlash, tokenCompletions, type ParsedCommand } from './slash';
 import {
-  findTask, initialState, SKILL_IDS, planRows, selectedPlanRow, visibleItems,
+  findTask, initialState, isTaskRunning, SKILL_IDS, planRows, selectedPlanRow, visibleItems,
   type ApprovalRequestView, type Cell, type ChatMessage, type Focus, type ModeView,
   type ConfirmOption, type HandoffView, type LandedTaskView, type ModelView, type PickerItem, type PickerState, type RewindTargetView, type RunnerView, type Selection, type SessionView,
   type SkillId, type TaskIsolationView, type TaskView, type TuiState,
@@ -89,6 +89,7 @@ export type Action =
   | { type: 'plannerMessage'; content: string; sessionId?: string }
   | { type: 'plannerToken'; text: string; sessionId?: string }
   | { type: 'researchStep'; summary: string; toolCallId?: string; sessionId?: string }
+  | { type: 'taskStarted'; taskId: string; title: string; runner?: string; sessionId?: string }
   | { type: 'researchStepDone'; summary: string; toolCallId?: string; outcome: ResearchStepOutcome; result: string; sessionId?: string }
   | { type: 'plannerThinking'; text: string; sessionId?: string }
   | { type: 'approvalRequested'; request: ApprovalRequestView; sessionId?: string }
@@ -168,6 +169,23 @@ function alreadySpoken(messages: ChatMessage[], content: string): boolean {
  * newest and counts the rest, rather than flickering between filenames and
  * leaving the user with whichever one happened to land last.
  */
+/**
+ * What a run is doing right now, from the tasks themselves. It used to be the
+ * last `task_started` title, which went on naming a task long after it had
+ * finished — and said nothing once the run was only waiting on the user.
+ */
+function runLabel(tasks: TaskView[]): string {
+  const running = tasks.filter(isTaskRunning);
+  if (running.length > 0) {
+    const [first] = running;
+    const name = first.assignedRunner ? `${first.title} · ${first.assignedRunner}` : first.title;
+    return running.length > 1 ? `${name} (+${running.length - 1} more)` : name;
+  }
+  const waiting = tasks.filter((t) => t.status === 'awaiting_user').length;
+  if (waiting === 0) return '';
+  return waiting === 1 ? '1 task waits for you' : `${waiting} tasks wait for you`;
+}
+
 function researchLabel(messages: ChatMessage[], summary: string): string {
   const others = messages.filter(isPendingResearch).length - 1;
   return others > 0 ? `${summary} (+${others} more)` : summary;
@@ -329,6 +347,17 @@ export function reduce(state: TuiState, action: Action): Step {
       return step({ ...spoken, status, busyLabel: researchLabel(spoken.messages, summary) });
     }
 
+    // A settled transcript line, not a research step: nothing ever settles a
+    // task's start, so as a step it stayed "⋯" forever and was counted into
+    // the planner's next "(+N more)".
+    case 'taskStarted': {
+      if (stale(state, action.sessionId)) return step(state);
+      const tasks = state.tasks.map((t) => (t.id === action.taskId && !isTaskRunning(t) ? { ...t, status: 'in_progress' } : t));
+      const who = action.runner ? ` · ${action.runner}` : '';
+      const spoken = say(state, 'system', sanitize(`Started "${action.title}"${who}`));
+      return step({ ...spoken, tasks, status: 'executing', busyLabel: runLabel(tasks) });
+    }
+
     case 'researchStepDone': {
       if (stale(state, action.sessionId)) return step(state);
       const messages = settleResearchStep(state.messages, action);
@@ -380,7 +409,7 @@ export function reduce(state: TuiState, action: Action): Step {
       // status_update still triggers a render via dispatch, but at least
       // the reference equality lets downstream memos keep their hits.
       if (!changed) return step(state);
-      return step({ ...state, status: 'executing', tasks });
+      return step({ ...state, status: 'executing', tasks, busyLabel: runLabel(tasks) });
     }
 
     case 'queueReady': {

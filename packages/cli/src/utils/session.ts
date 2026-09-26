@@ -1,4 +1,4 @@
-import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
+import { writeFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { getStateDir } from '@ordewell/core';
 
@@ -32,4 +32,30 @@ export function readLastSession(workspace: string): { sessionId: string; goal: s
     }
   } catch { /* empty */ }
   return null;
+}
+
+const SESSION_PREFIX = 'session-';
+
+/**
+ * A full session id from the short form `ordewell status` prints (its last
+ * eight characters) or any other unambiguous piece of one, looked up among the
+ * workspace's saved sessions. Anything else comes back unchanged, for the
+ * daemon to accept or refuse as before.
+ */
+export function expandSessionId(id: string, workspace: string): string {
+  if (id.startsWith(SESSION_PREFIX)) return id;
+  let files: string[];
+  try {
+    files = readdirSync(join(getStateDir(workspace), 'sessions')).filter((f) => f.endsWith('.json'));
+  } catch {
+    return id;
+  }
+  const matches = new Set<string>();
+  for (const file of files) {
+    try {
+      const full = JSON.parse(readFileSync(join(getStateDir(workspace), 'sessions', file), 'utf8'))?.meta?.id;
+      if (typeof full === 'string' && (full.endsWith(id) || full.slice(SESSION_PREFIX.length).startsWith(id))) matches.add(full);
+    } catch { /* a half-written session is no candidate */ }
+  }
+  return matches.size === 1 ? [...matches][0] : id;
 }

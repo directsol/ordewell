@@ -5,6 +5,9 @@ import { printHelp } from './help';
 import { describeConnectionRefused, isConnectionRefused, resolvePort } from './daemonClient';
 import { COMMANDS } from './commands/registry';
 import { cliVersion } from './version';
+import { expandSessionId, flag } from './utils';
+
+const TUI_FLAGS = new Set(['--workspace', '--port']);
 
 async function main(): Promise<void> {
   // Before loadEnvFile() reads from the new location, so a pre-`.ordewell`
@@ -15,6 +18,9 @@ async function main(): Promise<void> {
   // Bare `ordewell` opens the TUI — it is the product's front door, not a usage
   // error. Pipes and scripts still get help, since the TUI needs a real
   // terminal and would otherwise exit 1 on `ordewell | less`.
+  // `ordewell --workspace x` / `ordewell --port N` are the TUI options the help
+  // lists under a bare `ordewell`, so a leading TUI flag still means the TUI.
+  if (TUI_FLAGS.has(argv[0] ?? '')) argv.unshift('tui');
   const command = argv[0] ?? (process.stdin.isTTY ? 'tui' : '--help');
   if (command === '--help' || command === '-h') {
     printHelp();
@@ -23,6 +29,10 @@ async function main(): Promise<void> {
   if (command === '--version' || command === '-v' || command === 'version') {
     console.log(cliVersion());
     return;
+  }
+  const sessionAt = argv.indexOf('--session-id');
+  if (sessionAt > 0 && argv[sessionAt + 1]) {
+    argv[sessionAt + 1] = expandSessionId(argv[sessionAt + 1], flag(argv, '--workspace') || process.cwd());
   }
   const handler = COMMANDS[command];
   if (!handler) {

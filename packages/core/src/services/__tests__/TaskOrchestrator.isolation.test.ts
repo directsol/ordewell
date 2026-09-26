@@ -33,7 +33,7 @@ function setup(opts: { isolation?: FakeWorktreeIsolation; workspace?: string; co
   /** The task's newest session: a repair is a second attempt of the same task. */
   const latest = (taskId: string) => sessions.filter((s) => s.taskId === taskId).at(-1)!;
   const passLatest = (task: Task) => latest(task.id).emitOutput(`<<<ORDEWELL_DONE_${task.completionMarker}>>>`);
-  return { orchestrator, isolation, spawn, sessions, notifications, spawnedCwd, sessionFor, pass, latest, passLatest };
+  return { orchestrator, isolation, spawn, sessions, notifications, spawnedCwd, sessionFor, pass, latest, passLatest, runner };
 }
 
 const task = (id: string, order: number, over: Partial<Task> = {}) =>
@@ -1313,5 +1313,49 @@ describe('TaskOrchestrator with worktree isolation', () => {
     await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
     expect(queries[0]).toMatchObject({ cwd: '/fake-worktrees/run1/1-t1', marker: 'mk-t1' });
     expect(orchestrator.storeInstance.get('t1')!.outputSummary?.logTail).toBe('answer from the worktree');
+  });
+
+  describe('the terminals finished tasks leave open', () => {
+    it('stay open after a task lands, and close once Merge all has cleared the run', async () => {
+      const { orchestrator, pass, sessionFor, runner } = setup();
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1]);
+      await orchestrator.approveReview();
+      pass(t1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
+      expect(runner.stop).not.toHaveBeenCalled();
+
+      await orchestrator.mergeRun();
+
+      expect(runner.stop).toHaveBeenCalledWith(sessionFor('t1')!.id);
+    });
+
+    it.each(['discardRun', 'cleanupRun'] as const)('close on %s', async (action) => {
+      const { orchestrator, pass, sessionFor, runner } = setup();
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1]);
+      await orchestrator.approveReview();
+      pass(t1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
+
+      await orchestrator[action]();
+
+      expect(runner.stop).toHaveBeenCalledWith(sessionFor('t1')!.id);
+    });
+
+    it('close when a repair starts a new agent in the same worktree', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.outcomes.set('t1', 'conflict');
+      const { orchestrator, pass, spawn, sessions, runner } = setup({ isolation, config: { conflictRepairAttempts: 1 } });
+      const t1 = task('t1', 1);
+      orchestrator.loadPlan([t1]);
+      await orchestrator.approveReview();
+
+      pass(t1);
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+
+      expect(runner.stop).toHaveBeenCalledWith(sessions[0].id);
+      expect(runner.stop).not.toHaveBeenCalledWith(sessions[1].id);
+    });
   });
 });

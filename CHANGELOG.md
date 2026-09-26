@@ -8,6 +8,41 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A retry resumes a run its failure paused.** Retrying the task whose failed
+  verdict halted a full run now starts it and carries on with the plan; it used
+  to reset the task to pending and run nothing until the plan was run again. A
+  retry after a single-task run still runs only that task.
+- **Finished agents no longer pile up.** The agent a verdict leaves open for
+  you to read is closed when the run is merged, cleaned up or discarded, and
+  when a conflict repair or retry starts a new agent in the same worktree.
+  Before, every task left an agent process running, in a worktree that no
+  longer existed, until the daemon stopped.
+- **A task stopped at an agent's question says so.** When Claude Code stops on
+  its folder-trust or Bypass Permissions confirmation — which it shows even in
+  Auto mode, in a folder it has never been trusted in — the task now warns that
+  it is waiting for you and where to answer, instead of looking busy forever.
+  Ordewell never answers these for you. A task that has gone quiet reads
+  "quiet — t opens its terminal" in the TUI instead of "working".
+- **OpenCode tasks no longer die in narrow VS Code terminals.** OpenCode's TUI
+  exits with SIGILL (code 132) below about 45 columns, and each parallel task
+  used to open beside the last one, halving the width every time. The agent now
+  always gets at least 80 columns; task terminals open without taking focus, so
+  parallel tasks share one side group as tabs, and each tab is named after its
+  task's order and title rather than a slice of its id.
+- **The TUI status line follows the run.** It names the tasks actually running,
+  says when the run is only waiting on you, and stops naming a task once it
+  finishes. A task's start is logged as a plain line instead of a research step
+  that never settled.
+- **The CLI finds the session the TUI is showing.** `ordewell handoff`,
+  `terminal <n>` and the other one-shot commands default to the TUI's session
+  in the same workspace, and `--session-id` accepts the short id
+  `ordewell status` prints.
+- **`ordewell --workspace <dir>` and `ordewell --port <n>` open the TUI**, as the
+  help says, instead of failing as an unknown command; `ordewell handoff` is now
+  listed in the help.
+
 ## [0.5.1] — 2026-09-26
 
 ### Added

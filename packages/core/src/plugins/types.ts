@@ -30,6 +30,19 @@ export interface PluginRunnerDef {
    * see `RunnerInvocation.submitPromptKey`.
    */
   submitPromptKey?: boolean;
+  /**
+   * Screens the agent can stop on before starting the task, waiting for a
+   * human — a folder-trust or permission-mode confirmation. Ordewell never
+   * answers one; seeing it, the task's user is told where to.
+   */
+  blockingPrompts?: BlockingPrompt[];
+}
+
+export interface BlockingPrompt {
+  /** Text the prompt shows; matched ignoring case and whitespace. */
+  phrase: string;
+  /** Completes "<runner> is asking …", e.g. "whether to trust this folder". */
+  asks: string;
 }
 
 export interface PluginFeatures {

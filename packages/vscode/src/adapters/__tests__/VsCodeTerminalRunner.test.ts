@@ -126,6 +126,27 @@ describe('VsCodeTerminalRunner', () => {
     expect(args[4]).toContain('stty cols 120 rows 40');
   });
 
+  // OpenCode's TUI dies with SIGILL below ~45 columns, and parallel tasks used
+  // to split the editor down to exactly that.
+  it('never starts or resizes the agent narrower than 80 columns', async () => {
+    const { runner, spawnImpl, child, spawnOpts } = makeRunner({ hasScript: true });
+    await runner.spawn(spawnOpts);
+
+    await __terminals[0].pty.open({ columns: 30, rows: 4 });
+    __terminals[0].pty.setDimensions?.({ columns: 40, rows: 30 });
+
+    expect(spawnImpl.mock.calls[0][1][4]).toContain('stty cols 80 rows 10');
+    expect((child.stdio[3] as { write: ReturnType<typeof vi.fn> }).write).toHaveBeenCalledWith('80 30\n');
+  });
+
+  it('names each tab after its task, so parallel tasks with similar ids stay apart', async () => {
+    const { runner, spawnOpts } = makeRunner();
+    await runner.spawn({ ...spawnOpts, taskId: 'task-multiply-typeerror', order: 1, title: 'Throw on non-numbers' });
+    await runner.spawn({ ...spawnOpts, taskId: 'task-multiply-variadic', order: 2, title: 'Accept any number of arguments' });
+
+    expect(__terminals.map((t) => t.name)).toEqual(['Ordewell: #1 Throw on non-numbers', 'Ordewell: #2 Accept any number of arguments']);
+  });
+
   it('runs the interactive invocation under a PTY when script is available', async () => {
     const { runner, spawnImpl, spawnOpts } = makeRunner({ hasScript: true });
     await runner.spawn(spawnOpts);

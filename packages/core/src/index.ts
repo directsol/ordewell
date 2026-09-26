@@ -170,7 +170,7 @@ export type { PluginSource } from './plugins/pluginSource';
 export { resolveArgs } from './plugins/resolveArgs';
 export { CLAUDE_CODE_MANIFEST } from './plugins/builtin/claude-code.manifest';
 export { OPENCODE_MANIFEST } from './plugins/builtin/opencode.manifest';
-export type { RunnerPluginManifest, RunnerInvocation, PluginEntry, ResolveContext, IPluginStore, PluginRunnerDef, PluginFeatures, PluginModelDiscovery, PluginMode, DiscoveryCommand } from './plugins/types';
+export type { RunnerPluginManifest, RunnerInvocation, PluginEntry, ResolveContext, IPluginStore, PluginRunnerDef, BlockingPrompt, PluginFeatures, PluginModelDiscovery, PluginMode, DiscoveryCommand } from './plugins/types';
 export * from './utils/fsHelpers';
 export * from './utils/stateStore';
 export * from './utils/sessionStore';

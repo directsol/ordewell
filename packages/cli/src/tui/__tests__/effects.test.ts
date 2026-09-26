@@ -449,8 +449,8 @@ describe('execution', () => {
     const h = withEvents({ type: 'task_started', taskId: 'a', order: 1, title: 'Add route', runner: 'opencode' });
     await runEffect({ type: 'execute', sessionId: 's1' }, h.deps);
 
-    const step = h.actions.find((a) => a.type === 'researchStep') as any;
-    expect(step.summary).toContain('Add route');
+    const started = h.actions.find((a) => a.type === 'taskStarted') as any;
+    expect(started).toMatchObject({ taskId: 'a', title: 'Add route', runner: 'opencode' });
   });
 
   it('shows a checkpoint summary, as the VS Code checkpoint panel does', async () => {

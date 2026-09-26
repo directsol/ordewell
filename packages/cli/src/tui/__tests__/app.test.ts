@@ -31,6 +31,17 @@ describe('createApp', () => {
     expect(h.performed).toContainEqual({ type: 'refresh' });
   });
 
+  it('reports each new session once, so the CLI can default to it', () => {
+    const onSessionChange = vi.fn();
+    const app = createApp({ initial: { rows: 24, cols: 80 }, draw: () => {}, perform: async () => {}, onExit: () => {}, onSessionChange });
+
+    app.dispatch({ type: 'sessionStarted', sessionId: 's1', goal: 'Add multiply' });
+    app.dispatch({ type: 'notice', message: 'unrelated' });
+    app.dispatch({ type: 'sessionStarted', sessionId: 's2', goal: 'Add reverse' });
+
+    expect(onSessionChange.mock.calls.map(([id, state]) => [id, state.goal])).toEqual([['s1', 'Add multiply'], ['s2', 'Add reverse']]);
+  });
+
   it('startup refresh posts no notice', async () => {
     const h = harness();
     h.app.start();

@@ -18,6 +18,7 @@ Planning:
   ordewell fork                   Continue in a copy of the conversation and its tasks
   ordewell compact                Condense the conversation into a summary (tasks are kept)
   ordewell rewind [<n>]           Fork the conversation from before message <n> (no <n>: list them)
+  ordewell handoff [action]       Review, merge, discard or clean up a finished isolated run
 
 Tasks (<id> is an order number or a task ID):
   ordewell add-task --title "..."  Add a task to the current plan

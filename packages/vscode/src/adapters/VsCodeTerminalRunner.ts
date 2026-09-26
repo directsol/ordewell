@@ -5,6 +5,15 @@ import { HeadlessRunner, ITerminalSession, RunnerSpawnOptions } from '@ordewell/
 const DEFAULT_COLUMNS = 120;
 const DEFAULT_ROWS = 30;
 const OPEN_TIMEOUT_MS = 3000;
+// Below roughly 45 columns OpenCode's TUI dies with SIGILL (exit 132) at start
+// or on the resize that narrows it, failing the task for want of a marker. A
+// narrow tab now shows the agent wrapped instead of losing it.
+const MIN_COLUMNS = 80;
+const MIN_ROWS = 10;
+
+function agentSize(columns: number, rows: number): { cols: number; rows: number } {
+  return { cols: Math.max(columns, MIN_COLUMNS), rows: Math.max(rows, MIN_ROWS) };
+}
 
 /** A terminal needs CRLF; PTY output already has it, piped output does not. */
 function toCrlf(text: string): string {
@@ -34,7 +43,11 @@ export class VsCodeTerminalRunner extends HeadlessRunner {
   private terminals = new Map<string, vscode.Terminal>();
 
   override async spawn(opts: RunnerSpawnOptions): Promise<ITerminalSession> {
-    const shortId = opts.taskId.slice(0, 8);
+    // Planner ids share prefixes ("task-multiply-…"), so a slice of the id
+    // gave parallel tasks identical tab names; the order and title tell them apart.
+    const label = opts.order !== undefined && opts.title
+      ? `#${opts.order} ${opts.title.length > 40 ? `${opts.title.slice(0, 39)}…` : opts.title}`
+      : opts.taskId.slice(0, 8);
     const id = this.nextSessionId(opts.taskId);
     const session = this.createSession(id, opts.taskId);
     // Resolve and validate now — an unknown runner or an unlaunchable command
@@ -53,8 +66,7 @@ export class VsCodeTerminalRunner extends HeadlessRunner {
     // no-op once `open` has fired.
     const start = async (dimensions?: vscode.TerminalDimensions) => {
       try {
-        const cols = dimensions?.columns ?? DEFAULT_COLUMNS;
-        const rows = dimensions?.rows ?? DEFAULT_ROWS;
+        const { cols, rows } = agentSize(dimensions?.columns ?? DEFAULT_COLUMNS, dimensions?.rows ?? DEFAULT_ROWS);
         const prepared = await this.prepareLaunch(opts, {
           size: { cols, rows },
           // Only meaningful when script is present; wrapWithPty ignores it otherwise.
@@ -106,18 +118,24 @@ export class VsCodeTerminalRunner extends HeadlessRunner {
       // Forwarded to the wrapper's watcher, which runs `stty` on the PTY slave —
       // that sends SIGWINCH to the agent's foreground group, so the TUI reflows
       // exactly like a native terminal.
-      setDimensions: (d) => session.writeControl?.(`${d.columns} ${d.rows}\n`),
+      setDimensions: (d) => {
+        const { cols, rows } = agentSize(d.columns, d.rows);
+        session.writeControl?.(`${cols} ${rows}\n`);
+      },
     };
 
     const terminal = vscode.window.createTerminal({
-      name: `Ordewell: ${shortId}`,
+      name: `Ordewell: ${label}`,
       pty,
       iconPath: new vscode.ThemeIcon('rocket'),
-      location: { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
+      // Focus stays where the user is: taking it made every parallel task open
+      // beside the previous one, halving each terminal's width per task (see
+      // MIN_COLUMNS), and pulled the cursor out of the chat mid-sentence.
+      location: { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
     });
     this.terminals.set(id, terminal);
     this.registerSession(id, session);
-    terminal.show(false);
+    terminal.show(true);
 
     // `open` only fires once VS Code renders the tab; if it never does, the task
     // would sit unstarted forever.

@@ -26,6 +26,7 @@ import { describeMergeResult } from './mergeResultNotice';
 import { capConflictFiles, handoffOf, integrationBranchNameOf, layoutOf, SELF_REPO, taskIsolationOf } from './isolationRecord';
 import type { IsolatedExecution } from './plannerModes';
 import { buildConflictRepairPrompt } from './PlanPrompts';
+import { watchBlockingPrompts } from './blockingPrompts';
 
 /**
  * The one notification channel out of the orchestrator. Everything that used
@@ -170,6 +171,21 @@ export class TaskOrchestrator {
    */
   private retryCounts = new Map<string, number>();
   private spawnCounts = new Map<string, number>();
+  /**
+   * The terminal a verdict left open, by task. It stays so the user can read
+   * the agent's output or keep talking to it — but only while its worktree
+   * does: once that is removed the agent sits in a deleted directory, and a
+   * newer attempt in the same worktree would share it with a second agent.
+   * Without this, every task of every run left one agent process running
+   * until the daemon stopped.
+   */
+  private lingering = new Map<string, string>();
+  /**
+   * A full-plan run a failure paused. Retrying the failed task is the explicit
+   * resume the pause waits for — without this a retry only reset the task to
+   * pending and nothing ran until the user also re-ran the whole plan.
+   */
+  private haltedByFailure = false;
   /**
    * Tasks pulled out of auto-scheduling (user-cancelled or failed to spawn).
    * They stay 'pending' — "not executed" — but the scheduler skips them until
@@ -390,6 +406,7 @@ export class TaskOrchestrator {
   }
 
   private async clearMergedRun(run: IsolationRun): Promise<void> {
+    this.closeLingeringOf(run);
     try {
       await this.isolation.discard(run, { integration: 'delete-merged' });
     } catch (err) {
@@ -401,14 +418,35 @@ export class TaskOrchestrator {
 
   /** Worktrees and task branches go; the integration branch and the record stay for review and merge. */
   async cleanupRun(): Promise<void> {
+    this.closeLingeringOf(this.requireRun());
     await this.isolation.discard(this.requireRun(), { integration: 'keep' });
     this.emit('onIsolationChanged');
   }
 
   /** The run and everything it made go, and the plan forgets it; the next run starts afresh. */
   async discardRun(): Promise<void> {
+    this.closeLingeringOf(this.requireRun());
     await this.isolation.discard(this.requireRun(), { integration: 'delete' });
     this.forgetRun();
+  }
+
+  private watchBlockingPrompts(task: Task, attempt: TaskAttempt, session: ITerminalSession): void {
+    const manifest = this.registry?.get(attempt.runner)?.manifest;
+    watchBlockingPrompts(session, manifest?.runner.blockingPrompts ?? [], (prompt) => {
+      if (this.attempts.get(task.id) !== attempt) return;
+      this.notifications.warn(`Task "${task.title}" is waiting for you: ${manifest?.displayName ?? attempt.runner} is asking ${prompt.asks}. Answer it in the task's terminal.`);
+    });
+  }
+
+  private closeLingering(taskId: string): void {
+    const sessionId = this.lingering.get(taskId);
+    if (sessionId === undefined) return;
+    this.lingering.delete(taskId);
+    this.terminalRunner.stop(sessionId);
+  }
+
+  private closeLingeringOf(run: IsolationRun): void {
+    for (const taskId of Object.keys(run.tasks)) this.closeLingering(taskId);
   }
 
   private forgetRun(): void {
@@ -512,12 +550,20 @@ export class TaskOrchestrator {
     if (!(await this.openRun(() => this.start())) || this.running) return;
     console.log(`[TaskOrchestrator] Starting with ${this.store.allTasks.length} tasks (${this.store.allTasks.filter(t => t.type === 'ai' && t.prompt).length} AI ready)`);
     this.running = true;
+    this.haltedByFailure = false;
     this.planStatus = 'running';
     this.emit('onTaskChanged');
     await this.tick();
   }
 
+  private haltOnFailure(): void {
+    if (this.running) this.haltedByFailure = true;
+    this.running = false;
+    this.planStatus = 'approved';
+  }
+
   stop(): void {
+    this.haltedByFailure = false;
     this.running = false;
     this.planStatus = 'approved';
     this.terminalRunner.stopAll();
@@ -568,8 +614,7 @@ export class TaskOrchestrator {
       // Missing completion evidence is a hard boundary: do not launch more
       // work from a full-plan run until the user retries/resumes explicitly.
       // Already-active parallel tasks may finish, but no new task is spawned.
-      this.running = false;
-      this.planStatus = 'approved';
+      this.haltOnFailure();
       this.notifications.error(`Task "${task.title}" failed verification: ${verdict.reason}`);
       if (attempt.worktree) await this.releaseWorktree(taskId, { keep: true });
     }
@@ -728,8 +773,7 @@ export class TaskOrchestrator {
       if (whyNot) this.tell('info', whyNot);
     } else {
       this.store.markFailed(task.id);
-      this.running = false;
-      this.planStatus = 'approved';
+      this.haltOnFailure();
       this.notifications.error(inRepo
         ? `Task "${task.title}" passed, but git could not integrate its work in ${inRepo}, so none of it landed. Its worktrees are kept for inspection.`
         : `Task "${task.title}" passed, but git could not integrate its work. Its worktree is kept for inspection.`);
@@ -789,6 +833,7 @@ export class TaskOrchestrator {
     await integration;
     const run = this.isolationRun;
     if (!run?.tasks[taskId]) return;
+    if (!opts.keep) this.closeLingering(taskId);
     try {
       await this.isolation.release(run, taskId, opts);
     } catch (err) {
@@ -963,7 +1008,8 @@ export class TaskOrchestrator {
     // A retry starts over from the integration tip, which by now holds what its
     // predecessors landed; the old attempt's worktree has nothing to offer it.
     await this.releaseWorktree(taskId, { keep: false }, ended?.integration);
-    await this.tick();
+    if (this.haltedByFailure && !this.running) await this.start();
+    else await this.tick();
   }
 
   /**
@@ -1109,6 +1155,7 @@ export class TaskOrchestrator {
         // A merge to resolve is not new behaviour to drive test-first.
         tddEnabled: !attempt.repair && this.tddEnabled(),
       });
+      this.closeLingering(task.id);
       const session = await this.terminalRunner.spawn({
         taskId: task.id,
         runner: attempt.runner,
@@ -1135,6 +1182,7 @@ export class TaskOrchestrator {
       // captured before that chunk's verdict asks for the final text.
       this.output.attach(task.id, session);
       this.verifier.watch(task, session);
+      this.watchBlockingPrompts(task, attempt, session);
 
       this.emit('onTaskChanged');
       if (attempt.repair) {
@@ -1391,6 +1439,7 @@ export class TaskOrchestrator {
     const attempt = this.attempts.get(taskId);
     this.attempts.delete(taskId);
     if (attempt) this.output.detach(taskId);
+    if (reason === 'verdict' && attempt?.session) this.lingering.set(taskId, attempt.session.id);
     if (reason === 'cancel' || reason === 'release' || reason === 'complete' || reason === 'retry') {
       const task = this.store.get(taskId);
       if (task) this.verifier.clear(task);

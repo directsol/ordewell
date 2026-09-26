@@ -10,6 +10,7 @@ import { fakeNotification } from './sessionTestKit';
 import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
 import type { TaskOutputSource, TranscriptQuery, TranscriptReader } from '../../interfaces/TaskOutputSource';
 import { stripAnsi } from '../../utils/shell';
+import { RunnerRegistry } from '../../plugins/RunnerRegistry';
 
 /** Never touches the real HOME: every orchestrator here reads transcripts from this. */
 function fakeTranscripts(answers: Record<string, string> = {}): TranscriptReader & { queries: TranscriptQuery[] } {
@@ -1253,6 +1254,58 @@ describe('task attempts', () => {
     await orchestrator.start();
 
     expect(orchestrator.getAttempt('t1')).toMatchObject({ attempt: 2, sessionId: 's2', phase: 'running' });
+  });
+
+  it('tells the user when a task sits at a prompt its agent will not get past alone', async () => {
+    const { sessions, spawn } = sessionRunner();
+    const warn = vi.fn();
+    const orchestrator = makeOrchestrator({ terminalRunner: { spawn }, notifications: { warn } });
+    orchestrator.setRegistry(new RunnerRegistry());
+    orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first', assignedRunner: 'claude-code' })]);
+    await orchestrator.approveReview();
+
+    sessions[0].emitOutput(' Quick safety check: Is this a project you created or one you trust?');
+
+    expect(warn).toHaveBeenCalledWith(`Task "First" is waiting for you: Claude Code is asking whether to trust the task's folder. Answer it in the task's terminal.`);
+    expect(orchestrator.storeInstance.get('t1')!.status).toBe('in_progress');
+  });
+
+  it('retrying the task whose failure paused a full run resumes that run', async () => {
+    const { sessions, spawn } = sessionRunner();
+    const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
+    orchestrator.loadPlan([
+      createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first', completionMarker: 'mk-1' }),
+      createTask({ id: 't2', order: 2, title: 'Second', prompt: 'do second', completionMarker: 'mk-2', dependencies: ['t1'] }),
+    ]);
+    await orchestrator.approveReview();
+    sessions[0].emitExit(1);
+    await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('failed'));
+
+    await orchestrator.retryTask('t1');
+
+    expect(orchestrator.getAttempt('t1')).toMatchObject({ attempt: 2, phase: 'running' });
+    sessions[1].emitOutput('<<<ORDEWELL_DONE_mk-1>>>');
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(3));
+    expect(spawn.mock.calls[2][0].taskId).toBe('t2');
+  });
+
+  it('retrying a task that failed on its own does not start the rest of the plan', async () => {
+    const { sessions, spawn } = sessionRunner();
+    const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
+    orchestrator.loadPlan([
+      createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first', completionMarker: 'mk-1' }),
+      createTask({ id: 't2', order: 2, title: 'Second', prompt: 'do second', completionMarker: 'mk-2' }),
+    ]);
+    await orchestrator.approveReview();
+    orchestrator.stop();
+    await orchestrator.runTask('t1');
+    sessions.at(-1)!.emitExit(1);
+    await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('failed'));
+    const before = spawn.mock.calls.length;
+
+    await orchestrator.retryTask('t1');
+
+    expect(spawn).toHaveBeenCalledTimes(before);
   });
 
   it('stop during an in-flight spawn that then fails returns the task to pending', async () => {
