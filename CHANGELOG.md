@@ -8,6 +8,8 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-09-26
+
 ### Fixed
 
 - **CLI commands work after the daemon restarts.** A session the new daemon

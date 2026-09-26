@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-09-26
+
+No extension changes; released alongside the CLI's fixes.
+
 ## [0.5.2] — 2026-09-26
 
 ### Added
