@@ -3,6 +3,7 @@ import { augmentedPath, withPath } from '../../utils/shellPath';
 import { planDirectLaunch, isExecutableResolved, ExecutableNotFoundError } from '../../utils/launch';
 import { assertWorkspaceExists } from '../../utils/workspace';
 import { killTree } from '../../utils/processTree';
+import { workspaceEnvOf } from '../workspaceEnv';
 import { LineBuffer, type AgentAdapter, type AgentEvent, type AgentProcessDeps, type AgentStartOptions } from './AgentAdapter';
 
 /** Stderr kept for the failure message; a dying CLI's last words are the only useful diagnostic. */
@@ -101,7 +102,8 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
     // minimal PATH a GUI-launched host inherits.
     const PATH = await resolvePath();
 
-    this.spawnEnv = withPath(process.env, PATH, spec.env);
+    const workspace = await (this.deps.workspaceEnv ?? workspaceEnvOf)(opts.cwd);
+    this.spawnEnv = withPath(process.env, PATH, { ...workspace, ...spec.env });
     // On POSIX this hands back `spec` untouched; on Windows it resolves the
     // agent's `.exe` (or routes its `.cmd` shim through cmd.exe), because
     // CreateProcess performs no PATHEXT lookup of its own.

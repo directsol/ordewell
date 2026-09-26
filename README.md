@@ -326,9 +326,21 @@ Any install route is found, on PATH or not: the PowerShell one-liner installers 
 | One provider key (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …) | — | The one required setting. Twenty-five providers are recognised, each from its own variable — `ordewell key` lists them — plus any OpenAI-compatible endpoint via `OPENAI_COMPATIBLE_BASE_URL`. The provider is auto-detected from whichever key is set (force with `AI_PROVIDER`). Not needed when `AI_PROVIDER` is `claude-code`, `codex`, or `opencode` — those plan with the CLI's own subscription. |
 | `ORCHESTRATOR_MODEL` | `deepseek/deepseek-v4-flash` | The planner model — a budget model by default; it plans and researches but never writes code. Change via `ordewell model set <id>` or `/model`, which scope the choice to the planner backend's own catalog. With a coding-agent planner, it must be one of that agent's own model ids. |
 | `ORDEWELL_PLANNER_EFFORT` | — | Thinking effort for a coding-agent planner, from the selected model's own variants (`low`, `high`, `adaptive`, …). Ignored by vendor planners, whose effort is baked into the model id. Change via `ordewell planner-effort <level>` or `/planner-effort`. |
-| `ORDEWELL_MAX_PARALLEL` | `3` | Max concurrent AI task sessions (1–5). Independent tasks run in parallel; the dependency graph is always respected. |
+| `ORDEWELL_MAX_PARALLEL` | `3` | How many AI tasks run at once — any number from 1 up. Independent tasks run in parallel; the dependency graph is always respected. Change it with `ordewell parallel <n>`, `/parallel <n>` in the TUI and VS Code chat, or the `ordewell.maxParallelSessions` setting; a change applies to a run already going. |
 
 Run `ordewell --help` for the full list of environment variables, or `ordewell setup` for the interactive wizard. VS Code users: everything is mirrored under `ordewell.*` settings.
+
+**Per-project environment.** The planner and every task's agent also get the
+project's own variables, however Ordewell was started — from a desktop
+launcher, another directory, or a daemon already running for another project.
+They come from the project's `.envrc` when [direnv](https://direnv.net) is
+installed and you have allowed it (a blocked `.envrc` is reported, never
+loaded), then from an untracked `.ordewell/env` file (`KEY=value` lines), which
+wins. So a `CLAUDE_CONFIG_DIR` in either picks the Claude Code account a
+project's agents run under. Variables that change how processes load or where
+they are found (`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, …) are never passed on,
+and an `.ordewell/env` that git tracks is ignored. Set `ORDEWELL_DIRENV=false`
+to leave direnv out. See [ADR-0016](docs/adr/0016-per-workspace-environment.md).
 
 </details>
 

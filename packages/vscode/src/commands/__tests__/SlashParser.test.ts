@@ -167,6 +167,14 @@ describe('conversation-editing slash commands', () => {
     expect(executeCommand).toHaveBeenCalledWith('ordewell.rewindConversation', '3');
   });
 
+  it('/parallel hands its number, or nothing for the input box, to the Set Parallel Tasks command', async () => {
+    expect(isKnownSlashCommand('/parallel 8')).toBe(true);
+    executeCommand.mockClear();
+    await handleSlashCommand('/parallel 8', makeDeps());
+    await handleSlashCommand('/parallel', makeDeps());
+    expect(executeCommand.mock.calls).toEqual([['ordewell.setMaxParallel', '8'], ['ordewell.setMaxParallel', undefined]]);
+  });
+
   it('/compact runs the compact command', async () => {
     executeCommand.mockClear();
     await handleSlashCommand('/compact', makeDeps());

@@ -19,6 +19,7 @@ function settingsState(overrides: Partial<SettingsState> = {}): SettingsState {
     orchestratorModel: '',
     aiProvider: 'openrouter',
     plannerThinkingEffort: '',
+    maxParallel: 3,
     tdd: { enabled: false },
     verification: { enabled: false },
     modelAllowlist: undefined,
@@ -53,6 +54,8 @@ describe('GET /api/settings', () => {
       // Who plans (ADR-0009) — the planner picker reads it from here.
       aiProvider: 'openrouter',
       plannerThinkingEffort: '',
+      // How many tasks run at once — `/parallel` shows it from here.
+      maxParallel: 3,
       tdd: { enabled: true },
       verification: { enabled: false },
     });

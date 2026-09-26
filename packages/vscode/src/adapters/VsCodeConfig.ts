@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { AiProvider, BaseConfig, normalizeGeminiModel, resolveProvider, ALL_PROVIDERS, getProviderMeta, configuredProviders } from '@ordewell/core';
+import { AiProvider, BaseConfig, DEFAULT_MAX_PARALLEL, parseMaxParallel, normalizeGeminiModel, resolveProvider, ALL_PROVIDERS, getProviderMeta, configuredProviders } from '@ordewell/core';
 import type { ProviderModelLists } from '@ordewell/core';
 import { SecretStore, type ApiProvider, type SecretKey } from './SecretStore';
 
@@ -223,7 +223,7 @@ export class VsCodeConfig extends BaseConfig {
     return enabled.length > 0 ? enabled : ['claude-code'];
   }
 
-  get maxParallelSessions() { return this.config.get<number>('maxParallelSessions', 3); }
+  get maxParallelSessions() { return parseMaxParallel(this.config.get<number>('maxParallelSessions', DEFAULT_MAX_PARALLEL)) ?? DEFAULT_MAX_PARALLEL; }
   get researchEnabled() { return this.config.get<boolean>('researchEnabled', true); }
   get researchMaxSteps() { return this.config.get<number>('researchMaxSteps', 48); }
   get researchMaxFileSize() { return this.config.get<number>('researchMaxFileSize', 10); }

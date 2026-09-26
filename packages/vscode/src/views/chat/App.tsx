@@ -676,7 +676,7 @@ export default function App() {
       return;
     }
     if (text === '/help') {
-      setSlashOutput('Commands: /model, /model set <id>, /key set, /sessions, /new, /fork, /rewind [n], /compact, /refresh, /auto, /allowlist, /help\n\nType / after a command to see model suggestions.');
+      setSlashOutput('Commands: /model, /model set <id>, /key set, /sessions, /new, /fork, /rewind [n], /compact, /refresh, /auto, /parallel [n], /allowlist, /help\n\nType / after a command to see model suggestions.');
       setTimeout(() => setSlashOutput(''), 6000);
       return;
     }

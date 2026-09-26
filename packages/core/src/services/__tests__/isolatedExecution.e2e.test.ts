@@ -382,7 +382,12 @@ describe.skipIf(!hasGit)('isolated execution against a real repository', () => {
     ]);
 
     await second.approveReview();
-    await vi.waitFor(() => expect(second.storeInstance.get('t4')!.status).toBe('completed'), { timeout: 30_000 }).catch(() => undefined);
+    // The handoff follows the last verdict asynchronously (it reads the run back
+    // from git), so t4 completing is not yet the run being handed over.
+    await vi.waitFor(() => {
+      expect(second.storeInstance.get('t4')!.status).toBe('completed');
+      expect(secondHandoff).toBeDefined();
+    }, { timeout: 30_000 }).catch(() => undefined);
     process.stdout.write(notices.join('\n') + '\n');
     expect(second.storeInstance.get('t2')!.status).toBe('completed');
     expect(secondHandoff).toBeDefined();

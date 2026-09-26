@@ -2,6 +2,7 @@ import { readFileSync, readdirSync, statSync, existsSync } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { TranscriptQuery, TranscriptReader } from '../interfaces/TaskOutputSource';
+import { workspaceEnvOf } from './workspaceEnv';
 
 /**
  * Read a task's final answer from the agent's own session transcript — the
@@ -19,17 +20,27 @@ import type { TranscriptQuery, TranscriptReader } from '../interfaces/TaskOutput
  */
 export class HomeTranscriptReader implements TranscriptReader {
   private readonly home: () => string;
+  private readonly claudeConfigDirs: (cwd: string) => Promise<string[]>;
 
-  constructor(opts: { homeDir?: string } = {}) {
+  constructor(opts: { homeDir?: string; workspaceEnv?: (cwd: string) => Promise<Record<string, string>> } = {}) {
     // Resolved per call when not injected: `os.homedir()` may be cached once
     // per process by the runtime, while HOME can change under it.
     const { homeDir } = opts;
     this.home = homeDir ? () => homeDir : () => process.env.HOME || os.homedir();
+    const workspaceEnv = opts.workspaceEnv ?? workspaceEnvOf;
+    // Claude Code writes its transcripts under CLAUDE_CONFIG_DIR when one is
+    // set — by the workspace (ADR-0016) or the daemon's own environment — and
+    // only otherwise under ~/.claude. An injected home is a test's whole world.
+    this.claudeConfigDirs = async (cwd) => [...new Set([
+      (await workspaceEnv(cwd)).CLAUDE_CONFIG_DIR,
+      homeDir ? undefined : process.env.CLAUDE_CONFIG_DIR,
+      path.join(this.home(), '.claude'),
+    ].filter((dir): dir is string => Boolean(dir)))];
   }
 
   async finalAssistantText(query: TranscriptQuery, maxChars = 4000): Promise<string | null> {
     try {
-      if (query.runner === 'claude-code') return claudeFinal(this.home(), query, maxChars);
+      if (query.runner === 'claude-code') return claudeFinal(await this.claudeConfigDirs(query.cwd), query, maxChars);
       if (query.runner === 'opencode') return await opencodeFinal(this.home(), query, maxChars);
       if (query.runner === 'codex') return codexFinal(this.home(), query, maxChars);
     } catch {
@@ -52,8 +63,8 @@ const CLAUDE_PROJECT_NAME_MAX = 200;
  * Code's own — every directory with the kept prefix is a candidate, and the
  * marker check decides between them.
  */
-function claudeProjectDirs(home: string, cwd: string): string[] {
-  const projects = path.join(home, '.claude', 'projects');
+function claudeProjectDirs(configDir: string, cwd: string): string[] {
+  const projects = path.join(configDir, 'projects');
   const munged = cwd.replace(/[^a-zA-Z0-9]/g, '-');
   if (munged.length <= CLAUDE_PROJECT_NAME_MAX) {
     const dir = path.join(projects, munged);
@@ -64,11 +75,11 @@ function claudeProjectDirs(home: string, cwd: string): string[] {
   return readdirSync(projects).filter((name) => name.startsWith(prefix)).map((name) => path.join(projects, name));
 }
 
-function claudeFinal(home: string, query: TranscriptQuery, maxChars: number): string | null {
+function claudeFinal(configDirs: string[], query: TranscriptQuery, maxChars: number): string | null {
   const cutoff = query.startedAt ? Date.parse(query.startedAt) : 0;
   // A session file is created at spawn; anything last-modified before the task
   // started is a previous session in the same directory, not this task's.
-  const candidates = claudeProjectDirs(home, query.cwd)
+  const candidates = configDirs.flatMap((dir) => claudeProjectDirs(dir, query.cwd))
     .flatMap((dir) => readdirSync(dir).filter((f) => f.endsWith('.jsonl')).map((f) => path.join(dir, f)))
     .filter((f) => (cutoff ? statSync(f).mtimeMs >= cutoff - 5_000 : true))
     .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);

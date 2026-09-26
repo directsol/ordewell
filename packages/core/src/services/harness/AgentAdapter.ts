@@ -108,6 +108,8 @@ export interface AgentProcessDeps {
   isDirectory?: (workspace: string) => boolean;
   /** True when `candidate` names an existing, spawnable file. Defaults to a real filesystem check. */
   exists?: (candidate: string) => boolean;
+  /** The workspace's own variables for a cwd (ADR-0016). Defaults to {@link resolveWorkspaceEnv}. */
+  workspaceEnv?: (cwd: string) => Promise<Record<string, string>>;
 }
 
 /** Builds the adapter for one runner id, or null when that runner cannot plan. */

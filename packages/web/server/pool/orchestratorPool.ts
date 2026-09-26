@@ -217,6 +217,7 @@ export class OrchestratorPool {
       // to render the current level; without it the picker shows "default"
       // for a planner that is running at "high".
       plannerThinkingEffort: config.plannerThinkingEffort ?? '',
+      maxParallel: config.maxParallelSessions,
       tdd: userSettings.tdd,
       verification: userSettings.verification,
       modelAllowlist: userSettings.modelAllowlist,
@@ -295,6 +296,11 @@ export class OrchestratorPool {
         // on one would wipe the very cache `plannerCatalogFor` reads
         // synchronously below, right before the next call's switch needs it.
         if (PROVIDER_CREDENTIAL_ENV.has(key)) touched = true;
+      }
+      // The scheduler reads the limit on every tick, but a raised one would
+      // only be seen at the next verdict; the runs waiting for a slot start now.
+      if (envChanges.ORDEWELL_MAX_PARALLEL !== undefined) {
+        for (const session of this.sessions.values()) void session.reschedule();
       }
       // A new/changed provider key or base URL must re-probe the catalog;
       // without this the picker keeps serving the pre-key cache until restart.

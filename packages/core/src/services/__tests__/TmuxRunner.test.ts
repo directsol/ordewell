@@ -122,6 +122,14 @@ describe('TmuxRunner', () => {
     expect(shellCmd).not.toContain(`'exec'`);
   });
 
+  it("starts the agent with its workspace's variables, quoted for the shell", async () => {
+    const runner = makeRunner();
+    await runner.spawn({ ...baseOpts(manifest()), env: { CLAUDE_CONFIG_DIR: "/home/me/it's work" } });
+
+    const shellCmd = tmuxCalls().find(([, args]) => args[0] === 'new-window')![1][7];
+    expect(shellCmd).toContain(`CLAUDE_CONFIG_DIR='/home/me/it'\\''s work'`);
+  });
+
   it('marks its session interactive so resume tokens submit with Enter, not just type', async () => {
     const session = await makeRunner().spawn(baseOpts(manifest()));
     expect(session.interactive).toBe(true);

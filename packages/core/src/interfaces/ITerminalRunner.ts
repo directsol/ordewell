@@ -45,6 +45,11 @@ export interface ITerminalRunner {
      * this to keep two plans' identically named tasks apart.
      */
     planSessionId?: string;
+    /**
+     * The workspace's own variables (ADR-0016), under the runner's: a
+     * manifest's env still wins over them.
+     */
+    env?: Record<string, string>;
   }): Promise<ITerminalSession>;
 
   stop(sessionId: string): void;

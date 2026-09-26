@@ -63,6 +63,19 @@ describe('HomeTranscriptReader', () => {
   });
 
   describe('claude-code', () => {
+    it("reads the transcript under the workspace's CLAUDE_CONFIG_DIR, where Claude Code wrote it (ADR-0016)", async () => {
+      const configDir = path.join(fakeHome, '.claude-work');
+      const dir = path.join(configDir, 'projects', MUNGED);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, 'aaaa.jsonl'), [
+        claudeLine('user', { message: { role: 'user', content: [{ type: 'text', text: promptFor('mk-1') }] } }),
+        claudeLine('assistant', { message: { role: 'assistant', content: [{ type: 'text', text: 'Done under the work account.' }] } }),
+      ].join('\n'));
+      const workReader = new HomeTranscriptReader({ homeDir: fakeHome, workspaceEnv: async () => ({ CLAUDE_CONFIG_DIR: configDir }) });
+
+      expect(await workReader.finalAssistantText({ runner: 'claude-code', cwd: CWD, marker: 'mk-1' })).toBe('Done under the work account.');
+    });
+
     it('extracts the last non-sidechain assistant text block', async () => {
       const dir = path.join(fakeHome, '.claude', 'projects', MUNGED);
       mkdirSync(dir, { recursive: true });

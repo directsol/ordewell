@@ -95,6 +95,14 @@ describe('model allowlist', () => {
 });
 
 describe('runners and autonomy', () => {
+  it('/parallel <n> sets how many tasks run at once; bare /parallel says what it is', () => {
+    expect(run('/parallel 8').effects).toEqual([{ type: 'setMaxParallel', limit: 8 }]);
+    expect(run('/parallel 8').state.maxParallel).toBe(8);
+    expect(run('/parallel', { maxParallel: 2 }).state.messages.at(-1)?.content).toBe('Up to 2 AI tasks run at once — /parallel <n> changes it.');
+    expect(run('/parallel 0').effects).toEqual([]);
+    expect(run('/parallel many').effects).toEqual([]);
+  });
+
   it('/runners <id> off disables a runner', () => {
     expect(run('/runners opencode off').effects).toEqual([
       { type: 'setRunnerEnabled', runner: 'opencode', enabled: false },

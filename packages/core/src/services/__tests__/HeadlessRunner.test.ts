@@ -69,6 +69,17 @@ describe('HeadlessRunner', () => {
     expect(options.env.PATH).toBe('/augmented/bin:/usr/bin');
   });
 
+  it("adds the workspace's variables under the manifest's own, which win", async () => {
+    const m = manifest({ runner: { command: 'test-cli', argsTemplate: ['{{prompt}}'], promptInArgs: true, env: { SHARED: 'manifest' } } });
+    const { runner, spawnImpl } = makeRunner();
+
+    await runner.spawn({ ...baseOpts(m), env: { CLAUDE_CONFIG_DIR: '/home/me/.claude-work', SHARED: 'workspace' } });
+
+    const { env } = spawnImpl.mock.calls[0][2];
+    expect(env.CLAUDE_CONFIG_DIR).toBe('/home/me/.claude-work');
+    expect(env.SHARED).toBe('manifest');
+  });
+
   it('wraps in a PTY via script when the manifest requires a TTY and script exists', async () => {
     const m = manifest({ runner: { command: 'test-cli', argsTemplate: ['{{prompt}}'], promptInArgs: true, requiresTty: true } });
     const { runner, spawnImpl } = makeRunner({ hasScript: true });

@@ -51,6 +51,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'allowlist', usage: '/allowlist [set <runner> <ids> | clear <runner>]', description: 'Limit which models a runner may use', category: 'models' },
   { name: 'runners', usage: '/runners [<id> on|off]', description: 'Enable or disable runners (claude-code, opencode, codex)', category: 'models' },
   { name: 'auto', usage: '/auto [on|off]', description: 'Autonomous permission mode for new plans', category: 'models' },
+  { name: 'parallel', usage: '/parallel [<n>]', description: 'How many AI tasks run at once (applies to a live run)', category: 'models' },
   { name: 'refresh', usage: '/refresh', description: 'Re-discover runners and model catalogs', category: 'models' },
 
   // Skills

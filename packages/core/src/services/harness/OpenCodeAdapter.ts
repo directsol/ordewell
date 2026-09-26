@@ -3,6 +3,7 @@ import { augmentedPath, withPath } from '../../utils/shellPath';
 import { planDirectLaunch, isExecutableResolved, ExecutableNotFoundError } from '../../utils/launch';
 import { assertWorkspaceExists } from '../../utils/workspace';
 import { killTree } from '../../utils/processTree';
+import { workspaceEnvOf } from '../workspaceEnv';
 import type { AgentAdapter, AgentEvent, AgentProcessDeps, AgentStartOptions } from './AgentAdapter';
 
 const SERVER_READY_TIMEOUT_MS = 30000;
@@ -156,7 +157,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       throw new ExecutableNotFoundError('opencode', PATH);
     }
     this.process = this.deps.spawn(launch.file, launch.args, {
-      env: withPath(process.env, PATH),
+      env: withPath(process.env, PATH, await (this.deps.workspaceEnv ?? workspaceEnvOf)(opts.cwd)),
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: opts.cwd,
       windowsVerbatimArguments: launch.verbatim,

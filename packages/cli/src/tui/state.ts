@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_PARALLEL } from '@ordewell/core';
 import type { ResearchStepOutcome } from '@ordewell/core';
 import { emptyEditor, type EditorState } from './editor';
 
@@ -338,6 +339,8 @@ export interface TuiState {
    * planner, whose effort is baked into the model id.
    */
   plannerEffort: string;
+  /** How many AI tasks run at once, as the daemon reports it. */
+  maxParallel: number;
   configuredProviders: string[];
   allowlist: Record<string, string[]>;
   autonomous: boolean;
@@ -458,6 +461,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
     orchestratorModel: '',
     plannerProvider: '',
     plannerEffort: '',
+    maxParallel: DEFAULT_MAX_PARALLEL,
     configuredProviders: [],
     allowlist: {},
     autonomous: true,

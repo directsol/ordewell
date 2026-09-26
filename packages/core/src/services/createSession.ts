@@ -907,6 +907,11 @@ export class Session {
     await this.orchestrator.runTask(taskId);
   }
 
+  /** Start whatever the scheduler can now fit — after the parallel limit was raised mid-run, say. */
+  async reschedule(): Promise<void> {
+    await this.orchestrator.tick();
+  }
+
   async retryTask(taskId: string): Promise<void> {
     await this.orchestrator.retryTask(taskId);
     this.persist();

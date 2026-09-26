@@ -17,7 +17,7 @@ describe('OrchestratorPool.updateSettings — environment allowlist', () => {
     'ORDEWELL_SETTINGS_PATH', 'AI_PROVIDER', 'ORCHESTRATOR_MODEL', 'ORDEWELL_PLANNER_EFFORT',
     'OPENROUTER_API_KEY', 'OPENROUTER_BASE_URL',
     'ORDEWELL_AUTONOMOUS_MODE', 'ORDEWELL_APPROVAL_MODE', 'ORDEWELL_APPROVAL_ALLOW',
-    'NODE_OPTIONS', 'NODE_PATH', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'PATH',
+    'NODE_OPTIONS', 'NODE_PATH', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'PATH', 'ORDEWELL_MAX_PARALLEL',
   ];
   const savedEnv: Record<string, string | undefined> = {};
 
@@ -40,6 +40,16 @@ describe('OrchestratorPool.updateSettings — environment allowlist', () => {
   it('writes an allowlisted provider credential', () => {
     pool.updateSettings({ env: { OPENROUTER_API_KEY: 'sk-or-new' } });
     expect(process.env.OPENROUTER_API_KEY).toBe('sk-or-new');
+  });
+
+  it('applies a new parallel limit, reports it, and lets waiting runs use it at once', () => {
+    const reschedule = vi.fn(async () => undefined);
+    (pool as unknown as { sessions: Map<string, unknown> }).sessions.set('s1', { reschedule });
+
+    pool.updateSettings({ env: { ORDEWELL_MAX_PARALLEL: '5' } });
+
+    expect(pool.getSettings().maxParallel).toBe(5);
+    expect(reschedule).toHaveBeenCalledTimes(1);
   });
 
   it('refuses the variables that disable approval prompting', () => {

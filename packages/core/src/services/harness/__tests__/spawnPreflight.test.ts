@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ClaudeCodeAdapter } from '../ClaudeCodeAdapter';
 import { OpenCodeAdapter } from '../OpenCodeAdapter';
 import type { AgentProcessDeps, AgentStartOptions } from '../AgentAdapter';
@@ -102,5 +102,28 @@ describe('OpenCodeAdapter — spawn preflight', () => {
     expect(err.message).toContain('opencode');
     expect(err.message).toContain('/usr/local/bin:/usr/bin');
     expect(spawned.processes).toHaveLength(0);
+  });
+});
+
+describe('planner agents run with the workspace environment (ADR-0016)', () => {
+  it.each([
+    ['Claude Code', (deps: AgentProcessDeps) => new ClaudeCodeAdapter(deps)],
+    ['OpenCode', (deps: AgentProcessDeps) => new OpenCodeAdapter(deps)],
+  ])('%s gets the variables its workspace sets', async (_name, make) => {
+    const spawned = fakeSpawn([]);
+    const envs: NodeJS.ProcessEnv[] = [];
+    const deps: AgentProcessDeps = {
+      spawn: (cmd, argv, opts) => { envs.push(opts.env ?? {}); return spawned.spawn(cmd, argv, opts); },
+      fetch: noFetch,
+      resolvePath: async () => '/usr/bin',
+      isDirectory: () => true,
+      exists: () => true,
+      workspaceEnv: async (cwd): Promise<Record<string, string>> => (cwd === '/repo' ? { CLAUDE_CONFIG_DIR: '/home/me/.claude-work' } : {}),
+    };
+
+    // OpenCode's start then waits for a server banner this fake never prints.
+    void make(deps).start(startOptions('/repo')).catch(() => undefined);
+
+    await vi.waitFor(() => expect(envs[0]?.CLAUDE_CONFIG_DIR).toBe('/home/me/.claude-work'));
   });
 });

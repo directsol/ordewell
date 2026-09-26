@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Each project's own environment reaches its planner and agents**, from its
+  allowed direnv `.envrc` and an untracked `.ordewell/env`, however VS Code was
+  launched — so a project's `CLAUDE_CONFIG_DIR` picks the Claude Code account
+  its agents run under.
+- **`/parallel [<n>]` and "Ordewell: Set Parallel Tasks"** set how many AI tasks
+  run at once, with no ceiling; `ordewell.maxParallelSessions` no longer stops
+  at 5, and a change applies to a run already going.
+
 ### Fixed
 
 - **OpenCode tasks no longer die in narrow terminals.** OpenCode's TUI exits

@@ -8,6 +8,25 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Each project's own environment reaches its planner and agents (ADR-0016).**
+  However Ordewell was started — a desktop launcher, another directory, a
+  daemon already running for another project — the planner and every task's
+  agent now get the project's variables: from its `.envrc` when direnv is
+  installed and you have allowed it, then from an untracked `.ordewell/env`
+  (`KEY=value` lines), which wins. A `CLAUDE_CONFIG_DIR` there picks the Claude
+  Code account a project's agents run under, and task summaries are read from
+  that account's transcripts. A blocked `.envrc`, an `.ordewell/env` that git
+  tracks, and variables that change how processes load (`PATH`,
+  `NODE_OPTIONS`, `LD_PRELOAD`, …) are never applied, and each is reported once
+  per run. `ORDEWELL_DIRENV=false` leaves direnv out.
+- **Choose how many AI tasks run at once, anywhere.** `ordewell parallel [<n>]`,
+  `/parallel [<n>]` in the TUI and in VS Code's chat, and "Ordewell: Set
+  Parallel Tasks" in the Command Palette set it; any whole number from 1 up is
+  accepted — there is no longer a ceiling of 5. A change applies to a run
+  already going: tasks waiting for a slot start at once.
+
 ### Fixed
 
 - **A retry resumes a run its failure paused.** Retrying the task whose failed

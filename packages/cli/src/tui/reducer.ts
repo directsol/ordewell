@@ -1,4 +1,4 @@
-import { ALL_PROVIDERS, CLI_PROVIDERS, PROVIDER_PRIORITY, runnerForProvider, type AiProvider, type ConversationMessage, type ResearchStepOutcome } from '@ordewell/core';
+import { ALL_PROVIDERS, CLI_PROVIDERS, parseMaxParallel, PROVIDER_PRIORITY, runnerForProvider, type AiProvider, type ConversationMessage, type ResearchStepOutcome } from '@ordewell/core';
 import { dependencyCandidates, dependentsOf } from '@ordewell/core/plan-utils';
 import { sanitize } from './ansi';
 import { say } from './transcript';
@@ -41,6 +41,7 @@ export type Effect =
   /** The runner picker's whole confirmed set, so one visit reports one result. */
   | { type: 'setRunners'; changes: { runner: string; enabled: boolean }[]; message: string }
   | { type: 'setAutonomous'; enabled: boolean }
+  | { type: 'setMaxParallel'; limit: number }
   | { type: 'setMouseCapture'; enabled: boolean }
   /** A finished selection, already clipped to its pane and stripped of paint. */
   | { type: 'copyText'; text: string }
@@ -668,6 +669,7 @@ function applySettings(state: TuiState, settings: Record<string, unknown>): TuiS
       typeof settings.aiProvider === 'string' ? settings.aiProvider : state.plannerProvider,
     plannerEffort:
       typeof settings.plannerThinkingEffort === 'string' ? settings.plannerThinkingEffort : state.plannerEffort,
+    maxParallel: typeof settings.maxParallel === 'number' ? settings.maxParallel : state.maxParallel,
     allowlist:
       settings.modelAllowlist && typeof settings.modelAllowlist === 'object'
         ? (settings.modelAllowlist as Record<string, string[]>)
@@ -1609,6 +1611,8 @@ function runCommand(state: TuiState, { name, args }: ParsedCommand): Step {
       return runners(state, args);
     case 'auto':
       return setAutonomous(state, args[0]);
+    case 'parallel':
+      return setMaxParallel(state, args[0]);
     case 'mouse':
       return setMouseCapture(state, args[0]);
 
@@ -2022,6 +2026,13 @@ function runners(state: TuiState, args: string[]): Step {
       chosen: state.runners.filter((r) => r.enabled).map((r) => r.id),
     }),
   } });
+}
+
+function setMaxParallel(state: TuiState, arg: string | undefined): Step {
+  if (!arg) return step(say(state, 'system', `Up to ${state.maxParallel} AI task${state.maxParallel === 1 ? '' : 's'} run at once — /parallel <n> changes it.`));
+  const limit = parseMaxParallel(arg);
+  if (limit === null) return fail(state, 'Usage: /parallel [<number of tasks, 1 or more>]');
+  return step({ ...state, maxParallel: limit }, [{ type: 'setMaxParallel', limit }]);
 }
 
 function setAutonomous(state: TuiState, arg: string | undefined): Step {

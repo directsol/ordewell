@@ -85,6 +85,10 @@
         "title": "Ordewell: Compact Conversation"
       },
       {
+        "command": "ordewell.setMaxParallel",
+        "title": "Ordewell: Set Parallel Tasks"
+      },
+      {
         "command": "ordewell.focusChat",
         "title": "Ordewell: Focus Chat"
       },
@@ -252,11 +256,10 @@
           "description": "Enabled runner IDs (e.g. [\"claude-code\", \"opencode\"]). Leave unset to use legacy claudeCode/opencode toggles."
         },
         "ordewell.maxParallelSessions": {
-          "type": "number",
+          "type": "integer",
           "default": 3,
           "minimum": 1,
-          "maximum": 5,
-          "description": "Max concurrent AI task terminals"
+          "description": "How many AI tasks run at once (1 or more). A change applies to a run already going."
         },
         "ordewell.researchEnabled": {
           "type": "boolean",

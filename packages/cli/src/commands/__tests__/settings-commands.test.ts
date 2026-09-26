@@ -238,6 +238,35 @@ describe('ordewell planner-effort', () => {
   });
 });
 
+describe('ordewell parallel', () => {
+  it('shows the limit the daemon runs with', async () => {
+    const d = await fakeDaemon({ settings: { maxParallel: 3 } });
+    const { handleParallel } = await import('../parallel');
+    const { stdout } = await capture(() => handleParallel([], new ApiClient(d.port)));
+    expect(stdout).toContain('Up to 3 AI tasks run at once');
+    d.close();
+  });
+
+  it('sets it on the live daemon, with no ceiling', async () => {
+    const d = await fakeDaemon();
+    const { handleParallel } = await import('../parallel');
+    const { stdout } = await capture(() => handleParallel(['12'], new ApiClient(d.port)));
+    expect(d.sent.find((r) => r.method === 'PATCH')!.body.env).toEqual({ ORDEWELL_MAX_PARALLEL: '12' });
+    expect(stdout).toContain('Up to 12 AI tasks now run at once.');
+    d.close();
+  });
+
+  it('refuses anything but a whole number of at least 1, sending nothing', async () => {
+    const d = await fakeDaemon();
+    const { handleParallel } = await import('../parallel');
+    const { stderr, exitCode } = await capture(() => handleParallel(['0'], new ApiClient(d.port)));
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('Usage: ordewell parallel');
+    expect(d.sent).toEqual([]);
+    d.close();
+  });
+});
+
 describe('ordewell key', () => {
   it('stores the key under the provider env var and never prints it', async () => {
     const d = await fakeDaemon({ models: CATALOG });

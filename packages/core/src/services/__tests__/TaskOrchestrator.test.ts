@@ -1256,6 +1256,26 @@ describe('task attempts', () => {
     expect(orchestrator.getAttempt('t1')).toMatchObject({ attempt: 2, sessionId: 's2', phase: 'running' });
   });
 
+  it("starts each agent with its workspace's own variables, and says once when direnv has blocked them", async () => {
+    const { spawn } = sessionRunner();
+    const warn = vi.fn();
+    const orchestrator = makeOrchestrator({ terminalRunner: { spawn }, notifications: { warn } });
+    orchestrator.setWorkspaceEnvResolver(async () => ({
+      env: { CLAUDE_CONFIG_DIR: '/home/me/.claude-work' }, blockedEnvrc: '/repo/.envrc', refused: [], trackedEnvFile: null,
+    }));
+    orchestrator.loadPlan([
+      createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first' }),
+      createTask({ id: 't2', order: 2, title: 'Second', prompt: 'do second' }),
+    ]);
+
+    await orchestrator.approveReview();
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+
+    expect(spawn.mock.calls.map(([o]) => o.env)).toEqual([{ CLAUDE_CONFIG_DIR: '/home/me/.claude-work' }, { CLAUDE_CONFIG_DIR: '/home/me/.claude-work' }]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toBe('direnv has blocked /repo/.envrc, so tasks start without its variables. Run `direnv allow` in /repo to use them.');
+  });
+
   it('tells the user when a task sits at a prompt its agent will not get past alone', async () => {
     const { sessions, spawn } = sessionRunner();
     const warn = vi.fn();

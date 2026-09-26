@@ -418,6 +418,12 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
       return;
     }
 
+    case 'setMaxParallel':
+      await api.updateSettings({ env: { ORDEWELL_MAX_PARALLEL: String(effect.limit) } });
+      deps.setEnvVar('ORDEWELL_MAX_PARALLEL', String(effect.limit));
+      dispatch({ type: 'notice', message: `Up to ${effect.limit} AI task${effect.limit === 1 ? '' : 's'} now run at once.` });
+      return;
+
     case 'setAutonomous':
       deps.setEnvVar('ORDEWELL_AUTONOMOUS_MODE', String(effect.enabled));
       dispatch({ type: 'notice', message: `Autonomous mode ${effect.enabled ? 'on' : 'off'}.` });

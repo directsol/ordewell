@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { Session, RunnerRegistry, ModelResolver, RunnerInstallation, SettingsService, PlannerModelMemory, sessionRuntimeSettings, createEmptyPlan, LegacyPlanState, getProviderMeta, CLI_PROVIDERS, runnerForProvider, PROVIDER_LABEL, PROVIDER_SHORT_LABEL, PROVIDER_PRIORITY, createSkillsService, type AiProvider } from '@ordewell/core';
+import { Session, RunnerRegistry, ModelResolver, RunnerInstallation, SettingsService, PlannerModelMemory, sessionRuntimeSettings, createEmptyPlan, LegacyPlanState, getProviderMeta, CLI_PROVIDERS, runnerForProvider, PROVIDER_LABEL, PROVIDER_SHORT_LABEL, PROVIDER_PRIORITY, createSkillsService, parseMaxParallel, type AiProvider } from '@ordewell/core';
 import { ChatViewProvider, type PlannerBackend } from './providers/ChatViewProvider';
 import { VsCodeConfig } from './adapters/VsCodeConfig';
 import { VsCodeFileSystem } from './adapters/VsCodeFileSystem';
@@ -170,6 +170,7 @@ export async function activate(context: vscode.ExtensionContext) {
     registerCommands(context, cmdDeps);
     context.subscriptions.push(
       vscode.commands.registerCommand('ordewell.setPlanner', (provider: AiProvider) => applyPlanner(provider)),
+      vscode.commands.registerCommand('ordewell.setMaxParallel', (value?: string) => setMaxParallel(value)),
     );
 
     setupChatListener(context);
@@ -178,6 +179,9 @@ export async function activate(context: vscode.ExtensionContext) {
     restoreState(persistDepsVal);
 
     context.subscriptions.push(config.onDidChange(() => {
+      // A raised parallel limit would otherwise wait for the next verdict to
+      // be seen; a no-op while nothing runs.
+      void session.reschedule();
       session.aiServiceInstance.reset();
       modelResolver.invalidate();
       sendRunnerAndModels();
@@ -195,6 +199,25 @@ export async function activate(context: vscode.ExtensionContext) {
     log(`ACTIVATION ERROR: ${message}`);
     vscode.window.showErrorMessage(`Ordewell failed to activate: ${message}`);
   }
+}
+
+/** `/parallel [n]` and "Ordewell: Set Parallel Tasks": how many AI tasks run at once, with no ceiling. */
+async function setMaxParallel(value?: string): Promise<void> {
+  const current = config.maxParallelSessions;
+  const typed = value ?? await vscode.window.showInputBox({
+    title: 'Ordewell: how many AI tasks run at once',
+    prompt: 'Any whole number of 1 or more. Applies to a run already going.',
+    value: String(current),
+    validateInput: (text) => (parseMaxParallel(text) === null ? 'Enter a whole number of 1 or more.' : undefined),
+  });
+  if (typed === undefined) return;
+  const limit = parseMaxParallel(typed);
+  if (limit === null) {
+    vscode.window.showWarningMessage(`"${typed}" is not a number of tasks (1 or more).`);
+    return;
+  }
+  await config.update('maxParallelSessions', limit);
+  vscode.window.showInformationMessage(`Up to ${limit} AI task${limit === 1 ? '' : 's'} now run at once.`);
 }
 
 export function deactivate(): void {

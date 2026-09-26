@@ -204,7 +204,7 @@ export class HeadlessRunner extends AbstractRunner<HeadlessSession> {
     return {
       launch: await planDirectLaunch(command, args, this.launchDeps),
       resolvedPath,
-      env: invocation.env,
+      env: { ...opts.env, ...invocation.env },
       pty,
       submitPromptKey: invocation.submitPromptKey,
     };

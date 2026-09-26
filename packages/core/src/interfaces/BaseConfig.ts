@@ -2,6 +2,7 @@ import { IConfig, AiProvider } from './IConfig';
 import type { ApprovalMode } from '../services/ApprovalPolicy';
 import type { ProviderModelLists } from '../services/ProviderRouting';
 import { ALL_PROVIDERS, getProviderMeta, PROVIDER_DETECT_PRIORITY } from '../services/ProviderRegistry';
+import { DEFAULT_MAX_PARALLEL, parseMaxParallel } from '../utils/maxParallel';
 
 export function normalizeGeminiModel(id: string): string {
   return id.replace(/^gemini:/, '').replace(/^google\//, '');
@@ -109,7 +110,7 @@ export abstract class BaseConfig implements IConfig {
     return '';
   }
 
-  get maxParallelSessions(): number { return parseInt(process.env.ORDEWELL_MAX_PARALLEL || '3', 10); }
+  get maxParallelSessions(): number { return parseMaxParallel(process.env.ORDEWELL_MAX_PARALLEL) ?? DEFAULT_MAX_PARALLEL; }
   get researchEnabled(): boolean { return process.env.ORDEWELL_RESEARCH_ENABLED !== 'false'; }
   get researchMaxSteps(): number { return parseInt(process.env.ORDEWELL_RESEARCH_MAX_STEPS || '48', 10); }
   get researchMaxFileSize(): number { return parseInt(process.env.ORDEWELL_RESEARCH_MAX_FILE_SIZE || '50', 10); }

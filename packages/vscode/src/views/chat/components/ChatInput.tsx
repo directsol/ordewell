@@ -99,6 +99,7 @@ const COMMAND_SUGGESTIONS: SlashSuggestion[] = [
   { label: '/allowlist', detail: 'Restrict which models the planner may auto-assign per runner', insertText: '/allowlist' },
   { label: '/refresh', detail: 'Re-discover runner models (e.g. after enabling an opencode backend)', insertText: '/refresh' },
   { label: '/auto', detail: 'Toggle autonomous mode for new plans', insertText: '/auto' },
+  { label: '/parallel', detail: 'How many AI tasks run at once — applies to a run already going', insertText: '/parallel ' },
   { label: '/help', detail: 'Show all available commands', insertText: '/help' },
 ];
 

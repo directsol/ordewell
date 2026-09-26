@@ -276,6 +276,7 @@ export class TmuxRunner extends AbstractRunner<TmuxSession> {
     cwd: string;
     registry?: import('../plugins/RunnerRegistry').RunnerRegistry;
     planSessionId?: string;
+    env?: Record<string, string>;
   }): Promise<ITerminalSession> {
     const invocation = buildRunnerInvocation({
       runner: opts.runner,
@@ -320,7 +321,7 @@ export class TmuxRunner extends AbstractRunner<TmuxSession> {
       this.socket,
     );
 
-    invocation.env = { ...invocation.env, PATH: await this.resolvePath() };
+    invocation.env = { ...opts.env, ...invocation.env, PATH: await this.resolvePath() };
     await session.start(invocation.command, invocation.args, opts.cwd, invocation.env);
 
     // Some runners' interactive prompt flag only pre-fills their TUI's

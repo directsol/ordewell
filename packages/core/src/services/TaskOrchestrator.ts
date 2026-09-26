@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { Task, TaskSnapshot, Verdict, QueuedMessage, RunnerId, flattenTasksWithParents, taskOrderLabel } from '../models/Task';
 import { IConfig } from '../interfaces/IConfig';
 import { INotification } from '../interfaces/INotification';
@@ -27,6 +28,7 @@ import { capConflictFiles, handoffOf, integrationBranchNameOf, layoutOf, SELF_RE
 import type { IsolatedExecution } from './plannerModes';
 import { buildConflictRepairPrompt } from './PlanPrompts';
 import { watchBlockingPrompts } from './blockingPrompts';
+import { resolveWorkspaceEnv, type WorkspaceEnv } from './workspaceEnv';
 
 /**
  * The one notification channel out of the orchestrator. Everything that used
@@ -186,6 +188,10 @@ export class TaskOrchestrator {
    * pending and nothing ran until the user also re-ran the whole plan.
    */
   private haltedByFailure = false;
+  /** The workspace's own variables for a task's cwd (ADR-0016); swapped out in tests. */
+  private workspaceEnv: (cwd: string) => Promise<WorkspaceEnv> = (cwd) => resolveWorkspaceEnv(cwd);
+  /** What the workspace env has already warned about, so a run says it once, not per task. */
+  private envWarnings = new Set<string>();
   /**
    * Tasks pulled out of auto-scheduling (user-cancelled or failed to spawn).
    * They stay 'pending' — "not executed" — but the scheduler skips them until
@@ -255,6 +261,34 @@ export class TaskOrchestrator {
 
   setWorkspaceRoot(fn: () => string): void {
     this.workspaceRootFn = fn;
+  }
+
+  setWorkspaceEnvResolver(resolve: (cwd: string) => Promise<WorkspaceEnv>): void {
+    this.workspaceEnv = resolve;
+  }
+
+  /**
+   * The variables a task's agent gets from its workspace. What cannot be
+   * applied is said once — silently starting without them is how agents ran
+   * under the wrong account when an edited `.envrc` was left unallowed.
+   */
+  private async envForTask(cwd: string): Promise<Record<string, string>> {
+    const resolved = await this.workspaceEnv(cwd);
+    const warn = (key: string, message: string) => {
+      if (this.envWarnings.has(key)) return;
+      this.envWarnings.add(key);
+      this.notifications.warn(message);
+    };
+    if (resolved.blockedEnvrc) {
+      warn(`blocked:${resolved.blockedEnvrc}`, `direnv has blocked ${resolved.blockedEnvrc}, so tasks start without its variables. Run \`direnv allow\` in ${path.dirname(resolved.blockedEnvrc)} to use them.`);
+    }
+    if (resolved.trackedEnvFile) {
+      warn(`tracked:${resolved.trackedEnvFile}`, `Ignored ${resolved.trackedEnvFile}: git tracks it, and a committed file must not choose the environment agents run in. Untrack it to use it.`);
+    }
+    if (resolved.refused.length > 0) {
+      warn(`refused:${resolved.refused.join(',')}`, `Ignored ${resolved.refused.join(', ')} from the workspace environment: Ordewell never passes these to agents.`);
+    }
+    return resolved.env;
   }
 
   setRegistry(registry: RunnerRegistry): void {
@@ -1156,6 +1190,7 @@ export class TaskOrchestrator {
         tddEnabled: !attempt.repair && this.tddEnabled(),
       });
       this.closeLingering(task.id);
+      const env = await this.envForTask(cwd);
       const session = await this.terminalRunner.spawn({
         taskId: task.id,
         runner: attempt.runner,
@@ -1168,6 +1203,7 @@ export class TaskOrchestrator {
         registry: this.registry ?? undefined,
         order: task.order,
         title: task.title,
+        env,
       });
 
       // Stop/load/cancel can end the attempt while the async adapter is
