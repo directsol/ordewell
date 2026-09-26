@@ -1,56 +1,49 @@
 # @ordewell/cli
 
-The command line and terminal UI for **[Ordewell](https://ordewell.ai)** — turn one
-goal into an ordered plan of coding-agent tasks, each with its own runner, model
-and mode, then execute and verify it.
+The command line and terminal UI for **[Ordewell](https://ordewell.ai)**, task
+orchestration for coding agents. One goal becomes an ordered plan of tasks, each on
+its own runner, model and branch. Ordewell executes the plan, verifies every task
+from evidence, and leaves the final merge to you.
+
+## Installation
 
 ```bash
-npm install -g @ordewell/cli              # or: npm install -g ordewell
-
-export OPENROUTER_API_KEY="sk-or-..."     # any one provider key — auto-detected
-
-ordewell                                  # the TUI
+npm install -g @ordewell/cli        # or: npm install -g ordewell
 ```
 
-Bare `ordewell` opens the full-screen terminal UI. On first run it tells you
-what it still needs — a planner and at least one runner — both settable from
-inside it with `/planner`, `/runners` and `/key`. Or drive it as a CLI:
+**Requirements:** Node.js 20 or newer, at least one of Claude Code, Codex or
+OpenCode, git for task isolation, and tmux for the terminal UI. Linux, macOS and
+Windows are supported; on Windows, run the terminal UI under WSL.
+
+## Usage
+
+Run `ordewell` in your project to open the terminal UI: the conversation on the
+left, the live plan on the right. The first run lets you pick a planner and runners
+with `/planner` and `/runners`, and no API key is needed if you plan with a coding
+agent you already use.
+
+Every command in the terminal UI is also a subcommand:
 
 ```bash
+export AI_PROVIDER=claude-code      # plan with Claude Code, Codex or OpenCode
+
 ordewell plan --goal "Add rate limiting to the public API"
 ordewell run
+ordewell handoff review             # read the diff
+ordewell handoff merge              # bring it onto your branch
 ```
 
-No API key? Plan on a coding agent you already have installed — it's what
-executes the tasks anyway:
+Run `ordewell --help` for the full list, or `ordewell setup` for guided
+configuration.
 
-```bash
-export AI_PROVIDER="claude-code"          # or codex, or opencode
-ordewell plan --goal "Add rate limiting to the public API"
-```
-
-## The two surfaces in this package
-
-```bash
-ordewell            # full-screen terminal UI: chat on the left, plan on the right
-ordewell --help     # every slash command is also a subcommand
-```
-
-`ordewell setup` walks through first-run configuration interactively.
-
-## Requirements
-
-Node.js ≥ 20, and **tmux** for the TUI on every platform — it is what backs each
-task's live terminal (`apt install tmux`, `brew install tmux`). Linux, macOS and
-Windows are all supported; on Windows, run the TUI under WSL.
-
-Installing this package also installs `@ordewell/web`, the local API server the
-CLI and TUI drive over `127.0.0.1`. It starts on demand — you don't need to run
-it yourself.
+This package also installs `@ordewell/web`, the local API server that the CLI and
+terminal UI talk to over `127.0.0.1`. It starts on demand.
 
 ## Documentation
 
-Full documentation, including the VS Code extension, is at
-**[github.com/ordewell/ordewell](https://github.com/ordewell/ordewell)**.
+Full documentation is at **[ordewell.ai/docs](https://ordewell.ai/docs)**, and the
+source is at **[github.com/ordewell/ordewell](https://github.com/ordewell/ordewell)**.
 
-Licensed under the [Apache License 2.0](./LICENSE).
+## License
+
+[Apache License 2.0](./LICENSE)
