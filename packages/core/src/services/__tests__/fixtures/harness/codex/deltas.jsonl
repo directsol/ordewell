@@ -1,0 +1,11 @@
+{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr-codex-1","turn":{"id":"turn-1","status":"inProgress","items":[]}}}
+{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thr-codex-1","turnId":"turn-1","item":{"id":"item_r1","type":"reasoning","summary":[],"content":[]}}}
+{"jsonrpc":"2.0","method":"item/reasoning/summaryPartAdded","params":{"threadId":"thr-codex-1","turnId":"turn-1","itemId":"item_r1","summaryIndex":0}}
+{"jsonrpc":"2.0","method":"item/reasoning/summaryTextDelta","params":{"threadId":"thr-codex-1","turnId":"turn-1","itemId":"item_r1","summaryIndex":0,"delta":"Checking how "}}
+{"jsonrpc":"2.0","method":"item/reasoning/summaryTextDelta","params":{"threadId":"thr-codex-1","turnId":"turn-1","itemId":"item_r1","summaryIndex":0,"delta":"the planner is wired."}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-codex-1","turnId":"turn-1","item":{"id":"item_r1","type":"reasoning","summary":[{"type":"summary_text","text":"Checking how the planner is wired."}],"content":[]}}}
+{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thr-codex-1","turnId":"turn-1","item":{"id":"item_m1","type":"agentMessage","text":"","phase":"final_answer"}}}
+{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"thr-codex-1","turnId":"turn-1","itemId":"item_m1","delta":"Which "}}
+{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"thr-codex-1","turnId":"turn-1","itemId":"item_m1","delta":"store?"}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-codex-1","turnId":"turn-1","item":{"id":"item_m1","type":"agentMessage","text":"Which store?","phase":"final_answer"}}}
+{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr-codex-1","turn":{"id":"turn-1","status":"completed","items":[]}}}

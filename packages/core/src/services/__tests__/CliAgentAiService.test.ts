@@ -754,6 +754,76 @@ describe('CliAgentAiService — Codex', () => {
     expect(methods).toEqual(['initialize', 'thread/resume', 'thread/start', 'turn/start']);
     expect(turn.kind).toBe('message');
   });
+
+  it('streams reply and reasoning deltas without double counting the completed items', async () => {
+    const { svc } = service('codex', [...codexHandshake(), fixture('codex', 'deltas')]);
+    const { events, onProgress } = collector();
+    const turn = await svc.startConversation(request({ onProgress, runners: ['codex'] }));
+
+    // The completed agentMessage repeats what already streamed; it replaces the
+    // deltas, it does not append them.
+    expect(turn.text).toBe('Which store?');
+    expect(events.filter((e) => e.type === 'plan_token').map((e) => e.planToken)).toEqual(['Which ', 'store?']);
+    // Same for reasoning: the completed item's summary repeats the streamed one.
+    expect(events.filter((e) => e.type === 'thinking').map((e) => e.text))
+      .toEqual(['Checking how ', 'the planner is wired.']);
+  });
+
+  it('reports one usage record per model call, never the cumulative thread total', async () => {
+    const { svc } = service('codex', [...codexHandshake(), fixture('codex', 'usage')]);
+    const { events, onProgress } = collector();
+    await svc.startConversation(request({ onProgress, runners: ['codex'] }));
+
+    const usage = events.flatMap((e) => (e.type === 'usage' && e.record ? [e.record] : []));
+    // The turn made two model calls; `last` is each call, `total` is the thread.
+    expect(usage.map((r) => r.inputTokens)).toEqual([13232, 13374]);
+    expect(usage.map((r) => r.outputTokens)).toEqual([113, 10]);
+    expect(usage.map((r) => r.cachedInputTokens)).toEqual([9984, 9984]);
+    // `total` for the turn is 26606 — the sum of the two `last` values. Emitting
+    // it each update would count the first call twice.
+    expect(usage.some((r) => r.inputTokens === 26606)).toBe(false);
+    const first = usage[0];
+    expect(first?.contextWindow).toBe(258400);
+    expect(first?.model).toBe('gpt-5.6-sol');
+    // Codex reports no price.
+    expect(first?.reportedCost).toBeUndefined();
+    expect(first?.subagentId).toBeUndefined();
+  });
+
+  it('keeps a subagent\'s words out of the reply and tags its work', async () => {
+    const { svc } = service('codex', [...codexHandshake(), fixture('codex', 'subagent')]);
+    const { events, onProgress } = collector();
+    const turn = await svc.startConversation(request({ onProgress, runners: ['codex'] }));
+
+    expect(turn.text).toBe(
+      "I'll delegate the file-reading task to a subagent, then wait for its report.\n\nThe subagent read the file and found the number 42.",
+    );
+    expect(turn.text).not.toContain('SUBAGENT-ONLY-TEXT');
+
+    const started = events.find((e) => e.type === 'subagent_started');
+    expect(started).toMatchObject({
+      subagentId: 'thr-codex-sub1',
+      brief: 'Read /repo/notes.txt and report its contents.',
+      model: 'gpt-5.6-luna',
+    });
+
+    const finished = events.find((e) => e.type === 'subagent_finished');
+    expect(finished).toMatchObject({
+      subagentId: 'thr-codex-sub1',
+      outcome: 'done',
+      digest: 'I read the file; the number is 42. SUBAGENT-ONLY-TEXT',
+    });
+
+    // The subagent's own tool call reaches the timeline tagged with its id.
+    const subStep = events.find((e) => e.type === 'tool_result' && e.subagentId === 'thr-codex-sub1');
+    expect(subStep?.toolCallId).toBe('item_sc1');
+
+    // Its model call counts toward the total but is attributed to the subagent,
+    // and its window says nothing about the planner's own context.
+    const subUsage = events.flatMap((e) => (e.type === 'usage' && e.record ? [e.record] : [])).find((r) => r.subagentId === 'thr-codex-sub1');
+    expect(subUsage).toMatchObject({ inputTokens: 13944, outputTokens: 99, cachedInputTokens: 9984 });
+    expect(subUsage?.contextWindow).toBeUndefined();
+  });
 });
 
 /**
