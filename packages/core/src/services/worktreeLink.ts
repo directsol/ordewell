@@ -82,18 +82,27 @@ export function mirrorDir(source: string, target: string, opts: MirrorOptions): 
  * workspace link such as `../../packages/core` resolves inside the task
  * checkout; an absolute one into the main checkout is moved to the same place
  * in the task checkout, except into a node_modules, which is the shared install.
+ * A relative link leading nowhere in the task checkout gets the same place
+ * there as the task has, since a package gone from the main checkout is not
+ * something a task without it resolves anything through.
  */
 function relink(from: string, to: string, opts: MirrorOptions): LinkKind | null {
   const text = fs.readlinkSync(from);
   const pointee = path.isAbsolute(text) ? rebased(text, opts) : text;
   if (opts.platform !== 'win32') {
+    if (!fs.existsSync(path.resolve(path.dirname(to), pointee)) && fs.existsSync(path.resolve(path.dirname(from), pointee))) {
+      fs.symlinkSync(rebased(path.resolve(path.dirname(from), pointee), opts), to);
+      return 'symlink';
+    }
     fs.symlinkSync(pointee, to);
     return 'symlink';
   }
   // A junction needs an absolute target, and whether it can be one at all
   // depends on what the link leads to, so resolve it where it will live. One
   // that leads nowhere there has nothing to share.
-  const resolved = path.resolve(path.dirname(to), pointee);
+  const resolved = fs.existsSync(path.resolve(path.dirname(to), pointee))
+    ? path.resolve(path.dirname(to), pointee)
+    : rebased(path.resolve(path.dirname(from), pointee), opts);
   try { fs.statSync(resolved); } catch { return null; }
   return linkPath(resolved, to, opts.platform, opts.hardLink);
 }
