@@ -1110,7 +1110,7 @@ workspace and the subscription.
 *Avoid:* `proc.kill('SIGTERM')` at a dispose site — or a bare `proc.kill()`,
 which was the last one left, in `ModelDiscovery`'s Codex app-server probe.
 
-**Platform support** — the VS Code extension and the web surface run on Linux,
+**Platform support** — the VS Code extension and the local daemon run on Linux,
 macOS, and native Windows. The **TUI does not run on Windows**: it is tmux-backed
 (ADR-0007) and `hasTmux` feature-detects rather than assuming, so WSL is the
 answer there. Three things about Windows are explicitly unverified rather than
