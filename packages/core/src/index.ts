@@ -1,5 +1,6 @@
 export * from './models/Task';
 export * from './models/Session';
+export * from './models/Usage';
 export * from './interfaces/IFileSystem';
 export { BaseFileSystem } from './services/BaseFileSystem';
 export { STOPPED_TOOL_RESULT } from './services/executeTool';

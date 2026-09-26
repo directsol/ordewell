@@ -4,8 +4,9 @@ import { createAiService } from '../AiService';
 import { fakeConfig, fakeFileSystem } from '../../testing';
 import type { IConfig } from '../../interfaces/IConfig';
 import type { ConversationRequest } from '../AiService';
-import type { ResearchProgress } from '../../models/Task';
-import { fakeSpawn, fixture, planJson, type FakeSpawnOptions, type ScriptedReply } from './harnessTestKit';
+import type { ResearchProgress, ResearchStep } from '../../models/Task';
+import { fakeSpawn, fixture, planJson, scriptedAdapter, type FakeSpawnOptions, type ScriptedReply } from './harnessTestKit';
+import type { AgentEvent } from '../harness/AgentAdapter';
 
 /**
  * Harness planners, driven through the one seam the design commits to: the
@@ -417,6 +418,93 @@ describe('CliAgentAiService — Claude Code', () => {
     expect(turn.kind).toBe('message');
     expect(turn.text).toContain('Write');
     expect(turn.text).toContain('read-only');
+  });
+});
+
+describe('CliAgentAiService — streamed events (#47)', () => {
+  function scripted(...turns: AgentEvent[][]) {
+    return new CliAgentAiService(fakeConfig({ aiProvider: 'claude-code' }), {
+      createAdapter: scriptedAdapter(turns),
+      workspaceRoot: () => '/repo',
+    });
+  }
+
+  it('streams reply deltas once, and takes the complete text as authoritative', async () => {
+    const svc = scripted([
+      { type: 'assistant_text_delta', text: 'Which ' },
+      { type: 'assistant_text_delta', text: 'stor' },
+      { type: 'assistant_text', text: 'Which store?' },
+      { type: 'turn_end' },
+    ]);
+    const { events, onProgress } = collector();
+
+    const turn = await svc.startConversation(request({ onProgress }));
+
+    expect(turn.text).toBe('Which store?');
+    expect(events.filter((e) => e.type === 'plan_token').map((e) => e.planToken)).toEqual(['Which ', 'stor']);
+  });
+
+  it('keeps the text streamed before a tool call when a later run completes', async () => {
+    const svc = scripted([
+      { type: 'assistant_text_delta', text: 'Let me look. ' },
+      { type: 'tool_call', id: 'c1', name: 'Read', args: { file_path: 'a.ts' } },
+      { type: 'tool_result', id: 'c1', name: 'Read', output: 'x', success: true },
+      { type: 'assistant_text_delta', text: 'Found it.' },
+      { type: 'assistant_text', text: 'Found it.' },
+      { type: 'turn_end' },
+    ]);
+
+    const turn = await svc.startConversation(request());
+
+    expect(turn.text).toBe('Let me look. Found it.');
+  });
+
+  it('tags subagent activity with its subagent and keeps it out of the reply', async () => {
+    const svc = scripted([
+      { type: 'assistant_text', text: 'Delegating. ' },
+      { type: 'tool_call', id: 'task-1', name: 'Task', args: { prompt: 'find the cache' } },
+      { type: 'thinking_delta', text: 'grep ', subagentId: 'sa1' },
+      { type: 'thinking', text: 'grep first', subagentId: 'sa1' },
+      { type: 'tool_call', id: 'c1', name: 'Grep', args: { pattern: 'cache' }, subagentId: 'sa1' },
+      { type: 'tool_result', id: 'c1', name: 'Grep', output: 'src/cache.ts', success: true, subagentId: 'sa1' },
+      { type: 'tool_result', id: 'task-1', name: 'Task', output: 'It is in src/cache.ts', success: true },
+      { type: 'assistant_text_delta', text: 'It is in src/cache.ts.' },
+      { type: 'turn_end' },
+    ]);
+    const { events, onProgress } = collector();
+
+    const turn = await svc.startConversation(request({ onProgress }));
+
+    expect(turn.text).toBe('Delegating. It is in src/cache.ts.');
+    expect(events.filter((e) => e.type === 'plan_token').map((e) => e.planToken)).toEqual(['Delegating. ', 'It is in src/cache.ts.']);
+    expect(events.filter((e) => e.type === 'thinking')).toEqual([{ type: 'thinking', text: 'grep ', subagentId: 'sa1' }]);
+    expect(events.find((e) => e.type === 'tool_call' && e.toolCallId === 'c1')?.subagentId).toBe('sa1');
+    expect(events.find((e) => e.type === 'tool_result' && e.toolCallId === 'c1')?.subagentId).toBe('sa1');
+    const steps = turn.researchLog.filter((e): e is ResearchStep => !('type' in e));
+    expect(steps.map((step) => [step.toolCallId, step.subagentId])).toEqual([['c1', 'sa1'], ['task-1', undefined]]);
+  });
+
+  it('reports subagent lifecycle and usage, the subagent\'s share carried on its finish', async () => {
+    const svc = scripted([
+      { type: 'subagent_started', subagentId: 'sa1', brief: 'find the cache', model: 'haiku' },
+      { type: 'usage', record: { source: 'claude-code', inputTokens: 300, outputTokens: 20, subagentId: 'sa1' } },
+      { type: 'usage', record: { source: 'claude-code', inputTokens: 100, subagentId: 'sa1' } },
+      { type: 'subagent_finished', subagentId: 'sa1', outcome: 'done', digest: 'src/cache.ts' },
+      { type: 'usage', record: { source: 'claude-code', inputTokens: 5000, outputTokens: 80, reportedCost: { amount: 0.04, currency: 'USD' } } },
+      { type: 'assistant_text', text: 'It is in src/cache.ts.' },
+      { type: 'turn_end' },
+    ]);
+    const { events, onProgress } = collector();
+
+    await svc.startConversation(request({ onProgress }));
+
+    expect(events.filter((e) => e.type !== 'plan_token')).toEqual([
+      { type: 'subagent_started', subagentId: 'sa1', brief: 'find the cache', model: 'haiku' },
+      { type: 'usage', record: { source: 'claude-code', inputTokens: 300, outputTokens: 20, subagentId: 'sa1' } },
+      { type: 'usage', record: { source: 'claude-code', inputTokens: 100, subagentId: 'sa1' } },
+      { type: 'subagent_finished', subagentId: 'sa1', outcome: 'done', digest: 'src/cache.ts', usage: { inputTokens: 400, outputTokens: 20 } },
+      { type: 'usage', record: { source: 'claude-code', inputTokens: 5000, outputTokens: 80, reportedCost: { amount: 0.04, currency: 'USD' } } },
+    ]);
   });
 });
 

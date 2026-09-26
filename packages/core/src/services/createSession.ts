@@ -26,6 +26,7 @@ import {
   type SessionNotice,
 } from './SessionMessage';
 import { saveSession } from '../utils/sessionStore';
+import { addPlannerUsage, plannerContextFill, type PlannerUsage } from '../models/Usage';
 import { mintSessionId } from '../utils/sessionId';
 import { savePrdMarkdown, extractPrdBlock } from '../utils/prdStore';
 import { type DiscoveredModel, type LegacyPlanState, type PlanState, type Task, type TaskSnapshot, type RunnerId, type ResearchProgress } from '../models/Task';
@@ -220,6 +221,7 @@ export class Session {
   /** Injected by a test; when present it is the service, forever. */
   private readonly pinnedAiService?: IAiService;
   private liveAiService: IAiService | null = null;
+  private plannerUsage: PlannerUsage = { totals: {} };
   private liveAiProvider: AiProvider | null = null;
   private readonly workspaceRootFn: () => string;
   private planner: SessionPlanner;
@@ -455,20 +457,53 @@ export class Session {
   }
 
   private translateProgress(progress: ResearchProgress): void {
-    if (progress.type === 'liveness') {
-      this.broadcast({ type: 'planner_liveness' });
-    }
-    if (progress.type === 'thinking' && progress.text) {
-      this.broadcast({ type: 'plan_thinking', text: progress.text });
-    }
-    if (progress.type === 'tool_call' && progress.tool) {
-      this.broadcast({ type: 'research_step', tool: progress.tool, toolLabel: progress.toolLabel, args: progress.toolArgs || '', subagentId: progress.subagentId, toolCallId: progress.toolCallId });
-    }
-    if (progress.type === 'plan_token' && progress.planToken) {
-      this.broadcast({ type: 'plan_token', token: progress.planToken });
-    }
-    if (progress.type === 'tool_result' && progress.step) {
-      this.broadcast({ type: 'research_step_done', step: progress.step, subagentId: progress.subagentId });
+    const { turnId, subagentId, segmentId } = progress;
+    switch (progress.type) {
+      case 'liveness':
+        this.broadcast({ type: 'planner_liveness' });
+        return;
+      case 'thinking':
+        if (!progress.text) return;
+        if (turnId && segmentId) this.broadcast({ type: 'planner_thinking_delta', turnId, segmentId, subagentId, text: progress.text });
+        else this.broadcast({ type: 'plan_thinking', text: progress.text, turnId, subagentId });
+        return;
+      case 'tool_call':
+        if (progress.tool) this.broadcast({ type: 'research_step', tool: progress.tool, toolLabel: progress.toolLabel, args: progress.toolArgs || '', subagentId, toolCallId: progress.toolCallId, turnId });
+        return;
+      case 'plan_token':
+        if (progress.planToken) this.broadcast({ type: 'plan_token', token: progress.planToken, turnId });
+        return;
+      case 'tool_result':
+        if (progress.step) this.broadcast({ type: 'research_step_done', step: progress.step, subagentId, turnId });
+        return;
+      case 'text_delta':
+        if (!progress.text) return;
+        if (turnId && segmentId) this.broadcast({ type: 'planner_text_delta', turnId, segmentId, text: progress.text });
+        else this.broadcast({ type: 'plan_token', token: progress.text });
+        return;
+      case 'text_retracted':
+        // Outside a turn there is no streamed text a surface could take back.
+        if (turnId) this.broadcast({ type: 'planner_text_retracted', turnId, segmentId });
+        return;
+      case 'subagent_started':
+        if (subagentId) this.broadcast({ type: 'subagent_started', turnId, subagentId, brief: progress.brief ?? '', model: progress.model });
+        return;
+      case 'subagent_finished':
+        if (subagentId) {
+          this.broadcast({
+            type: 'subagent_finished', turnId, subagentId,
+            outcome: progress.outcome ?? 'failed', digest: progress.digest ?? '', usage: progress.usage,
+          });
+        }
+        return;
+      case 'usage': {
+        if (!progress.record) return;
+        const usage = this.plannerUsage = addPlannerUsage(this.plannerUsage, progress.record);
+        this.broadcast({ type: 'planner_usage', turnId, totals: usage.totals, bySubagent: usage.bySubagent, contextFill: plannerContextFill(usage) });
+        return;
+      }
+      case 'interrupted':
+        return;
     }
   }
 

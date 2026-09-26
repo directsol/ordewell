@@ -1,4 +1,6 @@
 import type { SpawnFn } from '../HeadlessRunner';
+import type { SubagentOutcome } from '../../models/Task';
+import type { UsageRecord } from '../../models/Usage';
 
 
 /**
@@ -19,12 +21,33 @@ import type { SpawnFn } from '../HeadlessRunner';
  * turn that emits nothing but `assistant_text` and `turn_end`.
  */
 export type AgentEvent =
-  /** A chunk of the assistant's reply. Concatenated in order to form the turn's text. */
+  /**
+   * A complete run of the assistant's reply. Concatenated in order to form the
+   * turn's text. When the same run already streamed as `assistant_text_delta`,
+   * this is the authoritative copy of it — it replaces the deltas, it is not
+   * appended after them.
+   */
   | { type: 'assistant_text'; text: string }
-  /** Reasoning the agent chose to expose. Never contributes to the reply text. */
-  | { type: 'thinking'; text: string }
-  | { type: 'tool_call'; id: string; name: string; args: Record<string, unknown> }
-  | { type: 'tool_result'; id: string; name: string; output: string; success: boolean }
+  /**
+   * An incremental piece of the assistant's reply, for agents that stream
+   * partial messages. The planner's own text only: a subagent's words never
+   * arrive here, so they can never become the reply.
+   */
+  | { type: 'assistant_text_delta'; text: string }
+  /**
+   * Reasoning the agent chose to expose. Never contributes to the reply text.
+   * Like `assistant_text`, it supersedes deltas already streamed for it.
+   */
+  | { type: 'thinking'; text: string; subagentId?: string }
+  | { type: 'thinking_delta'; text: string; subagentId?: string }
+  /** `subagentId` marks a call made inside a subagent rather than by the planner itself. */
+  | { type: 'tool_call'; id: string; name: string; args: Record<string, unknown>; subagentId?: string }
+  | { type: 'tool_result'; id: string; name: string; output: string; success: boolean; subagentId?: string }
+  /** One model call's usage, as the agent reported it — never estimated. */
+  | { type: 'usage'; record: UsageRecord }
+  /** The agent delegated `brief` to a subagent, whose events carry `subagentId` until it finishes. */
+  | { type: 'subagent_started'; subagentId: string; brief: string; model?: string }
+  | { type: 'subagent_finished'; subagentId: string; outcome: SubagentOutcome; digest: string }
   /**
    * The agent asked to do something its read-only mode does not cover. Always
    * auto-denied (T1) — a planner that can mutate is not a planner. The adapter

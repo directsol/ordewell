@@ -241,6 +241,47 @@ describe('planning', () => {
     }
   });
 
+  // Until the TUI draws the shared view (#52), streamed reply prose joins the
+  // plan_token bubble and the rest of the turn-scoped stream is dropped.
+  it('coalesces planner_text_delta with plan tokens and ignores the other turn events', async () => {
+    vi.useFakeTimers();
+    try {
+      let onEvent: (e: any) => void = () => {};
+      let resolveCall: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { resolveCall = resolve; });
+      const h = harness({
+        streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
+          onEvent = cb;
+          return { close: vi.fn() };
+        }),
+        startConversation: vi.fn().mockImplementation(async () => {
+          onEvent({ type: 'planner_turn_started', turnId: 't1' });
+          onEvent({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Hel' });
+          onEvent({ type: 'planner_usage', turnId: 't1', totals: { inputTokens: 10 } });
+          onEvent({ type: 'plan_token', turnId: 't1', token: 'lo' });
+          onEvent({ type: 'planner_thinking_delta', turnId: 't1', segmentId: 'th', text: 'hm' });
+          onEvent({ type: 'planner_text_retracted', turnId: 't1' });
+          onEvent({ type: 'subagent_started', subagentId: 'sa1', brief: 'look' });
+          onEvent({ type: 'subagent_finished', subagentId: 'sa1', outcome: 'done', digest: 'ok' });
+          onEvent({ type: 'planner_turn_ended', turnId: 't1', outcome: 'message' });
+          await gate;
+          return { tasks: [] };
+        }),
+      });
+
+      const pending = runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(h.actions.filter((a) => a.type !== 'sessionStarted')).toEqual([
+        { type: 'plannerToken', text: 'Hello', sessionId: 'session-new' },
+      ]);
+
+      resolveCall();
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('flushes a pending token burst before a research_step lands, preserving order', async () => {
     let onEvent: (e: any) => void = () => {};
     const h = harness({
