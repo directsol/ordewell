@@ -10,6 +10,8 @@ export interface OrchestratorOption {
   apiProvider: AiProvider;
   description?: string;
   pricing?: string;
+  /** The model's context window when the catalog reports one (#49). */
+  contextWindow?: number;
 }
 
 import type { CatalogModel } from './ModelCatalog';
@@ -85,7 +87,7 @@ function discoveredToCatalog(m: DiscoveredModel): CatalogModel {
     name: m.modelLabel,
     description: '',
     pricing: { prompt: '?', completion: '?' },
-    contextLength: 0,
+    contextLength: m.contextWindow ?? 0,
   };
 }
 
@@ -221,6 +223,7 @@ export function toOrchestratorOptions(
         apiProvider: provider,
         description: s?.description || m.description || undefined,
         pricing,
+        ...(m.contextLength > 0 ? { contextWindow: m.contextLength } : {}),
       });
     }
   }

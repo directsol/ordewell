@@ -27,7 +27,17 @@ import { BaseAiService, ResearchChat, ResearchTurn, ToolResult, ConversationTurn
 import { toOpenAiTools, toOpenAiSubagentTools } from './researchTools';
 import { stripModelPrefix } from './ProviderRegistry';
 import { compactToolMessages, type CompactableMessage } from './contextCompaction';
+import type { UsageRecord } from '../models/Usage';
 import type { LegacyPlanState } from '../models/Task';
+
+/** The subset of an OpenAI-compatible `usage` block this service reads. OpenRouter
+ *  adds `cost` (credits, USD) and `prompt_tokens_details.cached_tokens`. */
+interface StreamUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+  cost?: number;
+}
 
 class OpenAiResearchChat implements ResearchChat {
   constructor(
@@ -41,6 +51,12 @@ class OpenAiResearchChat implements ResearchChat {
     /** Live answer-content deltas, so planner messages stream into the chat as they
      * are produced instead of appearing all at once when the turn completes. */
     private onContent?: (delta: string, segmentId: string) => void,
+    /** The serving provider id, stamped on usage records. */
+    private source = 'openai',
+    /** One report per API call; a subagent leaves this off and reports through its run loop instead. */
+    private onUsage?: (record: UsageRecord) => void,
+    /** The model's context window when the catalog knows it; omitted from records otherwise. */
+    private contextWindow?: number,
   ) {}
 
   async sendMessage(text: string, signal?: AbortSignal): Promise<ResearchTurn> {
@@ -86,10 +102,12 @@ class OpenAiResearchChat implements ResearchChat {
     let reasoning = '';
     let finishReason: string | undefined;
     let promptTokens: number | undefined;
+    let reported: StreamUsage | undefined;
     const toolAcc = new Map<number, { id: string; name: string; args: string }>();
 
     for await (const chunk of stream) {
-      if (chunk.usage) promptTokens = chunk.usage.prompt_tokens;
+      const usage = chunk.usage as StreamUsage | undefined;
+      if (usage) { reported = usage; promptTokens = usage.prompt_tokens; }
       const fr = chunk.choices[0]?.finish_reason;
       if (fr) finishReason = fr;
       const delta = chunk.choices[0]?.delta as
@@ -107,6 +125,9 @@ class OpenAiResearchChat implements ResearchChat {
       }
     }
 
+    const usage = this.usageRecord(reported);
+    if (usage) this.onUsage?.(usage);
+
     const accepted = [...toolAcc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v).filter((v) => v.name);
 
     // Rebuild the assistant message so subsequent turns (which reference tool_call_id)
@@ -121,7 +142,27 @@ class OpenAiResearchChat implements ResearchChat {
       try { args = JSON.parse(v.args); } catch { /* empty */ }
       return { name: v.name, args, id: v.id };
     });
-    return { text: content, toolCalls, hasToolCalls: toolCalls.length > 0, reasoning: reasoning || undefined, finishReason, promptTokens };
+    return { text: content, toolCalls, hasToolCalls: toolCalls.length > 0, reasoning: reasoning || undefined, finishReason, promptTokens, usage };
+  }
+
+  /**
+   * The one record for this API call, built only from what the provider
+   * reported. OpenRouter's `cost` is in USD (its credits are dollar-pegged);
+   * nothing is estimated. A field the provider left out stays absent.
+   */
+  private usageRecord(reported: StreamUsage | undefined): UsageRecord | undefined {
+    if (!reported) return undefined;
+    const record: UsageRecord = { source: this.source, model: this.model };
+    let hasMeasure = false;
+    if (reported.prompt_tokens !== undefined) { record.inputTokens = reported.prompt_tokens; hasMeasure = true; }
+    if (reported.completion_tokens !== undefined) { record.outputTokens = reported.completion_tokens; hasMeasure = true; }
+    if (reported.prompt_tokens_details?.cached_tokens !== undefined) {
+      record.cachedInputTokens = reported.prompt_tokens_details.cached_tokens;
+      hasMeasure = true;
+    }
+    if (reported.cost !== undefined) { record.reportedCost = { amount: reported.cost, currency: 'USD' }; hasMeasure = true; }
+    if (this.contextWindow && this.contextWindow > 0) record.contextWindow = this.contextWindow;
+    return hasMeasure ? record : undefined;
   }
 }
 
@@ -202,6 +243,11 @@ export class OpenAiService extends BaseAiService implements IAiService {
       this.requireModel('researchSubagentModel', this.config.researchSubagentModel),
       toOpenAiSubagentTools(),
       onReasoning,
+      undefined,
+      // A subagent has no per-call progress sink here; its run loop reads the
+      // record off the returned turn and reports it through the wrapped progress
+      // channel, which stamps the subagent's id (see ResearchSubagents).
+      this.config.aiProvider,
     );
   }
 
@@ -240,6 +286,9 @@ export class OpenAiService extends BaseAiService implements IAiService {
       toOpenAiTools(),
       (delta, segmentId) => currentProgress({ type: 'thinking', text: delta, segmentId }),
       (delta, segmentId) => currentProgress({ type: 'text_delta', text: delta, segmentId }),
+      this.config.aiProvider,
+      (record) => currentProgress({ type: 'usage', record }),
+      req.contextWindow,
     );
 
     const ctx: ConversationTurnContext = {
@@ -299,6 +348,9 @@ export class OpenAiService extends BaseAiService implements IAiService {
       this.requireModel('orchestratorModel', this.config.orchestratorModel),
       toOpenAiTools(),
       (delta) => onProgress({ type: 'thinking', text: delta }),
+      undefined,
+      this.config.aiProvider,
+      (record) => onProgress({ type: 'usage', record }),
     );
 
     const result = await this.runResearchLoop(researchChat, firstMessage, fs, onProgress, runners, undefined, fetcher, userDescription, runnerModes, autonomousDefault, signal);

@@ -5,7 +5,7 @@ import { resolveResearchShell } from './researchShell';
 import { resolveWithin } from './pathScope';
 import { classifyOutcome } from './researchStepSummary';
 import type { IFileSystem, ToolOutcome } from '../interfaces/IFileSystem';
-import type { ResearchChat, ToolResult } from './BaseAiService';
+import type { ResearchChat, ResearchTurn, ToolResult } from './BaseAiService';
 import type { ResearchProgress, ResearchStep } from '../models/Task';
 import type { UsageTotals } from '../models/Usage';
 
@@ -118,7 +118,14 @@ async function runLoop(prompt: string, deps: SubagentDeps): Promise<string> {
   if (deps.signal?.aborted) return '[research agent aborted before starting]';
   const fs = nonPromptingFs(deps.fs);
   const chat = deps.createChat((delta) => deps.onProgress?.({ type: 'thinking', text: delta, subagentId: deps.subagentId }));
+  // A provider that reports usage on the turn (OpenAI-compatible) has no
+  // progress sink of its own here; reporting it through `deps.onProgress` lets
+  // the spawn wrapper stamp every record with this subagent's id (#49).
+  const reportUsage = (turn: ResearchTurn) => {
+    if (turn.usage) deps.onProgress?.({ type: 'usage', record: turn.usage });
+  };
   let turn = await chat.sendMessage(prompt, deps.signal);
+  reportUsage(turn);
 
   for (let step = 0; turn.hasToolCalls && step < SUBAGENT_LIMITS.maxSteps; step++) {
     if (deps.signal?.aborted) return `[research agent aborted] Partial findings:\n${turn.text}`;
@@ -161,6 +168,7 @@ async function runLoop(prompt: string, deps: SubagentDeps): Promise<string> {
       results.push({ name: tc.name, output, truncated: res.truncated || output.length < res.output.length, totalChars: res.output.length, id: tc.id });
     }
     turn = await chat.sendToolResults(results, deps.signal);
+    reportUsage(turn);
   }
 
   // Step budget exhausted while the model still wants tools: answer the
@@ -172,6 +180,7 @@ async function runLoop(prompt: string, deps: SubagentDeps): Promise<string> {
       turn.toolCalls.map((tc) => ({ name: tc.name, output: notice, truncated: false, totalChars: notice.length, id: tc.id })),
       deps.signal,
     );
+    reportUsage(turn);
   }
 
   const digest = turn.text;

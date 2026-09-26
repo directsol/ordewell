@@ -48,7 +48,7 @@ export interface SessionOverrides {
   /** Fakes go through the constructor seam — Partial so a test only stubs the calls it expects. */
   aiService?: Partial<IAiService>;
   planner?: Partial<SessionPlanner>;
-  modelResolver?: Pick<ModelResolver, 'modelsForRunners'> & Partial<Pick<ModelResolver, 'getCachedRunnerModels'>>;
+  modelResolver?: Pick<ModelResolver, 'modelsForRunners'> & Partial<Pick<ModelResolver, 'getCachedRunnerModels' | 'contextWindowFor'>>;
   skillsService?: Pick<SkillsService, 'findSkill'>;
   /** Defaults to one with no transcripts, so no test reads the real home directory. */
   taskOutput?: TaskOutputSource;
@@ -84,7 +84,7 @@ export function makeSession(overrides: SessionOverrides = {}): Session {
     fsAdapter: overrides.fsAdapter ?? fakeFs(),
     broadcast: overrides.broadcast ?? vi.fn(),
     onNotice: overrides.onNotice,
-    modelResolver: { getCachedRunnerModels: () => [], ...(overrides.modelResolver ?? { modelsForRunners: vi.fn().mockResolvedValue({}) }) } as ModelResolver,
+    modelResolver: { getCachedRunnerModels: () => [], contextWindowFor: () => undefined, ...(overrides.modelResolver ?? { modelsForRunners: vi.fn().mockResolvedValue({}) }) } as ModelResolver,
     settings: overrides.settings ?? (() => ({ tddEnabled: false })),
     sessionId: overrides.sessionId,
     // Session drops a live conversation via reset() on fresh-plan and

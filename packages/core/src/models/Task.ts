@@ -229,6 +229,12 @@ export interface DiscoveredModel {
   /** The runner's display name (`OpenCode`), from its manifest. */
   runnerLabel?: string;
   variants: { id: string; label: string }[];
+  /**
+   * The model's context window when the runner or catalog reports it (#49).
+   * Read by the planner-model lookup so context fill can be shown; absent when
+   * unknown rather than defaulted to zero.
+   */
+  contextWindow?: number;
 }
 
 export type PlanStatus = 'draft' | 'approved' | 'rejected' | 'running' | 'completed';

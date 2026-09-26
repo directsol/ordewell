@@ -191,6 +191,16 @@ describe('toOrchestratorOptions', () => {
     expect(result[1]).toMatchObject({ id: 'gemini:gemini-2.5-pro', provider: 'Gemini', apiProvider: 'google' });
   });
 
+  it('carries the catalog context window, omitting it when the catalog has none (#49)', () => {
+    const withWindow = { ...makeCatalogModel('openai/gpt-4o'), contextLength: 128000 };
+    const withoutWindow = makeCatalogModel('zzz/unknown-window');
+
+    const result = toOrchestratorOptions({ openrouter: [withWindow, withoutWindow] }, []);
+
+    expect(result.find((o) => o.id === 'openai/gpt-4o')?.contextWindow).toBe(128000);
+    expect(result.find((o) => o.id === 'zzz/unknown-window')).not.toHaveProperty('contextWindow');
+  });
+
   it('overlays shortcut label/description onto matching catalog models; unmatched shortcuts are dropped', () => {
     const result = toOrchestratorOptions(
       { openrouter: [makeCatalogModel('deepseek/deepseek-v4-flash')] },
