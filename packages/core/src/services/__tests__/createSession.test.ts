@@ -839,6 +839,113 @@ describe('session id stability (persist seam)', () => {
 
       expect(sent).toEqual([{ type: 'planner_usage', totals: { inputTokens: 1000 } }]);
     });
+
+    it('files a subagent-tagged usage event under the subagent, not the planner', async () => {
+      const sent = await broadcastsFor([
+        { type: 'usage', turnId: 't1', subagentId: 'sa1', record: { source: 'openai', model: 'gpt-4o', inputTokens: 400 } },
+      ]);
+
+      expect(sent).toEqual([
+        {
+          type: 'planner_usage', turnId: 't1',
+          totals: { inputTokens: 400 },
+          bySubagent: { sa1: { inputTokens: 400 } },
+        },
+      ]);
+    });
+
+    it('treats a reported window of zero as unknown, not as no room', async () => {
+      const sent = await broadcastsFor([
+        { type: 'usage', record: { source: 'codex', inputTokens: 1000, contextWindow: 0 } },
+      ]);
+
+      expect(sent).toEqual([{ type: 'planner_usage', totals: { inputTokens: 1000 } }]);
+    });
+
+    it('keeps costs reported in different currencies apart', async () => {
+      const sent = await broadcastsFor([
+        { type: 'usage', record: { source: 'openai', reportedCost: { amount: 0.25, currency: 'USD' } } },
+        { type: 'usage', record: { source: 'openai', reportedCost: { amount: 0.10, currency: 'EUR' } } },
+      ]);
+
+      expect((sent.at(-1) as { totals: unknown }).totals).toEqual({
+        reportedCost: { USD: 0.25, EUR: 0.10 },
+      });
+    });
+
+    it('leaves a measure absent until a record reports it', async () => {
+      const sent = await broadcastsFor([
+        { type: 'usage', record: { source: 'openai', inputTokens: 10 } },
+        { type: 'usage', record: { source: 'openai', outputTokens: 4 } },
+      ]);
+
+      expect((sent.at(-1) as { totals: unknown }).totals).toEqual({ inputTokens: 10, outputTokens: 4 });
+    });
+
+    it('persists the running totals onto the plan state', async () => {
+      const broadcast = vi.fn();
+      const session = makeSession({
+        broadcast,
+        aiService: {
+          startConversation: vi.fn(async (req: import('../../services/AiService').ConversationRequest) => {
+            req.onProgress({ type: 'usage', record: { source: 'openai', inputTokens: 10, outputTokens: 2, reportedCost: { amount: 0.5, currency: 'USD' } } });
+            return { kind: 'message' as const, text: 'done', researchLog: [] };
+          }),
+          hasActiveConversation: () => true,
+          reset: vi.fn(),
+        },
+      });
+
+      await session.startPlanning('goal', ['claude-code']);
+
+      const persisted = vi.mocked(sessionStore.saveSession).mock.calls.at(-1)?.[0];
+      expect(persisted?.plannerUsage).toEqual({
+        totals: { inputTokens: 10, outputTokens: 2, reportedCost: { USD: 0.5 } },
+        lastPromptTokens: 10,
+      });
+    });
+
+    it('restores saved totals and re-broadcasts them when a session loads', async () => {
+      const broadcast = vi.fn();
+      const session = makeSession({ broadcast });
+      const saved = smallPlan();
+      saved.plannerUsage = {
+        totals: { inputTokens: 1500, outputTokens: 200 },
+        bySubagent: { 'sa-1': { inputTokens: 900 } },
+        lastPromptTokens: 600,
+        contextWindow: 200000,
+      };
+
+      session.loadPlan(saved, 'build it', '/repo', { persist: false });
+
+      expect(broadcast).toHaveBeenCalledWith({
+        type: 'planner_usage',
+        totals: { inputTokens: 1500, outputTokens: 200 },
+        bySubagent: { 'sa-1': { inputTokens: 900 } },
+        contextFill: { usedTokens: 600, windowTokens: 200000 },
+      });
+    });
+
+    it('does not re-broadcast usage for a plan that never recorded any', () => {
+      const broadcast = vi.fn();
+      const session = makeSession({ broadcast });
+
+      session.loadPlan(smallPlan(), 'build it', '/repo', { persist: false });
+
+      expect(broadcast.mock.calls.map((c) => (c[0] as { type: string }).type)).not.toContain('planner_usage');
+    });
+
+    it('threads the planner model window from the resolver into the opening', async () => {
+      const startConversation = vi.fn().mockResolvedValue({ kind: 'message' as const, text: 'hi', researchLog: [] });
+      const session = makeSession({
+        modelResolver: { modelsForRunners: vi.fn().mockResolvedValue({}), contextWindowFor: () => 200000 },
+        aiService: { startConversation, hasActiveConversation: () => true, reset: vi.fn() },
+      });
+
+      await session.startPlanning('goal', ['claude-code']);
+
+      expect(startConversation.mock.calls[0][0]).toMatchObject({ contextWindow: 200000 });
+    });
   });
 
   // The orchestrator has ONE notification channel (the observer); the Session

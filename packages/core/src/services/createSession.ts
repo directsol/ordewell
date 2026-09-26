@@ -26,7 +26,7 @@ import {
   type SessionNotice,
 } from './SessionMessage';
 import { saveSession } from '../utils/sessionStore';
-import { addPlannerUsage, plannerContextFill, type PlannerUsage } from '../models/Usage';
+import { PlannerUsageLedger } from './PlannerUsage';
 import { mintSessionId } from '../utils/sessionId';
 import { savePrdMarkdown, extractPrdBlock } from '../utils/prdStore';
 import { type DiscoveredModel, type LegacyPlanState, type PlanState, type Task, type TaskSnapshot, type RunnerId, type ResearchProgress } from '../models/Task';
@@ -221,7 +221,7 @@ export class Session {
   /** Injected by a test; when present it is the service, forever. */
   private readonly pinnedAiService?: IAiService;
   private liveAiService: IAiService | null = null;
-  private plannerUsage: PlannerUsage = { totals: {} };
+  private readonly usageLedger = new PlannerUsageLedger();
   private liveAiProvider: AiProvider | null = null;
   private readonly workspaceRootFn: () => string;
   private planner: SessionPlanner;
@@ -498,8 +498,14 @@ export class Session {
         return;
       case 'usage': {
         if (!progress.record) return;
-        const usage = this.plannerUsage = addPlannerUsage(this.plannerUsage, progress.record);
-        this.broadcast({ type: 'planner_usage', turnId, totals: usage.totals, bySubagent: usage.bySubagent, contextFill: plannerContextFill(usage) });
+        // A provider that reports through a turn has no sink of its own inside a
+        // subagent: executeSpawnAgent tags the progress event with the id, so
+        // fold it onto the record here or the subagent's share would count as
+        // the planner's.
+        this.usageLedger.record(progress.subagentId && !progress.record.subagentId
+          ? { ...progress.record, subagentId: progress.subagentId }
+          : progress.record);
+        this.broadcast(this.usageLedger.message(turnId));
         return;
       }
       case 'interrupted':
@@ -513,6 +519,7 @@ export class Session {
     if (!this.plan) return;
     this.plan.tasks = this.store.planTasks;
     this.plan.isolation = this.orchestrator.isolationRecord ?? undefined;
+    this.plan.plannerUsage = this.usageLedger.snapshot();
     this.plan.lastUpdated = new Date().toISOString();
     saveSession(this.plan, this.goal, this.workspace, this.currentSessionId);
     this.conversation.markPersisted();
@@ -533,6 +540,9 @@ export class Session {
   private beginFreshPlan(): void {
     if (this.isExecuting) this.stopExecution();
     this.conversation.reset();
+    // Totals belong to the plan they were recorded under; a fresh plan starts
+    // its ledger from zero so the previous session's line never lingers.
+    this.usageLedger.clear();
     // A prompt raised by the turn we are abandoning has nobody left to serve;
     // denying it unblocks the old research loop instead of stranding it.
     this.approvals.clear();
@@ -862,6 +872,9 @@ export class Session {
       autonomousDefault: this.config.autonomousMode,
       verificationEnabled: settings.verificationEnabled ?? false,
       isolatedExecution: await this.orchestrator.plannerIsolation(),
+      // The planner's own model window, when a cached catalog knows it, so the
+      // usage line can show context fill (#49). Unknown stays absent.
+      contextWindow: this.modelResolver.contextWindowFor?.(this.config.orchestratorModel),
       fs: this.fsAdapter,
       fetcher: this.fetcher,
     };
@@ -1403,6 +1416,9 @@ export class Session {
     this.plan = plan;
     this.goal = goal;
     this.workspace = workspace;
+    // The saved ledger is the session's own history: adopt it before the
+    // persist below writes the plan back, so a load does not zero the totals.
+    this.usageLedger.restore(plan.plannerUsage);
     // Adopting the saved session's id keeps subsequent persists writing to the
     // same file instead of forking the session under a fresh identity.
     if (opts?.sessionId) this.currentSessionId = opts.sessionId;
@@ -1412,6 +1428,9 @@ export class Session {
     // in the background, and git serializes it ahead of any worktree a run adds.
     if (adopting) void this.orchestrator.adoptIsolation(plan.isolation ?? null);
     if (opts?.persist !== false) this.persist();
+    // A reopened session shows its token line again without waiting for the
+    // next turn: announce the totals the moment the plan is adopted.
+    if (this.usageLedger.hasUsage) this.broadcast(this.usageLedger.message());
   }
 
   async modifyPlan(userRequest: string): Promise<Task[]> {

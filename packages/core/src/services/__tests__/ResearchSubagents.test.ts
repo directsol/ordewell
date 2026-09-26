@@ -122,6 +122,21 @@ describe('runResearchAgent', () => {
     expect(events).toEqual([{ type: 'thinking', text: 'Considering the auth flow…' }]);
   });
 
+  it('forwards each turn\'s reported usage through the progress channel (#49)', async () => {
+    const first = { source: 'openai', model: 'gpt-4o', inputTokens: 100 };
+    const second = { source: 'openai', model: 'gpt-4o', inputTokens: 50 };
+    const chat = scriptedChat([
+      { ...toolTurn('read_file', { path: 'src/a.ts' }), usage: first },
+      { ...textTurn('digest'), usage: second },
+    ]);
+    const { fs } = fakeFs();
+    const events: import('../../models/Task').ResearchProgress[] = [];
+
+    await runResearchAgent('brief', { createChat: () => chat, fs, onProgress: (p) => events.push(p) });
+
+    expect(events.filter((p) => p.type === 'usage').map((p) => p.record)).toEqual([first, second]);
+  });
+
   it('does not report progress for refused tool calls', async () => {
     const chat = scriptedChat([
       { text: '', hasToolCalls: true, toolCalls: [{ name: 'fetch', args: { url: 'https://x.test' }, id: 'f1' }] },

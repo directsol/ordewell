@@ -14,6 +14,7 @@ import { runResearchAgent, mapWithConcurrency, SUBAGENT_LIMITS } from './Researc
 import { SPAWN_RESEARCH_AGENT } from './researchTools';
 import { classifyOutcome } from './researchStepSummary';
 import type { ConversationTurn } from './AiService';
+import type { UsageRecord } from '../models/Usage';
 
 /**
  * Read-only, side-effect-free tools that can share a round. Deliberately a
@@ -50,6 +51,12 @@ export interface ResearchTurn {
   finishReason?: string;
   /** Exact prompt tokens this turn consumed, when the provider reports usage — drives proactive compaction. */
   promptTokens?: number;
+  /**
+   * What this call consumed, when the provider reported it (#49). Carried on the
+   * turn so a subagent's run loop can route it through the progress channel,
+   * which tags it with the subagent's id.
+   */
+  usage?: UsageRecord;
 }
 
 export interface ResearchChat {

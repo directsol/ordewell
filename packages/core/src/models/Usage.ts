@@ -74,12 +74,20 @@ export function addPlannerUsage(usage: PlannerUsage, record: UsageRecord): Plann
     return next;
   }
   if (record.inputTokens !== undefined) next.lastPromptTokens = record.inputTokens;
-  if (record.contextWindow !== undefined) next.contextWindow = record.contextWindow;
+  // A reported window of 0 means "not known", not "no room": keep it out so the
+  // fill is omitted rather than shown against a guessed zero.
+  if (record.contextWindow !== undefined && record.contextWindow > 0) next.contextWindow = record.contextWindow;
   return next;
 }
 
-/** The last planner prompt against its window, or undefined while either is unknown. */
+/**
+ * The last planner prompt against its window, or undefined while either is
+ * unknown. `usedTokens` is the prompt total as reported, cached tokens
+ * included: a cached token still occupies the window, so subtracting the
+ * cached share would understate how full the context is. A window of 0 is
+ * treated as unknown — never guessed.
+ */
 export function plannerContextFill(usage: PlannerUsage): { usedTokens: number; windowTokens: number } | undefined {
-  if (usage.lastPromptTokens === undefined || usage.contextWindow === undefined) return undefined;
+  if (usage.lastPromptTokens === undefined || usage.contextWindow === undefined || usage.contextWindow <= 0) return undefined;
   return { usedTokens: usage.lastPromptTokens, windowTokens: usage.contextWindow };
 }

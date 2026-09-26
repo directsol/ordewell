@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { IConfig } from '../../interfaces/IConfig';
+import { fakeFileSystem } from '../../testing';
+import type { ResearchProgress } from '../../models/Task';
+import type { UsageRecord } from '../../models/Usage';
+import type { ConversationRequest } from '../AiService';
 
 const createSpy = vi.hoisted(() => vi.fn());
 
@@ -58,5 +62,75 @@ describe('OpenAiService model-id prefix stripping', () => {
       orchestratorModel: 'openai/gpt-4o',
     } as Partial<IConfig>));
     expect(model).toBe('openai/gpt-4o');
+  });
+});
+
+describe('OpenAiService usage reporting (#49)', () => {
+  beforeEach(() => createSpy.mockClear());
+
+  function usageEvents(config: IConfig, chunks: unknown[], contextWindow?: number): Promise<UsageRecord[]> {
+    createSpy.mockReturnValue(streamOf(chunks));
+    const progress: ResearchProgress[] = [];
+    const req: ConversationRequest = {
+      goal: 'add a cache',
+      runners: ['claude-code'],
+      modelsByRunner: {},
+      fs: fakeFileSystem(),
+      onProgress: (p) => progress.push(p),
+      ...(contextWindow ? { contextWindow } : {}),
+    };
+    return new OpenAiService(config).startConversation(req).then(() =>
+      progress.filter((p) => p.type === 'usage').map((p) => p.record!),
+    );
+  }
+
+  it('reports tokens, the cached share and the OpenRouter cost from the final chunk', async () => {
+    const records = await usageEvents(
+      cfg({ aiProvider: 'openrouter', orchestratorModel: 'openai/gpt-4o' } as Partial<IConfig>),
+      [
+        { choices: [{ delta: { content: 'ok' } }] },
+        { choices: [], usage: { prompt_tokens: 120, completion_tokens: 30, prompt_tokens_details: { cached_tokens: 80 }, cost: 0.0012 } },
+      ],
+    );
+
+    expect(records).toEqual([
+      {
+        source: 'openrouter',
+        model: 'openai/gpt-4o',
+        inputTokens: 120,
+        outputTokens: 30,
+        cachedInputTokens: 80,
+        reportedCost: { amount: 0.0012, currency: 'USD' },
+      },
+    ]);
+  });
+
+  it('leaves cost and cached share absent when the provider reports neither', async () => {
+    const records = await usageEvents(
+      cfg(),
+      [
+        { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] },
+        { choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } },
+      ],
+    );
+
+    expect(records).toEqual([{ source: 'openai', model: 'gpt-4o', inputTokens: 10, outputTokens: 2 }]);
+    expect(records[0]).not.toHaveProperty('reportedCost');
+    expect(records[0]).not.toHaveProperty('cachedInputTokens');
+  });
+
+  it('carries a known context window on the record and omits an unknown one', async () => {
+    const withWindow = await usageEvents(
+      cfg(),
+      [{ choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } }],
+      128000,
+    );
+    expect(withWindow[0].contextWindow).toBe(128000);
+
+    const withoutWindow = await usageEvents(
+      cfg(),
+      [{ choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } }],
+    );
+    expect(withoutWindow[0]).not.toHaveProperty('contextWindow');
   });
 });
