@@ -197,26 +197,22 @@ describe('reduce — stale session results', () => {
       for (const code of ['\x07', '\x1b[2J']) expect(render(state).join('\n')).not.toContain(code);
     });
   });
-
-  it('still dedups a repeated turn that carries a tab', () => {
-    const s = { ...initialState(), sessionId: 's1' };
-    const once = reduce(s, reply('a\tb', 's1')).state;
-    const { state } = reduce(once, reply('a\tb', 's1'));
-    expect(messagesOf(state).filter((m) => m.role === 'planner')).toHaveLength(1);
-  });
 });
 
-describe('reduce — one planner turn, two delivery paths', () => {
+describe('reduce — a planner reply', () => {
   const spoken = (content: string) =>
     reduce({ ...initialState(), sessionId: 's1' }, reply(content, 's1')).state;
 
-  it('speaks a turn that arrives over the socket and again in the REST reply only once', () => {
-    const first = spoken('Tasks updated:\n- #3 added');
-    const { state } = reduce(first, reply('Tasks updated:\n- #3 added', 's1'));
-    expect(messagesOf(state).filter((m) => m.role === 'planner')).toHaveLength(1);
+  // The inbound adapter drops the duplicate copies of one broadcast (see
+  // `inbound.ts`); the reducer shows every turn it is handed.
+  it('shows a repeated turn every time it arrives', () => {
+    const s = { ...initialState(), sessionId: 's1' };
+    const once = reduce(s, reply('a\tb', 's1')).state;
+    const { state } = reduce(once, reply('a\tb', 's1'));
+    expect(messagesOf(state).filter((m) => m.role === 'planner')).toHaveLength(2);
   });
 
-  it('still settles the busy status on the duplicate, since it is the same turn ending', () => {
+  it('settles the busy status on planUpdated, whatever the reply before it', () => {
     const busy = { ...spoken('Which database?'), status: 'planning' as const, busyLabel: 'reading files' };
     // `planUpdated` is the settle: the reply's text (this action) is dispatched
     // first, then the settle follows and ends the turn.
@@ -224,25 +220,6 @@ describe('reduce — one planner turn, two delivery paths', () => {
     const { state } = reduce(replied, { type: 'planUpdated', plan: { tasks: [] }, sessionId: 's1' });
     expect(state.status).toBe('idle');
     expect(state.busyLabel).toBe('');
-  });
-
-  it('speaks an identical reply again once the user has said something in between', () => {
-    const asked = spoken('Which database?');
-    const replied = reduce(asked, { type: 'key', key: { name: 'paste', text: 'postgres' } }).state;
-    const sent = reduce(replied, { type: 'key', key: { name: 'enter' } }).state;
-    const { state } = reduce(sent, reply('Which database?', 's1'));
-    expect(messagesOf(state).filter((m) => m.role === 'planner')).toHaveLength(2);
-  });
-
-  it('does not confuse a research line landing between the two copies for a new turn', () => {
-    const asked = spoken('Which database?');
-    const researched = reduce(asked, {
-      type: 'sessionMessage',
-      message: { type: 'research_step', tool: 'read_file', args: '{"path":"package.json"}' },
-      sessionId: 's1',
-    }).state;
-    const { state } = reduce(researched, reply('Which database?', 's1'));
-    expect(messagesOf(state).filter((m) => m.role === 'planner')).toHaveLength(1);
   });
 });
 
