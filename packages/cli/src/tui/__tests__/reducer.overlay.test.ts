@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce, type Step } from '../reducer';
-import type { ConfirmAction, PickerState, TaskView, TuiState } from '../state';
+import type { ConfirmAction, Overlay, PickerState, PromptAction, TaskView, TuiState } from '../state';
 import { chatOf, messagesOf } from './chat';
 
 const key = (name: string, char?: string) => ({ type: 'key' as const, key: { name, char } });
@@ -235,7 +235,7 @@ describe('allowlist picker chain', () => {
 });
 
 describe('prompt overlay', () => {
-  const prompt = (action: any, value = ''): TuiState =>
+  const prompt = (action: PromptAction, value = ''): TuiState =>
     initialState({ overlay: { kind: 'prompt', title: 'T', value, action }, sessionId: 's1' });
 
   it('types into the prompt rather than the chat input', () => {
@@ -301,7 +301,7 @@ describe('help overlay', () => {
 
   it('pages through the sheet', () => {
     const s = press(help(), 'pagedown').state;
-    expect((s.overlay as any).scroll).toBeGreaterThan(1);
+    expect((s.overlay as Extract<Overlay, { kind: 'help' }>).scroll).toBeGreaterThan(1);
   });
 });
 
@@ -556,8 +556,8 @@ describe('plan pane', () => {
     const selectedHigh = {
       ...opened,
       overlay: {
-        ...(opened.overlay as any),
-        picker: { ...(opened.overlay as any).picker, index: 2 },
+        ...(opened.overlay as Extract<Overlay, { kind: 'picker' }>),
+        picker: { ...(opened.overlay as Extract<Overlay, { kind: 'picker' }>).picker, index: 2 },
       },
     };
     expect(press(selectedHigh, 'enter').effects).toEqual([expect.objectContaining({

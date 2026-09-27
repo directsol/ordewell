@@ -1,12 +1,13 @@
+import type { DiscoveredModel, OrchestratorOption, RunnerModeInfo } from '@ordewell/core';
 import type { ModeView, ModelView } from './tui/state';
 
 /** The raw `/api/models` body, before any surface has looked at it. */
 export interface RawCatalog {
-  models?: any[];
-  modelsByRunner?: Record<string, any[]>;
-  modesByRunner?: Record<string, any[]>;
+  models?: DiscoveredModel[];
+  modelsByRunner?: Record<string, DiscoveredModel[]>;
+  modesByRunner?: Record<string, RunnerModeInfo[]>;
   providers?: string[];
-  orchestratorModels?: any[];
+  orchestratorModels?: OrchestratorOption[];
   providerErrors?: Record<string, string>;
 }
 
@@ -33,22 +34,21 @@ export interface Catalog {
  */
 export function normalizeCatalog(result: RawCatalog): Catalog {
   const runnersByModel = new Map<string, string[]>();
-  for (const [runner, entries] of Object.entries(result.modelsByRunner ?? {}) as [string, any[]][]) {
+  for (const [runner, entries] of Object.entries(result.modelsByRunner ?? {})) {
     for (const entry of entries ?? []) {
-      const id = String(entry.modelId ?? entry.id);
+      const id = String(entry.modelId);
       runnersByModel.set(id, [...new Set([...(runnersByModel.get(id) ?? []), runner])]);
     }
   }
 
-  const models: ModelView[] = (result.models ?? []).map((m: any) => {
-    const id = String(m.modelId ?? m.id);
+  const models: ModelView[] = (result.models ?? []).map((m) => {
+    const id = String(m.modelId);
     return {
       id,
-      label: String(m.modelLabel ?? m.label ?? id),
-      provider: String(m.runnerProviderLabel ?? m.runnerProvider ?? m.provider ?? ''),
-      pricing: m.pricing ? `$${m.pricing}/MTok` : undefined,
+      label: String(m.modelLabel ?? id),
+      provider: String(m.runnerProviderLabel ?? m.runnerProvider ?? ''),
       variants: Array.isArray(m.variants)
-        ? m.variants.map((v: any) => ({ id: String(v.id), label: String(v.label ?? v.id) }))
+        ? m.variants.map((v) => ({ id: String(v.id), label: String(v.label ?? v.id) }))
         : [],
       runners: runnersByModel.get(id) ?? [],
     };
@@ -56,7 +56,7 @@ export function normalizeCatalog(result: RawCatalog): Catalog {
 
   // The orchestrator/planner catalog spans every configured provider, each
   // option already carrying its human provider label (e.g. "OpenRouter").
-  const orchestratorModels: ModelView[] = (result.orchestratorModels ?? []).map((m: any) => ({
+  const orchestratorModels: ModelView[] = (result.orchestratorModels ?? []).map((m) => ({
     id: String(m.id),
     label: String(m.label ?? m.id),
     provider: String(m.provider ?? ''),
@@ -71,7 +71,7 @@ export function normalizeCatalog(result: RawCatalog): Catalog {
     modesByRunner: Object.fromEntries(
       Object.entries(result.modesByRunner ?? {}).map(([runner, modes]) => [
         runner,
-        (modes ?? []).map((m: any) => ({
+        (modes ?? []).map((m) => ({
           id: String(m.id),
           label: String(m.label ?? m.id),
           description: m.description ? String(m.description) : undefined,

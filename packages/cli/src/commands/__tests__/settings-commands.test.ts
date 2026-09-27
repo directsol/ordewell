@@ -2,7 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import http from 'http';
 import { ApiClient } from '../../apiClient';
 
-interface Recorded { method: string; url: string; body: any }
+interface RecordedBody {
+  env?: Record<string, string>;
+  [key: string]: unknown;
+}
+interface Recorded { method: string; url: string; body: RecordedBody }
 
 /**
  * A stand-in daemon. Routes are matched the way the real one does; every
@@ -11,8 +15,8 @@ interface Recorded { method: string; url: string; body: any }
  */
 async function fakeDaemon(state: {
   settings?: Record<string, unknown>;
-  models?: any;
-  runners?: any;
+  models?: unknown;
+  runners?: unknown;
 } = {}): Promise<{ port: number; close: () => void; sent: Recorded[] }> {
   const sent: Recorded[] = [];
   const settings = {

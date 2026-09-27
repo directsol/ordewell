@@ -1,11 +1,11 @@
 import { execSync } from 'child_process';
 import {
   ALL_PROVIDERS, clipboardCopyCommand, isCliProvider, type AiProvider, type HasBinFn, type LegacyPlanState,
-  type PlannerModelRecall,
+  type PlannerModelRecall, type SerializedPlan, type SessionMeta,
 } from '@ordewell/core';
 import { describeConnectionRefused, isConnectionRefused } from '../daemonClient';
 import { WorkspaceInitNeededError } from '../apiClient';
-import { normalizeCatalog } from '../catalog';
+import { normalizeCatalog, type RawCatalog } from '../catalog';
 import { describePlannerSwitch } from '../plannerModelSwitch';
 import type { Action, Effect } from './reducer';
 import type { RewindTargetView, SessionView } from './state';
@@ -15,8 +15,8 @@ import { inboundFor } from './inbound';
 
 /** The slice of the daemon client the TUI needs; `ApiClient` satisfies it. */
 export interface OrdewellApi {
-  startConversation(sessionId: string, goal: string, runners: string[] | undefined, workspace: string, allowInit?: boolean): Promise<any>;
-  sendConversationMessage(sessionId: string, message: string): Promise<any>;
+  startConversation(sessionId: string, goal: string, runners: string[] | undefined, workspace: string, allowInit?: boolean): Promise<SerializedPlan>;
+  sendConversationMessage(sessionId: string, message: string): Promise<SerializedPlan>;
   executePlan(sessionId: string): Promise<{ status: string }>;
   stopExecution(sessionId: string): Promise<{ status: string }>;
   cancelPlanning(sessionId: string): Promise<{ cancelled: boolean }>;
@@ -27,9 +27,9 @@ export interface OrdewellApi {
   addTask(sessionId: string, task: Record<string, unknown>): Promise<{ ok: boolean }>;
   updateTask(sessionId: string, taskId: string, changes: Record<string, unknown>): Promise<{ ok: boolean }>;
   removeTask(sessionId: string, taskId: string): Promise<{ ok: boolean }>;
-  getSessions(workspace?: string): Promise<any[]>;
-  getSession(sessionId: string, workspace?: string): Promise<{ meta: any; plan: any }>;
-  adoptSession(sessionId: string, workspace?: string): Promise<{ plan: any; goal: string }>;
+  getSessions(workspace?: string): Promise<SessionMeta[]>;
+  getSession(sessionId: string, workspace?: string): Promise<{ meta: SessionMeta; plan: SerializedPlan }>;
+  adoptSession(sessionId: string, workspace?: string): Promise<{ plan: SerializedPlan; goal: string }>;
   deleteSession(sessionId: string, workspace?: string): Promise<{ ok: boolean }>;
   forkConversation(sessionId: string): Promise<{ sessionId: string; goal: string; plan: unknown }>;
   rewindTargets(sessionId: string): Promise<RewindTargetView[]>;
@@ -48,14 +48,7 @@ export interface OrdewellApi {
   sendCommand(name: string, args?: Record<string, string>): Promise<{ ok: boolean; settings?: Record<string, unknown> }>;
   getRunners(): Promise<{ runners: { id: string; name: string; enabled: boolean }[]; orchestratorModel: string }>;
   setRunnerEnabled(runner: string, enabled: boolean): Promise<{ ok: boolean }>;
-  getModels(): Promise<{
-    models: any[];
-    modelsByRunner?: Record<string, any[]>;
-    modesByRunner?: Record<string, any[]>;
-    providers?: string[];
-    orchestratorModels?: any[];
-    providerErrors?: Record<string, string>;
-  }>;
+  getModels(): Promise<RawCatalog>;
   streamPlanning(sessionId: string, onEvent: (event: WsEvent) => void): { close: () => void };
   respondToApproval(sessionId: string, approvalId: string, granted: boolean): Promise<{ ok: boolean }>;
   /** Opens the execution stream. `onReady` runs only once the subscription is live. */
@@ -692,7 +685,7 @@ async function loadModels(deps: EffectDeps): Promise<void> {
 
 async function loadSessions(deps: EffectDeps): Promise<void> {
   const sessions = await deps.api.getSessions(deps.workspace);
-  const list: SessionView[] = sessions.map((s: any) => ({
+  const list: SessionView[] = sessions.map((s) => ({
     id: String(s.id),
     goal: String(s.goal ?? ''),
     taskCount: Number(s.taskCount ?? 0),

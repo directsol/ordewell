@@ -47,23 +47,23 @@ describe('GET /api/models', () => {
     const res = await app.request('/api/models', { method: 'GET' });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { models: Array<{ modelId: string }>; modelsByRunner: Record<string, unknown[]>; orchestratorModel: string; providers: string[]; orchestratorModels: Array<{ provider: string }>; providerErrors: Record<string, string> };
+    const body = (await res.json()) as { models: Array<{ modelId: string }>; modelsByRunner: Record<string, unknown[]>; modesByRunner: Record<string, Array<{ id: string; label: string; description: string }>>; orchestratorModel: string; providers: string[]; orchestratorModels: Array<{ provider: string }>; providerErrors: Record<string, string> };
     expect(body.models).toHaveLength(3);
     expect(body.modelsByRunner['claude-code']).toHaveLength(2);
     expect(body.modelsByRunner['opencode']).toHaveLength(1);
     // Runner models use runner-native IDs, not OpenRouter routing IDs
-    expect(body.models.every((m: { modelId: string }) => !m.modelId.includes('openai/') && !m.modelId.includes('deepseek/') && !m.modelId.includes('anthropic/'))).toBe(true);
-    expect(body.models.some((m: { modelId: string }) => m.modelId === 'claude-opus-4-20250514')).toBe(true);
-    expect(body.models.some((m: { modelId: string }) => m.modelId === 'opencode-go/deepseek-v4-pro')).toBe(true);
+    expect(body.models.every((m) => !m.modelId.includes('openai/') && !m.modelId.includes('deepseek/') && !m.modelId.includes('anthropic/'))).toBe(true);
+    expect(body.models.some((m) => m.modelId === 'claude-opus-4-20250514')).toBe(true);
+    expect(body.models.some((m) => m.modelId === 'opencode-go/deepseek-v4-pro')).toBe(true);
     expect(body.orchestratorModel).toBe('openai/gpt-4o');
     expect(body.providers).toEqual(['openrouter', 'google']);
     // The orchestrator catalog spans providers and names each one.
     expect(body.orchestratorModels).toHaveLength(2);
-    expect(body.orchestratorModels.map((m: any) => m.provider)).toEqual(['OpenRouter', 'Google']);
+    expect(body.orchestratorModels.map((m) => m.provider)).toEqual(['OpenRouter', 'Google']);
     expect(body.providerErrors).toEqual({});
     // Modes ride along on this same fetch — without them a surface can offer a
     // per-task runner picker but not the mode picker that has to follow it.
-    expect((body as any).modesByRunner['claude-code']).toEqual([{ id: 'default', label: 'Default', description: 'Ask to edit' }]);
+    expect(body.modesByRunner['claude-code']).toEqual([{ id: 'default', label: 'Default', description: 'Ask to edit' }]);
   });
 
   it('surfaces per-provider fetch failures without dropping working providers', async () => {
@@ -82,7 +82,7 @@ describe('GET /api/models', () => {
     const res = await app.request('/api/models', { method: 'GET' });
 
     expect(res.status).toBe(200);
-    const body: any = await res.json();
+    const body = (await res.json()) as { orchestratorModels: Array<{ provider: string }>; providerErrors: Record<string, string> };
     expect(body.orchestratorModels).toHaveLength(1);
     expect(body.orchestratorModels[0].provider).toBe('OpenRouter');
     expect(body.providerErrors.openai).toContain('401');

@@ -186,8 +186,8 @@ describe('ApiClient — endpoints the TUI drives', () => {
     servers.push(server);
 
     const result = await new ApiClient(server.port).getModels();
-    expect((result as any).path).toBe('/api/models');
-    expect(result.models[0].modelId).toBe('a/b');
+    expect((result as { path?: string }).path).toBe('/api/models');
+    expect(result.models?.[0]?.modelId).toBe('a/b');
   });
 
   it('enables and disables a runner', async () => {
@@ -245,8 +245,8 @@ describe('ApiClient — endpoints the TUI drives', () => {
     const previous = process.env.ORDEWELL_HTTP_TIMEOUT_MS;
     delete process.env.ORDEWELL_HTTP_TIMEOUT_MS;
 
-    vi.spyOn(http, 'request').mockImplementation(((options: http.RequestOptions, respond: (res: any) => void) => {
-      const req = new EventEmitter() as any;
+    vi.spyOn(http, 'request').mockImplementation(((options: http.RequestOptions, respond: (res: http.IncomingMessage) => void) => {
+      const req = new EventEmitter() as EventEmitter & http.ClientRequest;
       req.write = vi.fn();
       req.destroy = vi.fn();
       req.end = () => {
@@ -255,15 +255,16 @@ describe('ApiClient — endpoints the TUI drives', () => {
             req.emit('timeout');
             return;
           }
-          const res = new EventEmitter() as any;
+          const res = new EventEmitter() as EventEmitter & http.IncomingMessage;
           res.statusCode = 200;
           respond(res);
           res.emit('data', Buffer.from(JSON.stringify({ plan: { tasks: [] } })));
           res.emit('end');
         });
+        return req;
       };
       return req;
-    }) as any);
+    }) as typeof http.request);
 
     try {
       await expect(new ApiClient(3742).sendConversationMessage('s1', 'remove the header label'))
