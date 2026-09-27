@@ -169,3 +169,32 @@ describe('OpenAiService usage reporting (#49)', () => {
     ]);
   });
 });
+
+describe('OpenAiService conversation history', () => {
+  beforeEach(() => createSpy.mockReset());
+
+  const toolCallChunks = () => streamOf([{
+    choices: [{ delta: { tool_calls: [{ index: 0, id: `call-${createSpy.mock.calls.length}`, function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }] }, finish_reason: 'tool_calls' }],
+  }]);
+
+  /** Tool calls the history leaves unanswered — what the API refuses a request over. */
+  function unansweredCalls(messages: Array<{ role: string; tool_calls?: Array<{ id: string }>; tool_call_id?: string }>): string[] {
+    const answered = new Set(messages.flatMap((m) => (m.role === 'tool' && m.tool_call_id ? [m.tool_call_id] : [])));
+    return messages.flatMap((m) => (m.role === 'assistant' ? (m.tool_calls ?? []).map((c) => c.id) : [])).filter((id) => !answered.has(id));
+  }
+
+  // A model that keeps calling tools past its wrap-up rounds ends the turn
+  // with its last calls unanswered. The API refuses a history like that, so
+  // every later message in the conversation failed.
+  it('answers the calls a turn gave up on before the next message goes out', async () => {
+    createSpy.mockImplementation(() => toolCallChunks());
+    const service = new OpenAiService(cfg({ researchMaxSteps: 1 } as Partial<IConfig>));
+    await service.startConversation({ goal: 'add a cache', runners: ['claude-code'], modelsByRunner: {}, fs: fakeFileSystem(), onProgress: () => {} });
+
+    createSpy.mockImplementation(() => streamOf([{ choices: [{ delta: { content: 'Here is what I found.' }, finish_reason: 'stop' }] }]));
+    await service.continueConversation('go on', () => {});
+
+    const sent = createSpy.mock.calls.at(-1)?.[0] as { messages: Parameters<typeof unansweredCalls>[0] };
+    expect(unansweredCalls(sent.messages)).toEqual([]);
+  });
+});

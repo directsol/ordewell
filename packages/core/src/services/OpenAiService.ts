@@ -60,8 +60,22 @@ class OpenAiResearchChat implements ResearchChat {
   ) {}
 
   async sendMessage(text: string, signal?: AbortSignal): Promise<ResearchTurn> {
+    this.answerAbandonedCalls();
     this.messages.push({ role: 'user', content: text });
     return this.callApi(signal);
+  }
+
+  /**
+   * A turn that gave up on its tool budget, or was stopped, can end on calls
+   * nothing answered — and the API refuses every later request over a history
+   * like that. They are answered as never run before the next message.
+   */
+  private answerAbandonedCalls(): void {
+    const last = this.messages[this.messages.length - 1];
+    if (last?.role !== 'assistant' || !last.tool_calls?.length) return;
+    for (const call of last.tool_calls) {
+      this.messages.push({ role: 'tool', tool_call_id: call.id, content: 'Not executed: the turn that asked for this ended first.' });
+    }
   }
 
   async sendToolResults(results: ToolResult[], signal?: AbortSignal): Promise<ResearchTurn> {
