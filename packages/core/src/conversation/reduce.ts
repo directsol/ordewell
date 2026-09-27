@@ -1,7 +1,8 @@
 import type { ResearchStep } from '../models/Task';
 import type { SessionMessage } from '../services/SessionMessage';
-import type { DisplayBlock, MessageBlock, PlanBlock, SubagentBlock, SubagentChild, SubagentStatus, ToolBlock, UsageBlock } from './blocks';
-import { isMeasured, pendingTool, planMarker, settledTool, toolFromStep } from './records';
+import { isMeasured } from '../models/Usage';
+import type { DisplayBlock, MessageBlock, PlanBlock, SubagentBlock, SubagentChild, SubagentStatus, ToolBlock } from './blocks';
+import { pendingTool, planMarker, settledMessage, settledTool, subagentBlock, toolFromStep, usageBlock } from './records';
 
 /**
  * A line a surface adds to the conversation itself rather than receiving from
@@ -138,7 +139,7 @@ function openTurn(view: ConversationView, turnId: string, prompt: string): Conve
   if (sent?.type === 'message' && sent.turnId === undefined && sent.text === prompt) {
     return { ...view, blocks: replaceAt(view.blocks, i, { ...sent, turnId }) };
   }
-  return append(view, (id) => ({ type: 'message', id, role: 'user', text: prompt, streaming: false, turnId }));
+  return append(view, (id) => settledMessage(id, 'user', prompt, turnId));
 }
 
 function streamText(view: ConversationView, { turnId, segmentId, text }: Message<'planner_text_delta'>): ConversationView {
@@ -164,11 +165,10 @@ function settleReply(view: ConversationView, { content, turnId }: Message<'plann
   if (turnId !== undefined) {
     const i = finalSegmentIndex(view.blocks, turnId);
     if (i >= 0) {
-      const settled: MessageBlock = { type: 'message', id: view.blocks[i].id, role: 'planner', text: content, streaming: false, turnId };
-      return dropBuildingPlan({ ...view, blocks: replaceAt(view.blocks, i, settled) }, turnId);
+      return dropBuildingPlan({ ...view, blocks: replaceAt(view.blocks, i, settledMessage(view.blocks[i].id, 'planner', content, turnId)) }, turnId);
     }
   }
-  return append(dropBuildingPlan(view, turnId), (id) => ({ type: 'message', id, role: 'planner', text: content, streaming: false, ...(turnId ? { turnId } : {}) }));
+  return append(dropBuildingPlan(view, turnId), (id) => settledMessage(id, 'planner', content, turnId));
 }
 
 // A retracted envelope takes the turn's plan display with it, or its retry
@@ -190,14 +190,12 @@ function subagentLane(view: ConversationView, subagentId: string, turnId?: strin
   const spawn = findLastIndex(view.blocks, (b) => b.type === 'tool' && (b.spawns === subagentId || b.toolCallId === subagentId));
   const call = view.blocks[spawn];
   if (call?.type === 'tool') {
-    const block: SubagentBlock = {
-      type: 'subagent', id: call.id, subagentId, brief: call.headline.keyArg, status: 'running', children: [], digest: '',
-      ...(call.toolCallId ? { toolCallId: call.toolCallId } : {}),
-      ...(call.turnId ? { turnId: call.turnId } : {}),
-    };
+    const block = subagentBlock(call.id, {
+      subagentId, brief: call.headline.keyArg, status: 'running', children: [], digest: '', toolCallId: call.toolCallId, turnId: call.turnId,
+    });
     return [{ ...view, blocks: replaceAt(view.blocks, spawn, block) }, spawn];
   }
-  const next = append(view, (id) => ({ type: 'subagent', id, subagentId, brief: '', status: 'running', children: [], digest: '', ...(turnId ? { turnId } : {}) }));
+  const next = append(view, (id) => subagentBlock(id, { subagentId, brief: '', status: 'running', children: [], digest: '', turnId }));
   return [next, findLastIndex(next.blocks, (b) => b.type === 'subagent' && b.subagentId === subagentId)];
 }
 
@@ -311,11 +309,10 @@ function decideApproval(view: ConversationView, { kind, subject, scope, detail, 
   }));
 }
 
-function reportUsage(view: ConversationView, { totals, bySubagent, contextFill }: Message<'planner_usage'>): ConversationView {
-  if (!isMeasured(totals)) return view;
+function reportUsage(view: ConversationView, message: Message<'planner_usage'>): ConversationView {
+  if (!isMeasured(message.totals)) return view;
   const last = view.blocks[view.blocks.length - 1];
-  const id = last?.type === 'usage' ? last.id : `b${view.nextId}`;
-  const line: UsageBlock = { type: 'usage', id, totals, ...(bySubagent ? { bySubagent } : {}), ...(contextFill ? { contextFill } : {}) };
+  const line = usageBlock(last?.type === 'usage' ? last.id : `b${view.nextId}`, message);
   if (last?.type === 'usage') return { ...view, blocks: replaceAt(view.blocks, view.blocks.length - 1, line) };
   return { ...view, blocks: [...view.blocks, line], nextId: view.nextId + 1 };
 }
@@ -352,7 +349,7 @@ function markCompaction(view: ConversationView, summary: string): ConversationVi
   const i = findLastIndex(view.blocks, (b) => b.type === 'message' && b.role === 'planner' && b.turnId === undefined && b.text === summary);
   const announced = view.blocks[i];
   if (announced?.type === 'message') return { ...view, blocks: replaceAt(view.blocks, i, { ...announced, role: 'system' }) };
-  return append(view, (id) => ({ type: 'message', id, role: 'system', text: summary, streaming: false }));
+  return append(view, (id) => settledMessage(id, 'system', summary));
 }
 
 function syncTranscript(view: ConversationView, { plan, turnId }: Message<'plan_generated'>): ConversationView {
@@ -365,7 +362,7 @@ function syncTranscript(view: ConversationView, { plan, turnId }: Message<'plan_
   for (const [i, entry] of history.entries()) {
     const isNew = view.transcriptAt === undefined || entry.timestamp > view.transcriptAt;
     if (isNew && entry.kind === 'plan_generated') next = markPlan(next, entry.content, i === committed ? turnId : undefined);
-    if (isNew && entry.kind === 'system') next = append(next, (id) => ({ type: 'message', id, role: 'system', text: entry.content, streaming: false }));
+    if (isNew && entry.kind === 'system') next = append(next, (id) => settledMessage(id, 'system', entry.content));
     if (isNew && entry.kind === 'compaction') next = markCompaction(next, entry.content);
     if (latest === undefined || entry.timestamp > latest) latest = entry.timestamp;
   }
@@ -381,7 +378,7 @@ function syncTranscript(view: ConversationView, { plan, turnId }: Message<'plan_
 export function reduceConversation(view: ConversationView, input: ConversationInput): ConversationView {
   switch (input.type) {
     case 'local_entry':
-      return append(view, (id) => ({ type: 'message', id, role: input.role, text: input.text, streaming: false }));
+      return append(view, (id) => settledMessage(id, input.role, input.text));
     case 'planner_turn_started':
       return input.prompt === undefined ? view : openTurn(view, input.turnId, input.prompt);
     case 'planner_text_delta':

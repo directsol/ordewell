@@ -96,6 +96,28 @@ export function addPlannerUsage(usage: PlannerUsage, record: UsageRecord): Plann
   return next;
 }
 
+/** Whether any measure was reported: a token line of nothing but blanks says nothing. */
+export function isMeasured(totals: UsageTotals): boolean {
+  return totals.inputTokens !== undefined || totals.outputTokens !== undefined || totals.cachedInputTokens !== undefined
+    || Object.keys(totals.reportedCost ?? {}).length > 0;
+}
+
+/** What the token line shows of a ledger — live from its broadcast, or reloaded from the saved one. */
+export interface UsageLine {
+  totals: UsageTotals;
+  bySubagent?: Record<string, UsageTotals>;
+  contextFill?: { usedTokens: number; windowTokens: number };
+}
+
+export function usageLine(usage: PlannerUsage): UsageLine {
+  const contextFill = plannerContextFill(usage);
+  return {
+    totals: usage.totals,
+    ...(usage.bySubagent ? { bySubagent: usage.bySubagent } : {}),
+    ...(contextFill ? { contextFill } : {}),
+  };
+}
+
 /**
  * The last planner prompt against its window, or undefined while either is
  * unknown. `usedTokens` is the prompt total as reported, cached tokens
