@@ -14,11 +14,12 @@ import type { RunnerModeInfo } from './ModeResolver';
  *
  * - {@link repairLoop} is the bounded driver (first reply → interpret →
  *   corrective re-send), used by plan generation ({@link generatePlanWithRepair}),
- *   the Session's task-ops settlement, and Planner.modifyDuringExecution.
+ *   the Session's task-ops settlement, Planner.modifyDuringExecution, and
+ *   `settleReply` — the one loop both planner backends settle a conversation
+ *   turn's reply through.
  * - {@link classifyPlannerReply} decides what a planner reply *is* — a plan,
  *   targeted task edits, a botched attempt at either (worth a corrective
- *   retry), or prose. The conversation loop in BaseAiService keeps its own
- *   driver (it also runs the tool rounds) but delegates classification here.
+ *   retry), or prose.
  * - The corrective prompt texts live here, once.
  *
  * Policies stay at the call sites (ops validation, abort guards) —
@@ -27,7 +28,11 @@ import type { RunnerModeInfo } from './ModeResolver';
 
 export type RepairVerdict<T> =
   | { done: T }
-  | { retry: { errors: string[]; corrective: string; cause?: unknown } };
+  /**
+   * A corrective that costs something to prepare (freeing context first) is
+   * passed as a function: it runs only when a re-send will actually follow.
+   */
+  | { retry: { errors: string[]; corrective: string | (() => string); cause?: unknown } };
 
 export interface RepairLoopOpts<R, T> {
   /** Produce the first reply (attempt 0) — often already in hand. */
@@ -54,7 +59,8 @@ export async function repairLoop<R, T>(opts: RepairLoopOpts<R, T>): Promise<T> {
     if (repairs >= opts.maxRepairs) {
       return opts.onExhausted({ reply, errors: verdict.retry.errors, cause: verdict.retry.cause });
     }
-    reply = await opts.resend(verdict.retry.corrective);
+    const { corrective } = verdict.retry;
+    reply = await opts.resend(typeof corrective === 'function' ? corrective() : corrective);
   }
 }
 

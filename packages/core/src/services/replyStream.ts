@@ -44,7 +44,11 @@ export class ReplySplitter {
  */
 export class TurnStream {
   private readonly splitter = new ReplySplitter();
-  /** Segments streamed as text and not taken back, each with the sink it came through. */
+  /**
+   * Segments streamed and not taken back, to the chat or to the plan display,
+   * each with the sink it came through. A botched envelope streams to the plan
+   * display, and its retry must not build on top of it.
+   */
   private readonly shown = new Map<string, object>();
 
   constructor(readonly turnId: string, private readonly emit: (progress: ResearchProgress) => void) {}
@@ -60,11 +64,11 @@ export class TurnStream {
       if (progress.type === 'text_delta' && progress.segmentId && progress.text) {
         const routed = this.splitter.push(progress.segmentId, progress.text);
         if (!routed) return;
+        this.shown.set(progress.segmentId, call);
         if (routed.route === 'plan') {
-          this.emit({ type: 'plan_token', planToken: routed.text, turnId: this.turnId });
+          this.emit({ type: 'plan_token', planToken: routed.text, segmentId: progress.segmentId, turnId: this.turnId });
           return;
         }
-        this.shown.set(progress.segmentId, call);
         this.emit({ ...progress, text: routed.text, turnId: this.turnId });
         return;
       }

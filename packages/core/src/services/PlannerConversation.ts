@@ -88,7 +88,8 @@ export interface PlannerConversationHost {
   /** The session's single mutation ritual: op → persist → notify (default: the plan). */
   mutate(op: () => boolean, notify?: () => void): LegacyPlanState | null;
   broadcast: SessionBroadcaster;
-  broadcastPlan(): void;
+  /** `turnId`: the planner turn whose commit this is, when one is. */
+  broadcastPlan(turnId?: string): void;
   /** Validate a batch against live state. Pure — nothing is applied. */
   validateOps(ops: TaskOp[]): ApplyTaskOpsResult;
   /** Load planner-produced tasks: an edit keeps run state, a commit starts over. Returns how many landed. */
@@ -697,7 +698,7 @@ export class PlannerConversation {
         const count = this.host.adoptTasks(turn.tasks, 'commit');
         this.append('assistant', `Plan generated with ${count} task${count === 1 ? '' : 's'}.`, { timestamp: now, kind: 'plan_generated' });
         return true;
-      })!;
+      }, () => this.host.broadcastPlan(turnId))!;
     }
 
     // Budget models occasionally return an empty content turn after tool use —

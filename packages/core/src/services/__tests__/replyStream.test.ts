@@ -1,6 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ReplySplitter } from '../replyStream';
 import { classifyPlannerReply } from '../PlanRepair';
+import { createTask, type ResearchProgress } from '../../models/Task';
+import type { ConversationRequest } from '../AiService';
+import type { SessionMessage } from '../SessionMessage';
+import { reduceConversation, EMPTY_CONVERSATION } from '../../conversation/reduce';
+import { makeSession } from './sessionTestKit';
 
 function route(splitter: ReplySplitter, segmentId: string, deltas: string[]) {
   return deltas.map((d) => splitter.push(segmentId, d));
@@ -53,5 +58,42 @@ describe('ReplySplitter', () => {
     expect(splitter.push('s1', 'Let me look.')).toEqual({ route: 'text', text: 'Let me look.' });
     expect(splitter.push('s2', '{"taskOps":[]}')).toEqual({ route: 'plan', text: '{"taskOps":[]}' });
     expect(splitter.push('s1', ' More.')).toEqual({ route: 'text', text: ' More.' });
+  });
+});
+
+describe('TurnStream', () => {
+  // The session, its turn stream and the view, with the backend faked at the
+  // `IAiService` seam: the progress below is what a backend settling through
+  // `settleReply` sends for a botched plan and its corrected re-emit.
+  it('leaves only the corrected plan in the building display once the botched attempt is taken back', async () => {
+    const broken = '{"tasks": [{"title": "Add the SQLite store"';
+    const corrected = '{"tasks": [{"title": "Add the store"}, {"title": "Migrate"}]}';
+    const sent: SessionMessage[] = [];
+    const session = makeSession({
+      broadcast: (msg) => sent.push(msg),
+      aiService: {
+        startConversation: vi.fn(async (req: ConversationRequest) => {
+          const progress: ResearchProgress[] = [
+            { type: 'text_delta', segmentId: 's1', text: broken },
+            { type: 'text_retracted' },
+            { type: 'text_delta', segmentId: 's2', text: corrected },
+          ];
+          for (const p of progress) req.onProgress(p);
+          return {
+            kind: 'plan' as const,
+            tasks: [createTask({ id: 't1', order: 1, title: 'Add the store', prompt: 'p', assignedRunner: 'claude-code' })],
+            text: corrected,
+            researchLog: [],
+          };
+        }),
+        hasActiveConversation: () => true,
+      },
+    });
+
+    await session.startPlanning('add persistence', ['claude-code']);
+
+    const streamed = sent.slice(0, sent.findIndex((m) => m.type === 'plan_generated'));
+    const building = streamed.reduce(reduceConversation, EMPTY_CONVERSATION).blocks.filter((b) => b.type === 'plan');
+    expect(building).toEqual([expect.objectContaining({ status: 'building', text: corrected })]);
   });
 });

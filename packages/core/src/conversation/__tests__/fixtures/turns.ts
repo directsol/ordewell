@@ -96,14 +96,21 @@ export const harnessSubagent: ConversationInput[] = [
   { type: 'research_step_done', step: step('rs-1', 'agent_tool', { description: 'Map the TUI', prompt: 'Read tui/ and report', subagent_type: 'Explore' }, 'TUI state lives in tui/state.ts', 'success', { toolCallId: 'toolu_1', toolLabel: 'Agent' }), turnId: 't5' },
 ];
 
-/** The whole-plan broadcast that follows every plan mutation, carrying the transcript as it now stands. */
-export function planSnapshot(conversationHistory: ConversationMessage[], taskCount = 0): ConversationInput {
+/**
+ * The whole-plan broadcast that follows every plan mutation, carrying the
+ * transcript as it now stands — and the turn, when a planner turn's commit is
+ * what it carries.
+ */
+export function planSnapshot(conversationHistory: ConversationMessage[], taskCount = 0, turnId?: string): ConversationInput {
   const tasks = Array.from({ length: taskCount }, (_, i) => ({
     id: `task-${i + 1}`, order: i + 1, title: `Task ${i + 1}`, type: 'ai', description: '', dependencies: [], assignedRunner: 'claude-code',
     assignedModel: null, taskMode: 'build', prompt: null, subtasks: [], userSteps: undefined, thinkingEffort: undefined, autonomy: undefined,
     sliceType: undefined, userStoriesCovered: undefined,
   }));
-  return { type: 'plan_generated', plan: { tasks, runners: ['claude-code'], generatedAt: '2026-09-27T10:00:00.000Z', conversationHistory }, goal: 'add persistence', runners: ['claude-code'] };
+  return {
+    type: 'plan_generated', plan: { tasks, runners: ['claude-code'], generatedAt: '2026-09-27T10:00:00.000Z', conversationHistory }, goal: 'add persistence', runners: ['claude-code'],
+    ...(turnId ? { turnId } : {}),
+  };
 }
 
 /** A turn whose reply is the plan: its JSON streams as `plan_token`, never as reply text. */
@@ -112,14 +119,14 @@ export const planTurn: ConversationInput[] = [
   { type: 'planner_turn_started', turnId: 't6', prompt: 'use SQLite' },
   { type: 'research_step', tool: 'list_dir', args: '{"path":"src"}', toolCallId: 'call_l', turnId: 't6' },
   { type: 'research_step_done', step: step('rs-l', 'list_dir', { path: 'src' }, 'index.ts\nstore/', 'success', { toolCallId: 'call_l' }), turnId: 't6' },
-  { type: 'plan_token', token: '```json\n{"tasks": [{"title": "Add the SQLite ', turnId: 't6' },
-  { type: 'plan_token', token: 'store"}, {"title": "Migrate"}]}\n```', turnId: 't6' },
+  { type: 'plan_token', token: '```json\n{"tasks": [{"title": "Add the SQLite ', turnId: 't6', segmentId: 's1' },
+  { type: 'plan_token', token: 'store"}, {"title": "Migrate"}]}\n```', turnId: 't6', segmentId: 's1' },
   planSnapshot([
     { role: 'user', content: 'add persistence', timestamp: '2026-09-27T10:00:00.000Z' },
     { role: 'assistant', content: 'Which store: SQLite or Postgres?', timestamp: '2026-09-27T10:00:05.000Z' },
     { role: 'user', content: 'use SQLite', timestamp: '2026-09-27T10:03:00.000Z' },
     { role: 'assistant', content: 'Plan generated with 2 tasks.', timestamp: '2026-09-27T10:03:20.000Z', kind: 'plan_generated' },
-  ], 2),
+  ], 2, 't6'),
   { type: 'status_update', tasks: [] },
   { type: 'planner_turn_ended', turnId: 't6', outcome: 'plan' },
 ];

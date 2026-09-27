@@ -150,13 +150,30 @@ interpret → corrective re-send) behind plan generation
 `Planner.modifyDuringExecution`; `classifyPlannerReply` decides what a planner
 reply *is* (plan, task ops, a botched attempt at either, or prose) and owns
 the envelope keys (`PLAN_ENVELOPE_KEY`/`TASK_OPS_ENVELOPE_KEY`, defined in
-JsonExtractor) plus every corrective prompt text. The conversation loop in
-BaseAiService keeps its own driver (it also runs the tool rounds) but
-delegates classification and prompts here. Policies (PRD nudge, ops
+JsonExtractor) plus every corrective prompt text. A conversation turn's
+reply settles through `settleReply`, built on `repairLoop` beside it, on
+both planner families (see **Corrective retry**). Policies (PRD nudge, ops
 validation, abort guards) stay at the call sites — inputs to the loop, not
 part of it.
 *Avoid:* hand-rolling a retry loop or a corrective prompt at a call site —
 adapt `repairLoop` instead.
+
+**Corrective retry** — a re-send a planner reply is owed when it cannot
+settle as it stands, made by `settleReply` in the same way for an API planner
+and a harness planner (ADR-0009): one nudge per turn for an empty reply
+(naming the call that was denied, if one was), and up to `MAX_JSON_REPAIRS`
+(2) re-emits for a botched envelope — for a plan cut off by the output limit,
+the terser re-emit, after freeing context where Ordewell holds it. What the
+discarded attempt streamed is retracted before the retry answers, the plan
+display included. The families differ in exactly two explicit options: only
+an API planner can compact its context (`compactHistory`), and only a harness
+planner's reply joins every segment of its call, so it retracts them before
+settling as prose (`replyJoinsSegments`). How one call runs — tool rounds, or
+an agent's turn — is the caller's `send`.
+*Avoid:* counting a harness planner's wait for its backgrounded subagents as
+one — that turn is continued on the user's behalf, and its text stays in the
+reply; *Avoid:* counting a task-ops validation retry (the conversation's own
+`repairLoop`) against this budget — it is a separate, later loop.
 
 **Context compaction** (`contextCompaction.ts`) — comes in two kinds that share
 a name and nothing else: this entry's *reactive/proactive* compaction, which
@@ -965,7 +982,9 @@ for good: the reply it belonged to was discarded (a corrective retry, an
 aborted segment). Everything a segment had streamed is dropped unless a later
 `planner_message` or a later segment of the same turn replaces it; the block
 the text was accumulating in ends and never returns from reload, because
-retracted text is saved nowhere.
+retracted text is saved nowhere. A segment that streamed to the plan display
+takes the turn's building plan with it, so a re-emitted plan never builds on
+the botched one.
 *Avoid:* "edit" — the text is not corrected, it is withdrawn whole;
 *Avoid:* treating it as an error — a retracted segment is what a bounded
 repair loop looks like to a viewer.

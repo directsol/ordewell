@@ -1297,7 +1297,8 @@ describe('approvals', () => {
 });
 
 describe('plan markers', () => {
-  const plan = (content: string): SessionMessage => ({
+  // `turnId` is the planner turn whose commit the broadcast carries.
+  const plan = (content: string, turnId?: string): SessionMessage => ({
     type: 'plan_generated',
     goal: 'g',
     runners: [],
@@ -1305,6 +1306,7 @@ describe('plan markers', () => {
       tasks: [], runners: [], generatedAt: '',
       conversationHistory: [{ role: 'assistant', content, timestamp: '2026-09-27T10:00:00.000Z', kind: 'plan_generated' }],
     },
+    ...(turnId ? { turnId } : {}),
   });
 
   it('reads "Building plan…" while the plan streams', () => {
@@ -1314,7 +1316,7 @@ describe('plan markers', () => {
   it('then says what the plan became, and how many tasks it has', () => {
     const building: SessionMessage = { type: 'plan_token', turnId: 't1', token: '{"tasks":' };
 
-    expect(blockRows(heard(80, building, plan('Plan generated with 2 tasks.')), '◇')).toEqual(['◇ Plan generated (2 tasks)']);
+    expect(blockRows(heard(80, building, plan('Plan generated with 2 tasks.', 't1')), '◇')).toEqual(['◇ Plan generated (2 tasks)']);
     expect(blockRows(heard(80, plan('Plan updated — now 1 task.')), '◇')).toEqual(['◇ Plan updated (1 task)']);
   });
 });

@@ -289,10 +289,14 @@ describe('CliAgentAiService — Claude Code', () => {
     const turn = await svc.startConversation(request());
 
     expect(turn.kind).toBe('plan');
-    // Two user messages went in: the goal, then the corrective re-emit.
+    // Two user messages went in: the goal, then the corrective re-emit. The
+    // fixture's plan is cut off mid-object, so the re-emit asks for a terser
+    // plan, as on the API backend — and claims no trim, since the agent's
+    // context is its own.
     const sent = spawned.processes[0].written;
     expect(sent).toHaveLength(2);
-    expect(sent[1]).toContain('Re-emit the COMPLETE corrected plan');
+    expect(sent[1]).toContain('cut off by the output length limit');
+    expect(sent[1]).not.toContain('trimmed');
   });
 
   it('degrades to prose when the repair budget is exhausted', async () => {

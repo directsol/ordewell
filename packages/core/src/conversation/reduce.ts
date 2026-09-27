@@ -1,4 +1,4 @@
-import type { ConversationMessage, ResearchStep } from '../models/Task';
+import type { ResearchStep } from '../models/Task';
 import type { SessionMessage } from '../services/SessionMessage';
 import type { DisplayBlock, MessageBlock, PlanBlock, SubagentBlock, SubagentChild, SubagentStatus, ToolBlock, UsageBlock } from './blocks';
 import { isMeasured, pendingTool, planMarker, settledTool, toolFromStep } from './records';
@@ -109,6 +109,10 @@ function isUnsettledSegment(block: DisplayBlock, turnId: string): block is Messa
   return block.type === 'message' && block.turnId === turnId && block.segmentId !== undefined;
 }
 
+function isBuildingPlan(block: DisplayBlock, turnId: string | undefined): block is PlanBlock {
+  return block.type === 'plan' && block.status === 'building' && block.turnId === turnId;
+}
+
 /**
  * Where the turn's final segment is, if its text streamed: the turn's latest
  * block, when that is streamed text. Anything the turn did after a segment —
@@ -151,8 +155,8 @@ function streamText(view: ConversationView, { turnId, segmentId, text }: Message
  * there did not become a plan — a task-ops or task-query envelope, or, from a
  * daemon older than turns, the reply's prose.
  */
-function dropBuildingPlan(view: ConversationView, turnId: string | undefined): ConversationView {
-  const blocks = view.blocks.filter((b) => !(b.type === 'plan' && b.status === 'building' && b.turnId === turnId));
+function dropBuildingPlan(view: ConversationView, turnId: string | undefined, segmentId?: string): ConversationView {
+  const blocks = view.blocks.filter((b) => !(isBuildingPlan(b, turnId) && (segmentId === undefined || b.segmentId === segmentId)));
   return blocks.length === view.blocks.length ? view : { ...view, blocks };
 }
 
@@ -167,9 +171,11 @@ function settleReply(view: ConversationView, { content, turnId }: Message<'plann
   return append(dropBuildingPlan(view, turnId), (id) => ({ type: 'message', id, role: 'planner', text: content, streaming: false, ...(turnId ? { turnId } : {}) }));
 }
 
+// A retracted envelope takes the turn's plan display with it, or its retry
+// would build on the botched JSON and the partial-plan rows read both.
 function retractText(view: ConversationView, { turnId, segmentId }: Message<'planner_text_retracted'>): ConversationView {
   const blocks = view.blocks.filter((b) => !(isUnsettledSegment(b, turnId) && (segmentId === undefined || b.segmentId === segmentId)));
-  return blocks.length === view.blocks.length ? view : { ...view, blocks };
+  return dropBuildingPlan(blocks.length === view.blocks.length ? view : { ...view, blocks }, turnId, segmentId);
 }
 
 /**
@@ -255,19 +261,29 @@ function settleTool(view: ConversationView, { step, turnId }: Message<'research_
   return laneAppend(placed, lane, (id) => toolFromStep(id, step, turnId));
 }
 
-function streamPlan(view: ConversationView, { token, turnId }: Message<'plan_token'>): ConversationView {
-  const i = findLastIndex(view.blocks, (b) => b.type === 'plan' && b.status === 'building' && b.turnId === turnId);
+/**
+ * The building display shows one envelope: the segment streaming now. A turn's
+ * later envelope (a plan after a read it asked for) starts it over, below
+ * whatever the turn did in between, rather than running on from the last one.
+ */
+function streamPlan(view: ConversationView, { token, turnId, segmentId }: Message<'plan_token'>): ConversationView {
+  const i = findLastIndex(view.blocks, (b) => isBuildingPlan(b, turnId));
   const building = view.blocks[i];
-  if (building?.type === 'plan') return { ...view, blocks: replaceAt(view.blocks, i, { ...building, text: building.text + token }) };
-  return append(view, (id) => ({ type: 'plan', id, status: 'building', text: token, ...(turnId ? { turnId } : {}) }));
+  if (building?.type === 'plan' && building.segmentId === segmentId) {
+    return { ...view, blocks: replaceAt(view.blocks, i, { ...building, text: building.text + token }) };
+  }
+  return append(dropBuildingPlan(view, turnId), (id) => ({
+    type: 'plan', id, status: 'building', text: token, ...(turnId ? { turnId } : {}), ...(segmentId ? { segmentId } : {}),
+  }));
 }
 
-function markPlan(view: ConversationView, content: string): ConversationView {
+/** A plan landed: the building display of the turn that committed it becomes its marker. */
+function markPlan(view: ConversationView, content: string, turnId: string | undefined): ConversationView {
   const marker = planMarker(content);
-  const i = findLastIndex(view.blocks, (b) => b.type === 'plan' && b.status === 'building');
+  const i = findLastIndex(view.blocks, (b) => isBuildingPlan(b, turnId));
   const building = view.blocks[i];
   if (building?.type === 'plan') {
-    const settled: PlanBlock = { ...building, ...marker, text: '' };
+    const settled: PlanBlock = { type: 'plan', id: building.id, ...marker, text: '', ...(building.turnId ? { turnId: building.turnId } : {}) };
     return { ...view, blocks: replaceAt(view.blocks, i, settled) };
   }
   return append(view, (id) => ({ type: 'plan', id, text: '', ...marker }));
@@ -339,12 +355,16 @@ function markCompaction(view: ConversationView, summary: string): ConversationVi
   return append(view, (id) => ({ type: 'message', id, role: 'system', text: summary, streaming: false }));
 }
 
-function syncTranscript(view: ConversationView, history: readonly ConversationMessage[]): ConversationView {
+function syncTranscript(view: ConversationView, { plan, turnId }: Message<'plan_generated'>): ConversationView {
+  const history = plan.conversationHistory ?? [];
+  // Only the newest marker can be the committing turn's; older ones a surface
+  // is only now catching up on belong to turns long over.
+  const committed = findLastIndex(history, (e) => e.kind === 'plan_generated');
   let next = view;
   let latest = view.transcriptAt;
-  for (const entry of history) {
+  for (const [i, entry] of history.entries()) {
     const isNew = view.transcriptAt === undefined || entry.timestamp > view.transcriptAt;
-    if (isNew && entry.kind === 'plan_generated') next = markPlan(next, entry.content);
+    if (isNew && entry.kind === 'plan_generated') next = markPlan(next, entry.content, i === committed ? turnId : undefined);
     if (isNew && entry.kind === 'system') next = append(next, (id) => ({ type: 'message', id, role: 'system', text: entry.content, streaming: false }));
     if (isNew && entry.kind === 'compaction') next = markCompaction(next, entry.content);
     if (latest === undefined || entry.timestamp > latest) latest = entry.timestamp;
@@ -383,7 +403,7 @@ export function reduceConversation(view: ConversationView, input: ConversationIn
     case 'plan_token':
       return streamPlan(view, input);
     case 'plan_generated':
-      return syncTranscript(view, input.plan.conversationHistory ?? []);
+      return syncTranscript(view, input);
     case 'planner_turn_ended':
       return endTurn(view, input);
     case 'approval_request':

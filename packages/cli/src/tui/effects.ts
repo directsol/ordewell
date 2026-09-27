@@ -640,7 +640,7 @@ function joinDeltas(held: Delta, next: Delta): Delta | null {
     return same ? { ...held, text: held.text + next.text } : null;
   }
   if (held.type === 'plan_token' && next.type === 'plan_token') {
-    return held.turnId === next.turnId ? { ...held, token: held.token + next.token } : null;
+    return held.turnId === next.turnId && held.segmentId === next.segmentId ? { ...held, token: held.token + next.token } : null;
   }
   return null;
 }

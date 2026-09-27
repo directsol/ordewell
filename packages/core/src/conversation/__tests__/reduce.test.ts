@@ -203,13 +203,40 @@ describe('reduceConversation', () => {
     it('shows a plan reply as a plan block, building while its JSON streams, and never as a message', () => {
       const building = play(planTurn.slice(0, 6));
       expect(unkeyed(building.blocks).at(-1)).toEqual({
-        type: 'plan', status: 'building', text: '```json\n{"tasks": [{"title": "Add the SQLite store"}, {"title": "Migrate"}]}\n```', turnId: 't6',
+        type: 'plan', status: 'building', text: '```json\n{"tasks": [{"title": "Add the SQLite store"}, {"title": "Migrate"}]}\n```', turnId: 't6', segmentId: 's1',
       });
 
       const settled = play(planTurn);
       expect(unkeyed(settled.blocks).map((b) => b.type)).toEqual(['message', 'tool', 'plan']);
       expect(unkeyed(settled.blocks).at(-1)).toEqual({ type: 'plan', status: 'generated', text: '', taskCount: 2, turnId: 't6' });
       expect(settled.blocks.at(-1)?.id).toBe(building.blocks.at(-1)?.id);
+    });
+
+    it('builds one envelope at a time, and a retracted envelope takes its building plan with it', () => {
+      const turn: ConversationInput[] = [
+        { type: 'planner_turn_started', turnId: 't9', prompt: 'split task 1' },
+        { type: 'plan_token', token: '{"taskQuery":{"tasks":["#1"]}}', turnId: 't9', segmentId: 's1' },
+        { type: 'plan_token', token: '{"tasks": [{"title": "Spl', turnId: 't9', segmentId: 's2' },
+        { type: 'planner_text_retracted', turnId: 't9', segmentId: 's2' },
+        { type: 'plan_token', token: '{"tasks": [{"title": "Split 1a"}]}', turnId: 't9', segmentId: 's3' },
+      ];
+      const plans = (n: number) => unkeyed(play(turn.slice(0, n)).blocks).filter((b) => b.type === 'plan');
+
+      expect(plans(3)).toEqual([{ type: 'plan', status: 'building', text: '{"tasks": [{"title": "Spl', turnId: 't9', segmentId: 's2' }]);
+      expect(plans(4)).toEqual([]);
+      expect(plans(5)).toEqual([{ type: 'plan', status: 'building', text: '{"tasks": [{"title": "Split 1a"}]}', turnId: 't9', segmentId: 's3' }]);
+    });
+
+    it('leaves a turn\'s building plan alone when a plan it did not commit lands', () => {
+      const building = play(planTurn.slice(0, 6));
+      const history = (planTurn[6] as Extract<ConversationInput, { type: 'plan_generated' }>).plan.conversationHistory ?? [];
+
+      const oneShot = reduceConversation(building, planSnapshot([
+        ...history.slice(0, 3),
+        { role: 'assistant', content: 'Plan updated — now 1 task.', timestamp: '2026-09-27T10:03:10.000Z', kind: 'plan_generated' },
+      ], 1));
+
+      expect(unkeyed(oneShot.blocks).filter((b) => b.type === 'plan').map((b) => b.type === 'plan' && b.status)).toEqual(['building', 'updated']);
     });
 
     it('drops a streamed envelope that settled as a message rather than a plan', () => {
