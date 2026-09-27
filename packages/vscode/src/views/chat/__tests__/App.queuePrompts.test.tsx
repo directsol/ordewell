@@ -15,6 +15,16 @@ describe('queued prompts', () => {
     api.postMessage.mockClear();
   });
 
+  it('scrolls the newly queued prompt into view, not just new conversation blocks', () => {
+    const scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView');
+    post({ type: 'plannerTurn', active: true });
+    scrollIntoView.mockClear();
+
+    post({ type: 'heldPrompts', prompts: ['also cover caching'] });
+
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
   it('holds a prompt typed while the planner answers, and draws it as queued rather than sent', () => {
     post({ type: 'plannerTurn', active: true });
 

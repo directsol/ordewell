@@ -128,11 +128,15 @@ export default function App() {
     return () => el.removeEventListener('scroll', handleScroll);
   }, []);
 
+  // `held` (queued prompts) is its own timeline item below the conversation
+  // blocks, drawn between them and messagesEndRef — a prompt queued while
+  // already pinned to the bottom must scroll too, or it renders past the fold
+  // with nothing to bring it into view.
   useEffect(() => {
     if (userPinnedToBottomRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [blocks]);
+  }, [blocks, held]);
 
   useEffect(() => {
     const handler = (event: MessageEvent<HostToWebview>) => {
