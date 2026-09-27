@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { AiProvider, LegacyPlanState, Task, DiscoveredModel, RunnerId, TaskStatus, TaskIsolation, IsolationHandoff, IsolationMergeResult } from '@ordewell/core';
+import type { AiProvider, LegacyPlanState, DiscoveredModel, RunnerId, TaskStatus, TaskIsolation, IsolationHandoff, IsolationMergeResult } from '@ordewell/core';
 import { ConversationViewHost, type SavedConversation } from '../ConversationViewHost';
 import type { ChatState, HostToWebview, ModelOption, PendingPlanEdit, PlannerBackend, RunnerMeta, RunnerModeMeta, WebviewToHost } from '../shared/protocol';
 
@@ -20,7 +20,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
   private _onMessage = new vscode.EventEmitter<WebviewToHost>();
   readonly onMessage = this._onMessage.event;
-  private _pendingTasks: Task[] | null = null;
   /** The planner conversation as the webview draws it; every planner event and local notice goes through here. */
   readonly conversation = new ConversationViewHost((msg) => this.postMessage(msg));
 
@@ -90,11 +89,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   showPlan(plan: LegacyPlanState): void { this.sendPlanUpdated(plan); }
-  showWarnings(message: string, pendingTasks: Task[]): void {
-    this._pendingTasks = pendingTasks;
-    this.conversation.note('system', `Plan modification warnings:\n${message}`);
-    this.postMessage({ type: 'showWarnings', warnings: message, pendingTasks });
-  }
 
   // Legacy pass-throughs forwarding to new protocol types
   planGenerated(plan: LegacyPlanState): void { this.sendPlanUpdated(plan); }
@@ -246,9 +240,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (runners.length > 0) this.setRunners(runners);
   }
 
-  getPendingTasks(): Task[] | null {
-    return this._pendingTasks;
-  }
 
   private renderHtml(webviewView: vscode.WebviewView): void {
     const nonce = getNonce();

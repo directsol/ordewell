@@ -126,9 +126,10 @@ describe('plan dock', () => {
     fireEvent.click(screen.getByText('Send Rejection'));
 
     expect(api.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'sendMessage',
-      text: JSON.stringify({ reason: 'not the right approach' }),
-      actionContext: { type: 'reject', taskId: 't1' },
+      type: 'answerCheckpoint',
+      taskId: 't1',
+      approved: false,
+      reason: 'not the right approach',
     }));
     // The whole point of rejecting is deciding; the box must not linger.
     expect(document.querySelector('.checkpoint-panel')).toBeNull();

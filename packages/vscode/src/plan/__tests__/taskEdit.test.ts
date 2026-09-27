@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { classifyTaskEdit, parseTaskDraft, removalPrompt } from '../taskEdit';
+import { removalPrompt, taskFromDraft } from '../taskEdit';
+import type { TaskDraft } from '../../shared/protocol';
 import { createTask, type Task } from '@ordewell/core';
 
 function chain(): Task[] {
@@ -9,77 +10,6 @@ function chain(): Task[] {
     createTask({ id: 'c', order: 3, title: 'Test', dependencies: ['a', 'b'] }),
   ];
 }
-
-describe('classifyTaskEdit', () => {
-  it('reads a runner change', () => {
-    expect(classifyTaskEdit(JSON.stringify({ runner: 'codex' }))).toEqual({ kind: 'runner', runner: 'codex' });
-  });
-
-  it('reads a model assignment', () => {
-    const payload = { modelId: 'gpt-5-codex', modelLabel: 'GPT-5 Codex', thinkingEffort: 'high', availableVariants: ['low', 'high'] };
-
-    expect(classifyTaskEdit(JSON.stringify(payload))).toEqual({
-      kind: 'model',
-      assignment: { modelId: 'gpt-5-codex', modelLabel: 'GPT-5 Codex', thinkingEffort: 'high', availableVariants: ['low', 'high'] },
-    });
-  });
-
-  it('carries a cleared thinking effort rather than dropping the key', () => {
-    const payload = { modelId: 'o3', modelLabel: 'o3', thinkingEffort: undefined, availableVariants: [] };
-
-    const edit = classifyTaskEdit(JSON.stringify(payload));
-
-    expect(edit).toEqual({ kind: 'model', assignment: { modelId: 'o3', modelLabel: 'o3', thinkingEffort: undefined, availableVariants: [] } });
-  });
-
-  it('reads a mode change', () => {
-    expect(classifyTaskEdit(JSON.stringify({ mode: 'plan' }))).toEqual({ kind: 'mode', mode: 'plan' });
-  });
-
-  it('reads a prompt change', () => {
-    expect(classifyTaskEdit(JSON.stringify({ prompt: 'rewrite it' }))).toEqual({ kind: 'prompt', prompt: 'rewrite it' });
-  });
-
-  it('treats an emptied prompt as a prompt change, not a removal', () => {
-    expect(classifyTaskEdit(JSON.stringify({ prompt: '' }))).toEqual({ kind: 'prompt', prompt: '' });
-  });
-
-  it('treats an empty payload as a task removal', () => {
-    expect(classifyTaskEdit('')).toEqual({ kind: 'remove' });
-  });
-
-  it('treats unparseable text as a removal rather than guessing an edit', () => {
-    expect(classifyTaskEdit('{not json')).toEqual({ kind: 'remove' });
-  });
-
-  it('does not mistake an empty mode for a task removal', () => {
-    // A truthiness check on `mode` sent this down the remove-task branch, which
-    // pops a destructive confirm for what was only a mode reset.
-    expect(classifyTaskEdit(JSON.stringify({ mode: '' }))).toEqual({ kind: 'mode', mode: '' });
-  });
-
-  it('does not mistake an empty runner for a task removal', () => {
-    expect(classifyTaskEdit(JSON.stringify({ runner: '' }))).toEqual({ kind: 'runner', runner: '' });
-  });
-
-  it('prefers the runner when a payload names both a runner and a model', () => {
-    // The runner retarget derives its own model, so honouring the stale model
-    // alongside it would immediately contradict the switch.
-    const edit = classifyTaskEdit(JSON.stringify({ runner: 'codex', modelId: 'claude-sonnet-4-5', modelLabel: 'Claude' }));
-
-    expect(edit).toEqual({ kind: 'runner', runner: 'codex' });
-  });
-
-  it('reads a dependency list', () => {
-    expect(classifyTaskEdit(JSON.stringify({ dependencies: ['a', 'b'] }))).toEqual({
-      kind: 'dependencies', dependencies: ['a', 'b'],
-    });
-  });
-
-  it('does not mistake a cleared dependency list for a task removal', () => {
-    expect(classifyTaskEdit(JSON.stringify({ dependencies: [] }))).toEqual({ kind: 'dependencies', dependencies: [] });
-  });
-});
 
 describe('removalPrompt', () => {
   it('names the task', () => {
@@ -111,18 +41,18 @@ describe('removalPrompt', () => {
   });
 });
 
-describe('parseTaskDraft', () => {
+describe('taskFromDraft', () => {
   it('reads a filled-in form', () => {
-    const draft = parseTaskDraft(JSON.stringify({
+    const task = taskFromDraft({
       title: 'Write docs',
       prompt: 'do it',
       assignedRunner: 'codex',
       assignedModel: { modelId: 'gpt-5-codex', modelLabel: 'GPT-5 Codex' },
       taskMode: 'agent',
       dependencies: ['a'],
-    }));
+    });
 
-    expect(draft).toEqual({
+    expect(task).toEqual({
       title: 'Write docs',
       description: 'Write docs',
       prompt: 'do it',
@@ -135,26 +65,24 @@ describe('parseTaskDraft', () => {
   });
 
   it('leaves the assignment unset so the session derives it', () => {
-    const draft = parseTaskDraft(JSON.stringify({ title: 'Write docs' }));
+    const task = taskFromDraft({ title: 'Write docs', dependencies: [] });
 
-    expect(draft).toMatchObject({ prompt: 'Write docs', dependencies: [] });
-    expect(draft!.assignedRunner).toBeUndefined();
-    expect(draft!.assignedModel).toBeUndefined();
-    expect(draft!.taskMode).toBeUndefined();
+    expect(task).toMatchObject({ prompt: 'Write docs', dependencies: [] });
+    expect(task!.assignedRunner).toBeUndefined();
+    expect(task!.assignedModel).toBeUndefined();
+    expect(task!.taskMode).toBeUndefined();
   });
 
   it('refuses a draft with no usable title, rather than adding a nameless task', () => {
-    expect(parseTaskDraft(JSON.stringify({ title: '   ' }))).toBeNull();
-    expect(parseTaskDraft(JSON.stringify({ prompt: 'orphan' }))).toBeNull();
-    expect(parseTaskDraft('')).toBeNull();
-    expect(parseTaskDraft('{not json')).toBeNull();
+    expect(taskFromDraft({ title: '   ', dependencies: [] })).toBeNull();
   });
 
   it('never lets a caller inject system-owned fields', () => {
-    const draft = parseTaskDraft(JSON.stringify({ title: 'X', id: 'hijack', status: 'completed', verdict: {} }));
+    const smuggled = { title: 'X', dependencies: [], id: 'hijack', status: 'completed', verdict: {} } as unknown as TaskDraft;
+    const task = taskFromDraft(smuggled);
 
-    expect(draft).not.toHaveProperty('id');
-    expect(draft).not.toHaveProperty('status');
-    expect(draft).not.toHaveProperty('verdict');
+    expect(task).not.toHaveProperty('id');
+    expect(task).not.toHaveProperty('status');
+    expect(task).not.toHaveProperty('verdict');
   });
 });

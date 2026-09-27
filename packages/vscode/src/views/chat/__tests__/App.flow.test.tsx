@@ -228,15 +228,25 @@ describe('chat plan flow', () => {
     expect(screen.getByText('Stop')).toBeTruthy();
   });
 
-  it('sends "proceed" text as plain sendMessage without actionContext (pure chat)', () => {
+  it('sends "proceed" text as a plain chat message (pure chat)', () => {
     api.postMessage.mockClear();
     send({ type: 'planUpdated', plan });
 
     type('proceed');
 
     const sent = api.postMessage.mock.calls.map((c) => c[0]).find((m) => m.type === 'sendMessage' && m.text === 'proceed');
-    expect(sent).toBeTruthy();
-    expect(sent.actionContext).toBeUndefined();
+    expect(sent).toEqual({ type: 'sendMessage', text: 'proceed', runners: ['claude-code'], typed: true });
+  });
+
+  it('sends a message that starts with "retry " to the planner, not as a task retry', () => {
+    api.postMessage.mockClear();
+    send({ type: 'planUpdated', plan });
+
+    type('retry the parser with a stricter grammar');
+
+    expect(api.postMessage).toHaveBeenCalledWith({
+      type: 'sendMessage', text: 'retry the parser with a stricter grammar', runners: ['claude-code'], typed: true,
+    });
   });
 
   it('asks the host to show what the user typed — the conversation is the host\'s', () => {

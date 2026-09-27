@@ -50,9 +50,8 @@ describe('per-task removal', () => {
     act(() => { fireEvent.click(screen.getAllByTitle('Remove task')[1]); });
 
     expect(api.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'sendMessage',
-      text: '',
-      actionContext: { type: 'execute', taskId: 't2' },
+      type: 'removeTask',
+      taskId: 't2',
     }));
   });
 
@@ -72,9 +71,9 @@ describe('per-task dependency editing', () => {
     act(() => { fireEvent.click(depOption('Setup')!); });
 
     expect(api.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'sendMessage',
-      text: JSON.stringify({ dependencies: [] }),
-      actionContext: { type: 'execute', taskId: 't2' },
+      type: 'editTask',
+      taskId: 't2',
+      edit: { kind: 'dependencies', dependencies: [] },
     }));
   });
 
@@ -101,10 +100,10 @@ describe('adding a task by hand', () => {
     act(() => { fireEvent.click(screen.getByText('Add task')); });
 
     const posted = api.postMessage.mock.calls
-      .map((c) => c[0] as { actionContext?: { type: string }; text?: string })
-      .find((m) => m.actionContext?.type === 'addTask')!;
+      .map((c) => c[0] as { type: string; draft?: unknown })
+      .find((m) => m.type === 'addTask')!;
 
-    expect(JSON.parse(posted.text!)).toMatchObject({
+    expect(posted.draft).toMatchObject({
       title: 'Docs',
       prompt: 'Docs',
       assignedRunner: 'claude-code',

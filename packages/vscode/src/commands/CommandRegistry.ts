@@ -16,7 +16,7 @@ import { VsCodeFileSystem } from '../adapters/VsCodeFileSystem';
 import { VsCodeTerminalRunner } from '../adapters/VsCodeTerminalRunner';
 import { SecretStore, type ApiProvider } from '../adapters/SecretStore';
 import { configureModelAllowlist } from './configureModelAllowlist';
-import { plannerPreflightError } from '../plan/PlanManager';
+import { handleNewSession, plannerPreflightError } from '../plan/PlanManager';
 
 export interface CommandDeps {
   session: Session;
@@ -394,25 +394,7 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
         );
         if (confirm !== 'New Session') return;
       }
-      // Suppress the abort error from the orphaned planner turn before
-      // resetting — without this, session.reset() aborts the in-flight LLM
-      // call, and the catch block in handleStartPlanning/handleContinueConversation
-      // surfaces "Planner failed: Request was aborted." in the new session.
-      deps.setGeneratingPlan(false);
-      deps.getResearchAbort()?.abort();
-      deps.setResearchAbort(null);
-      // Full core reset — clearing only host-side state leaves the previous
-      // session's tasks and live planner conversation inside the Session,
-      // which then leak into the next planning chat as the "current plan".
-      deps.session.reset();
-      deps.terminalRunner.stopAll();
-      deps.setCurrentPlan(createEmptyPlan());
-      deps.setCurrentGoal('');
-      deps.chatProvider.setState('empty');
-      deps.chatProvider.conversation.reset();
-      deps.chatProvider.setGoal('');
-      clearState(deps.fsAdapter.getWorkspaceRoot());
-      deps.log('New session started');
+      handleNewSession(deps);
       vscode.window.showInformationMessage('New session started.');
     }),
   );

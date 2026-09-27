@@ -1,17 +1,16 @@
 import * as vscode from 'vscode';
 import { Session, RunnerRegistry, ModelResolver, RunnerInstallation, SettingsService, PlannerModelMemory, sessionRuntimeSettings, createEmptyPlan, LegacyPlanState, getProviderMeta, CLI_PROVIDERS, runnerForProvider, PROVIDER_LABEL, PROVIDER_SHORT_LABEL, PROVIDER_PRIORITY, createSkillsService, parseMaxParallel, type AiProvider } from '@ordewell/core';
 import { ChatViewProvider, type PlannerBackend } from './providers/ChatViewProvider';
-import type { WebviewToHost } from './shared/protocol';
 import { VsCodeConfig } from './adapters/VsCodeConfig';
 import { VsCodeFileSystem } from './adapters/VsCodeFileSystem';
 import { SecretStore, type ApiProvider, type SecretKey } from './adapters/SecretStore';
 import { VsCodeNotification } from './adapters/VsCodeNotification';
 import { VsCodeTerminalRunner } from './adapters/VsCodeTerminalRunner';
 import { registerCommands } from './commands/CommandRegistry';
-import { handleSlashCommand, isKnownSlashCommand } from './commands/SlashParser';
-import { handleStartPlanning, handleContinueConversation, handleModifyPlan, handleApprovePlan, handleSendMessage, handleSystemCommand, handleSessionMessage, findTask, handleMergePlan, handleSplitPlan } from './plan/PlanManager';
-import { handleIsolationAction, replayIsolation } from './plan/isolation';
-import { classifyTaskEdit, parseTaskDraft, removalPrompt } from './plan/taskEdit';
+import { handleSlashCommand, type SlashDeps } from './commands/SlashParser';
+import { handleStartPlanning, handleApprovePlan, handleSessionMessage } from './plan/PlanManager';
+import { replayIsolation } from './plan/isolation';
+import { routeWebviewMessage, type WebviewRouterDeps } from './plan/webviewRouter';
 import { recallPlannerModel } from './plan/PlannerModelSwitch';
 import { saveCurrentSession, restoreState, persistState } from './state/StatePersistence';
 
@@ -556,356 +555,102 @@ async function runApiKeyWizard(preselected?: ApiProvider): Promise<void> {
 
 // --- Chat listener ---
 
-/**
- * A planner turn started from the chat is over once its `sendMessage` has been
- * handled — its abort controller cleared, its plan applied — so the oldest
- * queued prompt goes now. A message that returns mid-turn (a task edit) sends
- * nothing: the turn still generating drains the queue when it ends.
- */
-function sendNextHeldPrompt(): void {
-  if (isGeneratingPlan) return;
-  const next = chatProvider.conversation.nextPrompt();
-  if (next !== undefined) void onChatMessage({ type: 'sendMessage', text: next, typed: true });
-}
-
 function setupChatListener(context: vscode.ExtensionContext): void {
-  context.subscriptions.push(chatProvider.onMessage(onChatMessage));
+  context.subscriptions.push(chatProvider.onMessage((msg) => routeWebviewMessage(msg, routerDeps())));
 }
 
-async function onChatMessage(msg: WebviewToHost): Promise<void> {
-  switch (msg.type) {
-    case 'ready': {
-      chatProvider.resendAllState();
-      chatProvider.setSkillToggles(settingsService.getTdd(), settingsService.getVerification(), []);
-      sendSkills();
-      // Activation-time discovery can catch a runner CLI cold (server spawn,
-      // catalog fetch, auth store still loading) and cache a degraded model
-      // list. Re-discover in the background whenever a webview (re)connects
-      // so the list self-heals without a manual /refresh.
-      void sendRunnerAndModels().catch((err) => log(`Background model refresh failed: ${err}`));
-      // Replay the persisted dialogue so a reloaded webview shows the full
-      // chat, not just the plan. restoreChat goes first: it clears any stale
-      // stopped/busy state before the plan message arrives. A turn still
-      // streaming has not been saved yet, so its live view is sent instead.
-      if (isGeneratingPlan) chatProvider.conversation.resync();
-      else chatProvider.restoreChat(currentPlan);
-      // Pending plan edits outlive a webview reload: an edit parked at a batch
-      // boundary must still be listed, and withdrawable, when the view returns.
-      chatProvider.showPendingPlanEdits(session.getQueuedMessages());
-      if (currentPlan.tasks.length > 0) {
-        chatProvider.showPlan(currentPlan);
-        if (currentGoal) chatProvider.setGoal(currentGoal);
-        replayIsolation(session, chatProvider);
-      } else {
-        chatProvider.setState('empty');
-      }
-      break;
-    }
+function routerDeps(): WebviewRouterDeps {
+  return {
+    ...planDeps(),
+    extension: {
+      ready: onWebviewReady,
+      refreshModels: () => { void sendRunnerAndModels().catch((err) => log(`Model dropdown refresh failed: ${err}`)); },
+      runSlashCommand: (text) => handleSlashCommand(text, slashDeps()),
+      setPlanner: (provider) => applyPlanner(provider as AiProvider),
+      setPlannerModel,
+      toggleSkill,
+    },
+    getPendingRunners: () => pendingRunners,
+    setPendingRunners: (runners) => { pendingRunners = runners; },
+  };
+}
 
-    // A per-task model dropdown opened. Discovery is cached per-runner and
-    // otherwise only refreshed on activation, config change, or webview
-    // reconnect (see `ready` above) — so a runner that was cold or
-    // unconfigured at one of those moments would stay stuck showing an
-    // empty catalog for an already-assigned task until one of those events
-    // recurred. `sendRunnerAndModels` already dedupes concurrent calls, so
-    // this is cheap even if several dropdowns open in quick succession.
-    case 'refreshModels':
-      void sendRunnerAndModels().catch((err) => log(`Model dropdown refresh failed: ${err}`));
-      break;
-
-    case 'sendMessage': {
-      const text = msg.text ?? '';
-      const ctx = msg.actionContext;
-      const incomingRunners = msg.runners;
-      // A prompt typed in the gap between a turn's last event and its end on
-      // the host: the webview already saw the turn close, so it did not hold
-      // it — but starting another turn now would race the one unwinding.
-      if (msg.typed && !ctx && isGeneratingPlan && !(text.startsWith('/') && isKnownSlashCommand(text))) {
-        chatProvider.conversation.holdPrompt(text);
-        break;
-      }
-      if (msg.typed && text.trim()) chatProvider.conversation.note('user', text);
-
-      if (ctx) {
-        switch (ctx.type) {
-          case 'approve':
-            if (ctx.taskId) {
-              session.approveCheckpoint(ctx.taskId);
-            } else {
-              await handleApprovePlan(planDeps());
-            }
-            break;
-          case 'reject': {
-            if (!ctx.taskId) break;
-            // Reject resumes the paused agent with the reason, rather than
-            // cancelling the task the way the generic 'cancel' action does.
-            let reason = '';
-            try {
-              reason = (JSON.parse(text) as { reason?: string }).reason ?? '';
-            } catch {
-              reason = text;
-            }
-            session.rejectCheckpoint(ctx.taskId, reason);
-            break;
-          }
-          case 'retry':
-            if (ctx.taskId) {
-              await session.retryTask(ctx.taskId);
-              chatProvider.showPlan(currentPlan);
-              persistState(persistDeps());
-            } else {
-              chatProvider.setState('researching');
-              if (currentPlan.tasks.length > 0) {
-                await handleModifyPlan(text || 'Regenerate the plan', planDeps());
-              } else if (session.isConversationActive) {
-                await handleContinueConversation(text || 'Regenerate the plan', planDeps());
-              } else {
-                await handleStartPlanning(text || 'Regenerate the plan', planDeps(), incomingRunners ?? pendingRunners);
-              }
-            }
-            break;
-          case 'skip':
-            if (ctx.taskId) {
-              const task = findTask(currentPlan, ctx.taskId);
-              if (task) { task.status = 'completed'; }
-              chatProvider.showPlan(currentPlan);
-              await session.tick();
-              persistState(persistDeps());
-            }
-            break;
-          case 'merge': {
-            const mergeData = text ? JSON.parse(text) as { taskIds?: string[] } : null;
-            if (mergeData?.taskIds && mergeData.taskIds.length >= 2) {
-              await handleMergePlan(mergeData.taskIds, planDeps());
-            }
-            break;
-          }
-          case 'split': {
-            if (ctx.taskId) {
-              await handleSplitPlan(ctx.taskId, planDeps());
-            }
-            break;
-          }
-          case 'addTask': {
-            const draft = parseTaskDraft(text);
-            if (!draft) break;
-            await session.addTask(draft);
-            if (session.planState) currentPlan = session.planState;
-            chatProvider.showPlan(currentPlan);
-            persistState(persistDeps());
-            saveCurrentSession(persistDeps());
-            break;
-          }
-          case 'cancel':
-            if (ctx.taskId) {
-              await session.cancelTask(ctx.taskId);
-            } else {
-              chatProvider.setState('planDraft');
-              chatProvider.showPlan(currentPlan);
-            }
-            chatProvider.showPlan(currentPlan);
-            persistState(persistDeps());
-            break;
-          case 'execute': {
-            if (!ctx.taskId) break;
-            const edit = classifyTaskEdit(text);
-            if (edit.kind === 'runner') {
-              // A runner change re-derives the task's model, effort and mode
-              // from the new runner's catalog, so it goes through the session
-              // (which owns that retarget) and the plan is re-shown — the
-              // webview only echoed the runner itself.
-              await session.setTaskRunner(ctx.taskId, edit.runner);
-              if (session.planState) currentPlan = session.planState;
-              chatProvider.showPlan(currentPlan);
-              persistState(persistDeps());
-              saveCurrentSession(persistDeps());
-            } else if (edit.kind === 'model') {
-              const task = findTask(currentPlan, ctx.taskId);
-              if (task) {
-                task.assignedModel = edit.assignment;
-                persistState(persistDeps());
-              }
-            } else if (edit.kind === 'mode') {
-              const task = findTask(currentPlan, ctx.taskId);
-              if (task) { task.taskMode = edit.mode; persistState(persistDeps()); }
-            } else if (edit.kind === 'prompt') {
-              await session.updateTask(ctx.taskId, { prompt: edit.prompt, description: edit.prompt || undefined });
-              chatProvider.showPlan(currentPlan);
-              persistState(persistDeps());
-              saveCurrentSession(persistDeps());
-            } else if (edit.kind === 'dependencies') {
-              try {
-                await session.setTaskDependencies(ctx.taskId, edit.dependencies);
-              } catch (err) {
-                vscode.window.showWarningMessage(err instanceof Error ? err.message : String(err));
-              }
-              // Re-shown either way: the webview's checkboxes must end up
-              // showing what was accepted, not what was attempted.
-              if (session.planState) currentPlan = session.planState;
-              chatProvider.showPlan(currentPlan);
-              persistState(persistDeps());
-              saveCurrentSession(persistDeps());
-            } else {
-              const confirm = await vscode.window.showWarningMessage(
-                removalPrompt(currentPlan.tasks, ctx.taskId), { modal: true }, 'Remove',
-              );
-              if (confirm !== 'Remove') break;
-              await session.removeTask(ctx.taskId);
-              if (session.planState) currentPlan = session.planState;
-              if (session.planTasks.length === 0) {
-                chatProvider.setState('empty');
-                const { clearState } = await import('@ordewell/core');
-                clearState(fsAdapter.getWorkspaceRoot());
-              } else {
-                chatProvider.showPlan(currentPlan);
-              }
-              persistState(persistDeps());
-            }
-            break;
-          }
-        }
-      } else if (text.startsWith('/') && isKnownSlashCommand(text)) {
-        try {
-          const slashDeps = {
-            config: {
-              orchestratorModel: config.orchestratorModel,
-              planningModel: config.planningModel,
-              enabledRunners: config.enabledRunners,
-              autonomousMode: config.autonomousMode,
-              apiKey: config.apiKey,
-              openAiBaseUrl: config.openAiBaseUrl,
-              configuredProviders: config.configuredProviders,
-              aiProvider: config.aiProvider,
-              plannerThinkingEffort: config.plannerThinkingEffort,
-            },
-            modelResolver: {
-              pickerOptions: () => modelResolver.pickerOptions(),
-              refresh: () => modelResolver.refresh(),
-              invalidate: () => modelResolver.invalidate(),
-              refreshRunnerModels: () => modelResolver.refreshRunnerModels(),
-              modelsForRunners: (runners: string[]) => modelResolver.modelsForRunners(runners),
-            },
-            pluginRegistry: {
-              get: (id: string) => pluginRegistry.get(id),
-              getManifest: (id: string) => pluginRegistry.getManifest(id),
-              list: () => pluginRegistry.list(),
-            },
-            chatProvider,
-            settingsService,
-            plannerBackends: plannerBackendList,
-            refreshPlannerState: sendPlannerState,
-            sendRunnerAndModels,
-            runApiKeyWizard,
-            discoverOrchestratorModelOptions,
-            pickModelWithProvider,
-            updateConfig: async (key: string, value: unknown) => config.update(key, value),
-            recordPlannerModel: (model: string, effort?: string) => plannerModelMemory.remember(config.aiProvider, model, effort),
-            log,
-          };
-          await handleSlashCommand(text, slashDeps);
-        } catch (err) {
-          log(`[ERROR] slash command "${text}" failed: ${err instanceof Error ? err.message : String(err)}`);
-          vscode.window.showErrorMessage(`Command failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      } else {
-        await handleSendMessage(text, planDeps(), incomingRunners ?? pendingRunners, (r) => { pendingRunners = r; });
-      }
-      sendNextHeldPrompt();
-      break;
-    }
-
-    // Typed while the webview saw a turn in flight. If the turn has ended by
-    // the time it lands, there is nothing left to wait for.
-    case 'holdPrompt':
-      if (isGeneratingPlan) chatProvider.conversation.holdPrompt(msg.text);
-      else await onChatMessage({ type: 'sendMessage', text: msg.text, typed: true });
-      break;
-
-    case 'unsendPrompt':
-      chatProvider.conversation.unsendPrompt();
-      break;
-
-    case 'sendSystemCommand':
-      await handleSystemCommand(msg.command, msg.taskId ?? '', planDeps());
-      break;
-
-    // Review / merge / discard / clean up / resolve a conflict. All the domain
-    // work and the host modals live in plan/isolation.ts.
-    case 'isolationAction':
-      await handleIsolationAction(msg.action, msg.taskId, planDeps());
-      break;
-
-    case 'addNote':
-      chatProvider.conversation.note('system', msg.text);
-      break;
-
-    // The user withdrew a plan edit that was waiting at a batch boundary. The
-    // echo is authoritative: the webview removed it optimistically, and this
-    // settles which edits really remain.
-    case 'removePendingPlanEdit':
-      session.removeQueuedMessage(msg.id);
-      chatProvider.showPendingPlanEdits(session.getQueuedMessages());
-      persistState(persistDeps());
-      break;
-
-    // An in-chat approval card was answered. The same `resolveApproval` every
-    // surface funnels through: the session broadcasts `approval_settled`,
-    // which redraws the card with its outcome.
-    case 'resolveApproval':
-      try {
-        session.resolveApproval(msg.id, msg.granted);
-      } catch (err) {
-        log(`Approval ${msg.id} could not be resolved: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      break;
-
-    case 'toggleSkill':
-      if (msg.skillId === 'tdd') settingsService.setTdd(msg.enabled);
-      else if (msg.skillId === 'verify') settingsService.setVerification(msg.enabled);
-      chatProvider.setSkillToggles(settingsService.getTdd(), settingsService.getVerification(), []);
-      break;
-
-    case 'setPlanner':
-      await applyPlanner(msg.provider as AiProvider);
-      break;
-
-    case 'setPlannerModel': {
-      await config.update('orchestratorModel', msg.modelId);
-      await config.update('plannerThinkingEffort', msg.effort ?? '');
-      plannerModelMemory.remember(config.aiProvider, msg.modelId, msg.effort);
-      sendModelConfig();
-      await sendPlannerState();
-      break;
-    }
-
-    case 'stopResearch':
-      // Stop aborts the current planner turn only. It must never clear the
-      // plan, the dialogue, or the persisted state — that's newSession.
-      isGeneratingPlan = false;
-      currentResearchAbort?.abort();
-      session.aiServiceInstance.reset();
-      chatProvider.conversation.stop();
-      log('Research stopped');
-      break;
-
-    case 'newSession': {
-      isGeneratingPlan = false;
-      currentResearchAbort?.abort();
-      session.aiServiceInstance.reset();
-      // Full core reset — not just the AI service. Anything short of this
-      // leaves the previous session's tasks in the Session's PlanStore, and
-      // the planner presents them as the current plan in the next chat.
-      session.reset();
-      terminalRunner.stopAll();
-      currentPlan = createEmptyPlan();
-      currentGoal = '';
-      chatProvider.setState('empty');
-      chatProvider.conversation.reset();
-      chatProvider.setGoal('');
-      const { clearState } = await import('@ordewell/core');
-      clearState(fsAdapter.getWorkspaceRoot());
-      log('New session started');
-      break;
-    }
+function onWebviewReady(): void {
+  chatProvider.resendAllState();
+  chatProvider.setSkillToggles(settingsService.getTdd(), settingsService.getVerification(), []);
+  sendSkills();
+  // Activation-time discovery can catch a runner CLI cold (server spawn,
+  // catalog fetch, auth store still loading) and cache a degraded model
+  // list. Re-discover in the background whenever a webview (re)connects
+  // so the list self-heals without a manual /refresh.
+  void sendRunnerAndModels().catch((err) => log(`Background model refresh failed: ${err}`));
+  // Replay the persisted dialogue so a reloaded webview shows the full
+  // chat, not just the plan. restoreChat goes first: it clears any stale
+  // stopped/busy state before the plan message arrives. A turn still
+  // streaming has not been saved yet, so its live view is sent instead.
+  if (isGeneratingPlan) chatProvider.conversation.resync();
+  else chatProvider.restoreChat(currentPlan);
+  // Pending plan edits outlive a webview reload: an edit parked at a batch
+  // boundary must still be listed, and withdrawable, when the view returns.
+  chatProvider.showPendingPlanEdits(session.getQueuedMessages());
+  if (currentPlan.tasks.length > 0) {
+    chatProvider.showPlan(currentPlan);
+    if (currentGoal) chatProvider.setGoal(currentGoal);
+    replayIsolation(session, chatProvider);
+  } else {
+    chatProvider.setState('empty');
   }
+}
+
+function toggleSkill(skillId: string, enabled: boolean): void {
+  if (skillId === 'tdd') settingsService.setTdd(enabled);
+  else if (skillId === 'verify') settingsService.setVerification(enabled);
+  chatProvider.setSkillToggles(settingsService.getTdd(), settingsService.getVerification(), []);
+}
+
+async function setPlannerModel(modelId: string, effort?: string): Promise<void> {
+  await config.update('orchestratorModel', modelId);
+  await config.update('plannerThinkingEffort', effort ?? '');
+  plannerModelMemory.remember(config.aiProvider, modelId, effort);
+  sendModelConfig();
+  await sendPlannerState();
+}
+
+function slashDeps(): SlashDeps {
+  return {
+    config: {
+      orchestratorModel: config.orchestratorModel,
+      planningModel: config.planningModel,
+      enabledRunners: config.enabledRunners,
+      autonomousMode: config.autonomousMode,
+      apiKey: config.apiKey,
+      openAiBaseUrl: config.openAiBaseUrl,
+      configuredProviders: config.configuredProviders,
+      aiProvider: config.aiProvider,
+      plannerThinkingEffort: config.plannerThinkingEffort,
+    },
+    modelResolver: {
+      pickerOptions: () => modelResolver.pickerOptions(),
+      refresh: () => modelResolver.refresh(),
+      invalidate: () => modelResolver.invalidate(),
+      refreshRunnerModels: () => modelResolver.refreshRunnerModels(),
+      modelsForRunners: (runners: string[]) => modelResolver.modelsForRunners(runners),
+    },
+    pluginRegistry: {
+      get: (id: string) => pluginRegistry.get(id),
+      getManifest: (id: string) => pluginRegistry.getManifest(id),
+      list: () => pluginRegistry.list(),
+    },
+    chatProvider,
+    settingsService,
+    plannerBackends: plannerBackendList,
+    refreshPlannerState: sendPlannerState,
+    sendRunnerAndModels,
+    runApiKeyWizard,
+    discoverOrchestratorModelOptions,
+    pickModelWithProvider,
+    updateConfig: async (key: string, value: unknown) => config.update(key, value),
+    recordPlannerModel: (model: string, effort?: string) => plannerModelMemory.remember(config.aiProvider, model, effort),
+    log,
+  };
 }

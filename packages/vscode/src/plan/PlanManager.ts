@@ -1,14 +1,16 @@
 import * as vscode from 'vscode';
 import {
   Session, LegacyPlanState, Task, flattenTasks, RunnerId, DiscoveredModel, enabledRunners,
-  validateModifiedPlan, warningsText, saveState, ModelResolver, RunnerRegistry, isCliProvider, taskStartedNotice,
-  type INotification,
+  saveState, clearState, ModelResolver, RunnerRegistry, isCliProvider, taskStartedNotice,
+  createEmptyPlan, type INotification,
 } from '@ordewell/core';
+import type { TaskDraft, TaskEdit } from '../shared/protocol';
 import type { ChatViewProvider } from '../providers/ChatViewProvider';
 import { VsCodeConfig } from '../adapters/VsCodeConfig';
 import { VsCodeFileSystem } from '../adapters/VsCodeFileSystem';
 import { VsCodeTerminalRunner } from '../adapters/VsCodeTerminalRunner';
 import { handleIsolationBlocked, handleIsolationHandoff } from './isolation';
+import { removalPrompt, taskFromDraft } from './taskEdit';
 
 export interface PlanManagerDeps {
   session: Session;
@@ -126,6 +128,38 @@ function plannerReady(deps: PlanManagerDeps): boolean {
   return false;
 }
 
+/**
+ * One planner turn's bookkeeping: the generating flag and the abort a stop
+ * reaches. A stopped turn can take a while to unwind, and a turn sent after
+ * it may already be running when it does — so a turn only clears the state
+ * while it is still its own, or it would leave the next turn unstoppable and
+ * its queued prompts unheld.
+ */
+async function inPlannerTurn(deps: PlanManagerDeps, run: (signal: AbortSignal) => Promise<void>): Promise<void> {
+  const controller = new AbortController();
+  deps.setGeneratingPlan(true);
+  deps.setResearchAbort(controller);
+  try {
+    await run(controller.signal);
+  } catch (err) {
+    reportPlannerError(err, deps);
+  } finally {
+    if (deps.getResearchAbort() === controller) {
+      deps.setGeneratingPlan(false);
+      deps.setResearchAbort(null);
+    }
+  }
+}
+
+/**
+ * Settle a plan a planner turn handed back: it becomes the host's plan, and
+ * the webview is re-shown it only when its tasks changed.
+ */
+function adoptTurnPlan(prior: string, plan: LegacyPlanState, deps: PlanManagerDeps): void {
+  deps.setCurrentPlan(plan);
+  finishPlannerTurn(plan, deps.getCurrentGoal(), deps, { planChanged: JSON.stringify(plan.tasks) !== prior });
+}
+
 export async function handleStartPlanning(
   userDescription: string,
   deps: PlanManagerDeps,
@@ -136,48 +170,22 @@ export async function handleStartPlanning(
   if (!runners) {
     return;
   }
-  try {
-    deps.setGeneratingPlan(true);
-    deps.setResearchAbort(new AbortController());
-
-    const plan = await deps.session.startPlanning(userDescription, runners, {
-      signal: deps.getResearchAbort()?.signal,
-    });
-
+  await inPlannerTurn(deps, async (signal) => {
+    const plan = await deps.session.startPlanning(userDescription, runners, { signal });
     deps.setCurrentGoal(userDescription);
     deps.setCurrentPlan(plan);
     finishPlannerTurn(plan, userDescription, deps);
-  } catch (err) {
-    reportPlannerError(err, deps);
-  } finally {
-    deps.setGeneratingPlan(false);
-    deps.setResearchAbort(null);
-  }
+  });
 }
 
 export async function handleContinueConversation(
   text: string,
   deps: PlanManagerDeps,
 ): Promise<void> {
-  try {
-    deps.setGeneratingPlan(true);
-    deps.setResearchAbort(new AbortController());
-
-    const priorPlan = deps.getCurrentPlan();
-    const priorTasksKey = JSON.stringify(priorPlan.tasks);
-    const plan = await deps.session.continueConversation(text, {
-      signal: deps.getResearchAbort()?.signal,
-    });
-
-    const planChanged = JSON.stringify(plan.tasks) !== priorTasksKey;
-    deps.setCurrentPlan(plan);
-    finishPlannerTurn(plan, deps.getCurrentGoal(), deps, { planChanged });
-  } catch (err) {
-    reportPlannerError(err, deps);
-  } finally {
-    deps.setGeneratingPlan(false);
-    deps.setResearchAbort(null);
-  }
+  await inPlannerTurn(deps, async (signal) => {
+    const prior = JSON.stringify(deps.getCurrentPlan().tasks);
+    adoptTurnPlan(prior, await deps.session.continueConversation(text, { signal }), deps);
+  });
 }
 
 /**
@@ -187,25 +195,11 @@ export async function handleContinueConversation(
  * A pre-flight compatibility failure (canMergeTasks) throws before any LLM call.
  */
 export async function handleMergePlan(taskIds: string[], deps: PlanManagerDeps): Promise<void> {
-  try {
-    deps.setGeneratingPlan(true);
-    deps.setResearchAbort(new AbortController());
-
-    const priorPlan = deps.getCurrentPlan();
-    const priorTasksKey = JSON.stringify(priorPlan.tasks);
-    const plan = await deps.session.requestMerge(taskIds, {
-      signal: deps.getResearchAbort()?.signal,
-    });
-
-    const planChanged = JSON.stringify(plan.tasks) !== priorTasksKey;
-    deps.setCurrentPlan(plan);
-    finishPlannerTurn(plan, deps.getCurrentGoal(), deps, { planChanged });
-  } catch (err) {
-    reportPlannerError(err, deps);
-  } finally {
-    deps.setGeneratingPlan(false);
-    deps.setResearchAbort(null);
-  }
+  if (taskIds.length < 2) return;
+  await inPlannerTurn(deps, async (signal) => {
+    const prior = JSON.stringify(deps.getCurrentPlan().tasks);
+    adoptTurnPlan(prior, await deps.session.requestMerge(taskIds, { signal }), deps);
+  });
 }
 
 /**
@@ -214,51 +208,10 @@ export async function handleMergePlan(taskIds: string[], deps: PlanManagerDeps):
  * merge; the model generates the breakdown (no manual per-task specs).
  */
 export async function handleSplitPlan(taskId: string, deps: PlanManagerDeps): Promise<void> {
-  try {
-    deps.setGeneratingPlan(true);
-    deps.setResearchAbort(new AbortController());
-
-    const priorPlan = deps.getCurrentPlan();
-    const priorTasksKey = JSON.stringify(priorPlan.tasks);
-    const plan = await deps.session.requestSplit(taskId, {
-      signal: deps.getResearchAbort()?.signal,
-    });
-
-    const planChanged = JSON.stringify(plan.tasks) !== priorTasksKey;
-    deps.setCurrentPlan(plan);
-    finishPlannerTurn(plan, deps.getCurrentGoal(), deps, { planChanged });
-  } catch (err) {
-    reportPlannerError(err, deps);
-  } finally {
-    deps.setGeneratingPlan(false);
-    deps.setResearchAbort(null);
-  }
-}
-
-export async function handleModifyPlan(
-  text: string,
-  deps: PlanManagerDeps,
-): Promise<void> {
-  if (!plannerReady(deps)) return;
-  try {
-    await deps.session.modifyPlan(text);
-
-    const plan = deps.getCurrentPlan();
-    const warnings = validateModifiedPlan(plan.tasks, deps.session.planTasks);
-    const warningMsg = warningsText(warnings);
-
-    if (warningMsg) {
-      deps.chatProvider.showWarnings(warningMsg, deps.session.planTasks);
-      return;
-    }
-
-    if (deps.session.planState) deps.setCurrentPlan(deps.session.planState);
-    deps.chatProvider.planGenerated(deps.getCurrentPlan());
-    saveState(deps.getCurrentPlan(), deps.fsAdapter.getWorkspaceRoot());
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    deps.chatProvider.showError(`Failed to modify plan: ${message}`);
-  }
+  await inPlannerTurn(deps, async (signal) => {
+    const prior = JSON.stringify(deps.getCurrentPlan().tasks);
+    adoptTurnPlan(prior, await deps.session.requestSplit(taskId, { signal }), deps);
+  });
 }
 
 export async function handleApprovePlan(deps: PlanManagerDeps): Promise<void> {
@@ -334,6 +287,110 @@ export async function handleSendMessage(
   }
 }
 
+/** The Session's plan becomes the host's, and the webview is shown it. */
+function showSessionPlan(deps: PlanManagerDeps): void {
+  if (deps.session.planState) deps.setCurrentPlan(deps.session.planState);
+  deps.chatProvider.showPlan(deps.getCurrentPlan());
+}
+
+function settleDirectEdit(deps: PlanManagerDeps): void {
+  showSessionPlan(deps);
+  deps.persistState();
+  deps.saveCurrentSession();
+}
+
+function applyTaskEdit(session: Session, taskId: string, edit: TaskEdit): Promise<unknown> {
+  switch (edit.kind) {
+    // A runner change re-derives the task's model, effort and mode from the
+    // new runner's catalog, which only the session can read.
+    case 'runner': return session.setTaskRunner(taskId, edit.runner);
+    case 'model': return session.updateTask(taskId, { assignedModel: edit.assignment });
+    case 'mode': return session.updateTask(taskId, { taskMode: edit.mode });
+    case 'prompt': return session.updateTask(taskId, { prompt: edit.prompt, description: edit.prompt || undefined });
+    case 'dependencies': return session.setTaskDependencies(taskId, edit.dependencies);
+  }
+}
+
+/**
+ * A field edit from a task card, through the Session like every other edit
+ * so it is validated, broadcast and scheduled for. The plan is re-shown
+ * either way: the card must end up showing what was accepted, not what was
+ * attempted.
+ */
+export async function handleTaskEdit(taskId: string, edit: TaskEdit, deps: PlanManagerDeps): Promise<void> {
+  try {
+    await applyTaskEdit(deps.session, taskId, edit);
+  } catch (err) {
+    void vscode.window.showWarningMessage(err instanceof Error ? err.message : String(err));
+  }
+  settleDirectEdit(deps);
+}
+
+export async function handleAddTask(draft: TaskDraft, deps: PlanManagerDeps): Promise<void> {
+  const task = taskFromDraft(draft);
+  if (!task) return;
+  await deps.session.addTask(task);
+  settleDirectEdit(deps);
+}
+
+export async function handleRemoveTask(taskId: string, deps: PlanManagerDeps): Promise<void> {
+  const confirm = await vscode.window.showWarningMessage(removalPrompt(deps.session.planTasks, taskId), { modal: true }, 'Remove');
+  if (confirm !== 'Remove') return;
+  await deps.session.removeTask(taskId);
+  if (deps.session.planTasks.length > 0) {
+    settleDirectEdit(deps);
+    return;
+  }
+  if (deps.session.planState) deps.setCurrentPlan(deps.session.planState);
+  deps.chatProvider.setState('empty');
+  clearState(deps.fsAdapter.getWorkspaceRoot());
+  deps.persistState();
+}
+
+/** A rejection resumes the paused agent with the reason, rather than cancelling the task. */
+export function handleCheckpointAnswer(taskId: string, approved: boolean, reason: string | undefined, deps: PlanManagerDeps): void {
+  if (approved) deps.session.approveCheckpoint(taskId);
+  else deps.session.rejectCheckpoint(taskId, reason ?? '');
+}
+
+/**
+ * Stop aborts the current planner turn only — never the plan, the dialogue or
+ * the persisted state; that is a new session. The turn stays the host's until
+ * its handler returns, so a prompt sent meanwhile is held, not raced against
+ * the turn still unwinding.
+ */
+export function handleStopPlanning(deps: PlanManagerDeps): void {
+  deps.getResearchAbort()?.abort();
+  deps.session.aiServiceInstance.reset();
+  deps.chatProvider.conversation.stop();
+  deps.log('Research stopped');
+}
+
+/**
+ * Everything of the old session goes: the planner turn, the runners, the
+ * Session's own plan and conversation (a partial reset leaves the old tasks
+ * in its PlanStore, and the planner presents them as the current plan), the
+ * view and the saved state.
+ */
+export function handleNewSession(deps: Pick<PlanManagerDeps,
+  'session' | 'chatProvider' | 'terminalRunner' | 'fsAdapter' | 'setCurrentPlan' | 'setCurrentGoal'
+  | 'setGeneratingPlan' | 'getResearchAbort' | 'setResearchAbort' | 'log'>): void {
+  // Cleared before the abort lands, so the orphaned turn's abort error is
+  // not reported into the new session.
+  deps.setGeneratingPlan(false);
+  deps.getResearchAbort()?.abort();
+  deps.setResearchAbort(null);
+  deps.session.reset();
+  deps.terminalRunner.stopAll();
+  deps.setCurrentPlan(createEmptyPlan());
+  deps.setCurrentGoal('');
+  deps.chatProvider.setState('empty');
+  deps.chatProvider.conversation.reset();
+  deps.chatProvider.setGoal('');
+  clearState(deps.fsAdapter.getWorkspaceRoot());
+  deps.log('New session started');
+}
+
 export async function handleSystemCommand(
   command: string,
   taskId: string,
@@ -342,6 +399,9 @@ export async function handleSystemCommand(
   switch (command) {
     case 'cancel':
       await deps.session.cancelTask(taskId);
+      break;
+    case 'retry':
+      await deps.session.retryTask(taskId);
       break;
     case 'skip':
     case 'markComplete':
