@@ -7,6 +7,7 @@ import { appendTaskOutput, type TaskOutputMap } from './taskOutput';
 import ModelSelector, { API_PROVIDER_LABELS } from './components/ModelSelector';
 import PlanCardGroup from './components/PlanCardGroup';
 import UsageLine from './components/UsageLine';
+import QueuedPrompts from './components/QueuedPrompts';
 import HandoffCard from './components/HandoffCard';
 import CheckpointPanel from './components/CheckpointPanel';
 import type { RunnerMode } from './components/TaskCard';
@@ -15,7 +16,8 @@ import { LegacyPlanState, DiscoveredModel, TaskModelAssignment, RunnerId, Isolat
 import type { AiProvider } from '@ordewell/core';
 import { isPlanRevision, planSummaryLabel, nextDock } from './planDock';
 import { DetailContext } from './detail';
-import type { HostToWebview, PlannerBackend, QueuedPrompt, RunnerMeta, WebviewToHost } from '../../shared/protocol';
+import type { HostToWebview, PendingPlanEdit, PlannerBackend, RunnerMeta, WebviewToHost } from '../../shared/protocol';
+import { EMPTY_HOLD, type PromptHold } from '@ordewell/core/plan-utils';
 import { applyConversationPatch, EMPTY_PATCHED_VIEW, patchedBlocks, type PatchedView } from '../../shared/conversationPatch';
 
 declare function acquireVsCodeApi(): {
@@ -25,6 +27,8 @@ declare function acquireVsCodeApi(): {
 };
 
 const vscode = acquireVsCodeApi();
+
+const STOP_ARM_MS = 2_000;
 
 interface RunnerInfo {
   id: string;
@@ -47,7 +51,13 @@ export default function App() {
   const [runnerList, setRunnerList] = useState<RunnerInfo[]>([]);
   const [enabledRunnerIds, setEnabledRunnerIds] = useState<string[]>(['claude-code']);
   const [runners, setRunners] = useState<RunnerId[]>(['claude-code']);
-  const [queued, setQueued] = useState<QueuedPrompt[]>([]);
+  const [pendingEdits, setPendingEdits] = useState<PendingPlanEdit[]>([]);
+  /** Queued prompts: what the host is holding for the next planner turn. */
+  const [held, setHeld] = useState<PromptHold>(EMPTY_HOLD);
+  /** The last queued text the host gave back, for the input to take in. `seq` makes a repeat of the same words land again. */
+  /** A first Esc during a planner turn: one more within `STOP_ARM_MS` stops it. */
+  const [stopArmed, setStopArmed] = useState(false);
+  const [unsent, setUnsent] = useState<{ text: string; seq: number } | null>(null);
   const [, setCurrentGoal] = useState<string>('');
   const [showModelInfo, setShowModelInfo] = useState(false);
   const [slashOutput, setSlashOutput] = useState('');
@@ -141,7 +151,7 @@ export default function App() {
             setTaskIsolation({});
             setHandoff(null);
             setMergeResult(null);
-            setQueued([]);
+            setPendingEdits([]);
             setDockExpanded((v) => nextDock(v, 'session-reset'));
           }
           setIsResearchActive(msg.state === 'researching');
@@ -189,9 +199,10 @@ export default function App() {
           setTaskIsolation({});
           setHandoff(null);
           setMergeResult(null);
-          // A restore is followed by the host's own queueStatus; clearing here
-          // keeps a stale session's queue from flashing until it lands.
-          setQueued([]);
+          // A restore is followed by the host's own pendingPlanEdits; clearing
+          // here keeps a stale session's edits from flashing until they land.
+          setPendingEdits([]);
+          setHeld(EMPTY_HOLD);
           setDockExpanded((v) => nextDock(v, 'session-reset'));
           break;
         }
@@ -316,8 +327,16 @@ export default function App() {
           if (msg.status === 'in_progress') setIsExecuting(true);
           break;
 
-        case 'queueStatus':
-          setQueued(msg.messages ?? []);
+        case 'pendingPlanEdits':
+          setPendingEdits(msg.edits ?? []);
+          break;
+
+        case 'heldPrompts':
+          setHeld(msg.prompts);
+          break;
+
+        case 'promptUnsent':
+          setUnsent((prev) => ({ text: msg.text, seq: (prev?.seq ?? 0) + 1 }));
           break;
 
         case 'setGoal':
@@ -392,7 +411,8 @@ export default function App() {
     setTaskIsolation({});
     setHandoff(null);
     setMergeResult(null);
-    setQueued([]);
+    setPendingEdits([]);
+    setHeld(EMPTY_HOLD);
     setDockExpanded((v) => nextDock(v, 'session-reset'));
     // A distinct message from stopResearch: /new resets the whole session,
     // while Stop only aborts the current planner turn.
@@ -438,6 +458,11 @@ export default function App() {
       return;
     }
 
+    if (isResearchActive) {
+      vscode.postMessage({ type: 'holdPrompt', text });
+      return;
+    }
+
     setShowModelInfo(false);
     setSlashOutput('');
     setShowNewSessionConfirm(false);
@@ -448,7 +473,7 @@ export default function App() {
     // moment to start it, and a second send in between would race the first.
     setIsResearchActive(true);
     vscode.postMessage({ type: 'sendMessage', text, runners, typed: true });
-  }, [runners, handleNewSession, showNewSessionConfirm]);
+  }, [runners, handleNewSession, showNewSessionConfirm, isResearchActive]);
 
   const handleToggleRunner = useCallback((runnerId: RunnerId) => {
     setRunners((prev) => {
@@ -611,24 +636,62 @@ export default function App() {
     vscode.postMessage({ type: 'resolveApproval', id, granted });
   }, []);
 
-  // The host owns the queue; withdrawing removes it here at once so the click
-  // feels immediate, and the host's own queueStatus is what settles the list.
-  const handleRemoveQueued = useCallback((id: string) => {
-    setQueued((prev) => prev.filter((m) => m.id !== id));
-    vscode.postMessage({ type: 'removeQueuedMessage', id });
+  // The host owns the edits; withdrawing removes one here at once so the click
+  // feels immediate, and the host's own pendingPlanEdits settles the list.
+  const handleRemovePendingEdit = useCallback((id: string) => {
+    setPendingEdits((prev) => prev.filter((m) => m.id !== id));
+    vscode.postMessage({ type: 'removePendingPlanEdit', id });
+  }, []);
+
+  const handleUnsend = useCallback(() => {
+    vscode.postMessage({ type: 'unsendPrompt' });
+  }, []);
+
+  const stopTurn = useCallback(() => {
+    stoppedRef.current = true;
+    setIsResearchActive(false);
+    vscode.postMessage({ type: 'stopResearch' });
   }, []);
 
   const handleStop = useCallback(() => {
-    stoppedRef.current = true;
-    if (isExecuting) {
-      setIsExecuting(false);
-      vscode.postMessage({ type: 'sendSystemCommand', command: 'stopExecution' });
-      pushSystem('Execution stopped.');
-    } else {
-      setIsResearchActive(false);
-      vscode.postMessage({ type: 'stopResearch' });
+    if (!isExecuting) {
+      stopTurn();
+      return;
     }
-  }, [isExecuting, pushSystem]);
+    stoppedRef.current = true;
+    setIsExecuting(false);
+    vscode.postMessage({ type: 'sendSystemCommand', command: 'stopExecution' });
+    pushSystem('Execution stopped.');
+  }, [isExecuting, pushSystem, stopTurn]);
+
+  // Esc during a planner turn, in order of intent: take back the newest queued
+  // prompt, else arm a stop, else commit it. Outside a turn it is the input's.
+  // The stop is the turn's even mid-run: Esc Esc never halts the tasks.
+  const handleEscape = useCallback((): boolean => {
+    if (!isResearchActive) return false;
+    if (held.length > 0) {
+      setStopArmed(false);
+      handleUnsend();
+    } else if (stopArmed) {
+      setStopArmed(false);
+      stopTurn();
+    } else {
+      setStopArmed(true);
+    }
+    return true;
+  }, [isResearchActive, held, stopArmed, handleUnsend, stopTurn]);
+
+  // The pairing is what keeps a stray tap from cancelling a turn, so an arm
+  // lapses on its own, and never outlives the turn it was aimed at.
+  useEffect(() => {
+    if (!stopArmed) return;
+    if (!isResearchActive) {
+      setStopArmed(false);
+      return;
+    }
+    const timer = setTimeout(() => setStopArmed(false), STOP_ARM_MS);
+    return () => clearTimeout(timer);
+  }, [stopArmed, isResearchActive]);
 
   const handleToggleSkill = useCallback((skillId: string) => {
     if (skillId === 'tdd') {
@@ -686,7 +749,8 @@ export default function App() {
   }, [handleIsolationAction]);
 
   const getPlaceholder = (): string => {
-    if (isResearchActive || isExecuting) return 'AI is working...';
+    if (isResearchActive) return 'Queue a message for when the planner is done...';
+    if (isExecuting) return 'AI is working...';
     if (plan && plan.tasks.length > 0) return 'Modify the plan...';
     if (blocks.some((b) => b.type === 'message' && b.role === 'planner')) return 'Reply to the planner...';
     return 'Describe what you want to build...';
@@ -778,7 +842,7 @@ export default function App() {
     [plan],
   );
 
-  const queueCount = queued.length;
+  const pendingEditCount = pendingEdits.length;
 
   const hasContent = blocks.length > 0 || isResearchActive || isExecuting || !!error;
   const streaming = blocks.some((b) => (b.type === 'message' || b.type === 'thinking') && b.streaming);
@@ -886,12 +950,12 @@ export default function App() {
                   <span className="queue-dot running" /> {runningCount} running
                 </div>
               )}
-              {queueCount > 0 && (
+              {pendingEditCount > 0 && (
                 <div className="queue-badge">
-                  <span className="queue-dot" /> {queueCount} message{queueCount > 1 ? 's' : ''} queued
+                  <span className="queue-dot" /> {pendingEditCount} plan edit{pendingEditCount > 1 ? 's' : ''} pending
                 </div>
               )}
-              <div className="executing-status">Tasks active &mdash; send follow-ups to queue</div>
+              <div className="executing-status">Tasks active &mdash; plan edits apply between batches</div>
             </div>
           )}
         </div>
@@ -1105,6 +1169,8 @@ export default function App() {
           onResolveApproval={handleResolveApproval}
         />
 
+        <QueuedPrompts prompts={held} onUnsend={handleUnsend} />
+
         {isResearchActive && !streaming && (
           <div className="chat-msg-working">
             <span className="chat-msg-spinner" /> Working&hellip;
@@ -1118,17 +1184,22 @@ export default function App() {
 
       {usageBlock && <UsageLine block={usageBlock} />}
 
+      {stopArmed && <div className="stop-hint" role="status">Press Esc again to stop</div>}
+
       <ChatInput
         onSend={handleSend}
         onStop={handleStop}
-        disabled={isResearchActive || conversationBusy}
+        onEscape={handleEscape}
+        disabled={conversationBusy}
+        disabledReason={conversationBusy ? 'Compacting the conversation...' : undefined}
         placeholder={getPlaceholder()}
         modelOptions={modelOptions}
         configuredProviders={configuredProviders}
         isProcessing={isGenerating}
-        queued={queued}
-        onRemoveQueued={handleRemoveQueued}
+        pendingEdits={pendingEdits}
+        onRemovePendingEdit={handleRemovePendingEdit}
         prefill={prefill}
+        unsent={unsent}
         skills={skills}
       />
     </div>

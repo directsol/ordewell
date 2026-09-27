@@ -84,13 +84,13 @@ describe('ChatViewProvider.setModels', () => {
   });
 });
 
-describe('ChatViewProvider.showQueueStatus', () => {
-  it('sends every waiting prompt with its id, so the chat can list and withdraw each one', () => {
+describe('ChatViewProvider.showPendingPlanEdits', () => {
+  it('sends every waiting plan edit with its id, so the chat can list and withdraw each one', () => {
     const { provider, posted } = providerWithCapture();
 
-    provider.showQueueStatus([{ id: 'q-1', text: 'also add tests' }]);
+    provider.showPendingPlanEdits([{ id: 'q-1', text: 'also add tests' }]);
 
-    expect(posted).toEqual([{ type: 'queueStatus', messages: [{ id: 'q-1', text: 'also add tests' }] }]);
+    expect(posted).toEqual([{ type: 'pendingPlanEdits', edits: [{ id: 'q-1', text: 'also add tests' }] }]);
   });
 });
 

@@ -7,3 +7,5 @@ export type { ConversationInput, ConversationView, LocalEntry } from './reduce';
 export { fromTranscript } from './transcript';
 export { toolHeadline, outputPreview, outputLines } from './format';
 export type { OutputPreview } from './format';
+export { EMPTY_HOLD, holdPrompt, drainNext, unsendLatest, unsendAll, aheadOfDraft } from './promptHold';
+export type { PromptHold, TakenPrompt } from './promptHold';

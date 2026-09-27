@@ -328,7 +328,7 @@ export async function handleSendMessage(
     await handleContinueConversation(text, deps);
     // Only a live runner can queue an edit — an armed-but-idle scheduler applies
     // it, so the strip would announce a queue that never forms.
-    if (deps.session.hasLiveWork) deps.chatProvider.showQueueStatus(deps.session.getQueuedMessages());
+    if (deps.session.hasLiveWork) deps.chatProvider.showPendingPlanEdits(deps.session.getQueuedMessages());
   } else {
     await handleStartPlanning(text, deps, pendingRunners);
   }
@@ -479,9 +479,9 @@ export function handleSessionMessage(
 
 export async function processQueuedBatched(deps: PlanManagerDeps): Promise<void> {
   await deps.session.processQueuedMessages();
-  // The batch consumed the queue, so the webview's strip must empty with it —
-  // otherwise a withdrawn or applied prompt lingers as if still waiting.
-  deps.chatProvider.showQueueStatus([]);
+  // The batch applied the pending edits, so the webview's strip must empty with it —
+  // otherwise a withdrawn or applied edit lingers as if still waiting.
+  deps.chatProvider.showPendingPlanEdits([]);
   deps.chatProvider.showPlan(deps.getCurrentPlan());
   deps.persistState();
 }

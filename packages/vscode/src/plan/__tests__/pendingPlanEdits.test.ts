@@ -4,18 +4,18 @@ import { processQueuedBatched, type PlanManagerDeps } from '../PlanManager';
 function deps(): PlanManagerDeps {
   return {
     session: { processQueuedMessages: vi.fn().mockResolvedValue(undefined) },
-    chatProvider: { showPlan: vi.fn(), showQueueStatus: vi.fn() },
+    chatProvider: { showPlan: vi.fn(), showPendingPlanEdits: vi.fn() },
     getCurrentPlan: () => ({ tasks: [] }),
     persistState: vi.fn(),
   } as unknown as PlanManagerDeps;
 }
 
-describe('queue status routing', () => {
-  it('empties the webview queue once the batch has applied it', async () => {
+describe('pending plan edits routing', () => {
+  it('empties the webview\'s pending edits once the batch has applied them', async () => {
     const d = deps();
 
     await processQueuedBatched(d);
 
-    expect(d.chatProvider.showQueueStatus).toHaveBeenCalledWith([]);
+    expect(d.chatProvider.showPendingPlanEdits).toHaveBeenCalledWith([]);
   });
 });
