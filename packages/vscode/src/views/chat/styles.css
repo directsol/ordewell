@@ -4424,7 +4424,11 @@ body {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-full);
   background: var(--bg-secondary);
-  color: var(--text-muted);
+  /* --text-muted (30% transparent on top of --text-secondary) falls below
+     WCAG AA (4.5:1) at this font-size in both themes, and --text-secondary
+     alone still falls short against this chip's --bg-secondary in the light
+     theme — this chip is a clickable control, not de-emphasized aside text. */
+  color: var(--text-primary);
   font-family: inherit;
   font-size: 11px;
   cursor: pointer;
@@ -4892,7 +4896,9 @@ body {
   flex-shrink: 0;
   padding: 3px 14px;
   font-size: 10px;
-  color: var(--text-muted);
+  /* --text-muted falls below WCAG AA (4.5:1) at this font-size in both
+     themes — this is a persistent status readout, not de-emphasized aside text. */
+  color: var(--text-secondary);
   background: var(--bg-primary);
   border-top: 1px solid var(--border-subtle);
 }
