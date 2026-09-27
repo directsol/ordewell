@@ -1,6 +1,6 @@
 import type {
   AiProvider, DisplayBlock, DiscoveredModel, IsolationHandoff, IsolationMergeResult, LegacyPlanState, PromptHold, RunnerId,
-  TaskIsolation, TaskModelAssignment, TaskStatus,
+  TaskIsolation, TaskModelAssignment,
 } from '@ordewell/core';
 
 /*
@@ -154,7 +154,6 @@ export type HostToWebview =
   /** The planner is working without producing anything visible; keeps the webview's watchdog quiet. */
   | { type: 'plannerLiveness' }
   | { type: 'planUpdated'; plan: LegacyPlanState }
-  | { type: 'executionStatus'; taskId: string; status: TaskStatus }
   | { type: 'taskOutput'; taskId: string; text: string }
   | { type: 'taskIdle'; taskId: string; idleSince: string | null }
   /** Every plan edit still waiting at a batch boundary, in the order it was sent. */
@@ -164,7 +163,6 @@ export type HostToWebview =
   /** Queued text the host gave back, to go above whatever is in the input. */
   | { type: 'promptUnsent'; text: string }
   | { type: 'showError'; error: string }
-  | { type: 'focusTask'; taskId: string }
   | { type: 'setModels'; models: DiscoveredModel[] }
   | { type: 'setRunners'; runners: RunnerMeta[] }
   // `unavailable` lists toggles that have no meaning for the current planner
@@ -180,7 +178,6 @@ export type HostToWebview =
   | { type: 'setPlannerBackends'; backends: PlannerBackend[]; provider: string; runner?: string; effort?: string }
   | { type: 'setModelApiMapping'; modelApiMapping: Record<string, AiProvider[]> }
   | { type: 'setModelDiscoveryErrors'; errors: Record<string, string> }
-  | { type: 'planApproved' }
   | { type: 'checkpoint'; taskId: string; taskTitle: string; summary: string }
   | { type: 'setGoal'; goal: string }
   // Per-task isolation state (ADR-0013) — sent only for tasks that have one, so

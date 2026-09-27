@@ -317,10 +317,6 @@ export default function App() {
           break;
         }
 
-        case 'executionStatus':
-          if (msg.status === 'in_progress') setIsExecuting(true);
-          break;
-
         case 'pendingPlanEdits':
           setPendingEdits(msg.edits ?? []);
           break;
@@ -335,9 +331,6 @@ export default function App() {
 
         case 'setGoal':
           setCurrentGoal(msg.goal ?? '');
-          break;
-
-        case 'focusTask':
           break;
 
         case 'setSkillToggles':
