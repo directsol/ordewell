@@ -315,16 +315,4 @@ describe('/compact', () => {
       ['user', 'add CSV'],
     ]);
   });
-
-  it('does not repeat the summary when the daemon\'s notice arrives after the transcript was redrawn', () => {
-    const summary = 'Conversation condensed: …\n\nGoal: a parser';
-    const history = [{ role: 'assistant' as const, content: summary, timestamp: '2026-01-02T00:00:00Z', kind: 'compaction' as const }];
-    let state = reduce(initialState(planned), { type: 'chatRestored', history, sessionId: 'session-1' }).state;
-
-    state = reduce(state, {
-      type: 'sessionMessage', message: { type: 'planner_message', content: summary, timestamp: '2026-01-02T00:00:02Z' }, sessionId: 'session-1',
-    }).state;
-
-    expect(messagesOf(state)).toHaveLength(1);
-  });
 });

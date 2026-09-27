@@ -473,13 +473,15 @@ describe('execution', () => {
     expect(complete).not.toHaveProperty('summary');
   });
 
-  it('notes a silent approval decision reached mid-execution', async () => {
+  it('a silent approval decision reached mid-execution lands in the conversation', async () => {
     const h = withEvents({ type: 'approval_decided', kind: 'shell_command', subject: 'npm test', scope: 'npm test', granted: false, source: 'mode' });
     await runEffect({ type: 'execute', sessionId: 's1' }, h.deps);
 
-    const notice = h.actions.find((a) => a.type === 'notice') as any;
-    expect(notice?.message).toMatch(/auto-denied/i);
-    expect(notice?.message).toContain('npm test');
+    let state: TuiState = { ...initialState(), sessionId: 's1' };
+    for (const action of h.actions) ({ state } = reduce(state, action));
+    expect(state.conversation.blocks).toMatchObject([
+      { type: 'approval', kind: 'shell_command', subject: 'npm test', status: 'denied', decidedBy: 'mode' },
+    ]);
   });
 
   it('ignores chatter it has no use for', async () => {
@@ -505,6 +507,115 @@ describe('execution', () => {
     const h = harness({ cancelPlanning: vi.fn().mockResolvedValue({ cancelled: false }) });
     await runEffect({ type: 'cancelPlanning', sessionId: 's1' }, h.deps);
     expect(h.actions).toEqual([]);
+  });
+});
+
+/**
+ * During a run there are two live subscriptions to one session, and the daemon
+ * sends every broadcast to both (see `OrchestratorPool.broadcast`). A planner
+ * turn taken while the run executes therefore arrives twice, and each copy
+ * must not be shown twice — one reply, one approval.
+ */
+describe('one planner turn on both live streams', () => {
+  interface Streams {
+    /** Deliver on the planning subscription. */
+    planning(event: unknown): void;
+    /** Deliver on the run's subscription. */
+    execution(event: unknown): void;
+    /** The daemon's actual fan-out: the same broadcast on both. */
+    both(event: unknown): void;
+  }
+
+  /** A harness whose run stream stays open while the awaited call replays a turn through `script`. */
+  function twoStreams(script: (streams: Streams) => unknown) {
+    let onPlanning: (event: unknown) => void = () => {};
+    let onExecution: (event: unknown) => void = () => {};
+    let finishExecution: () => void = () => {};
+
+    const h = harness({
+      streamPlanning: vi.fn().mockImplementation((_id: string, cb: (event: unknown) => void) => {
+        onPlanning = cb;
+        return { close: vi.fn() };
+      }),
+      streamExecution: vi.fn().mockImplementation((_id: string, cb: (event: unknown) => void, onReady?: (error?: Error) => void) => {
+        onExecution = cb;
+        onReady?.();
+        return new Promise<void>((resolve) => { finishExecution = resolve; });
+      }),
+      sendConversationMessage: vi.fn().mockImplementation(async () => script({
+        planning: (event) => onPlanning(event),
+        execution: (event) => onExecution(event),
+        both: (event) => { onExecution(event); onPlanning(event); },
+      })),
+    });
+
+    return {
+      h,
+      run: async (): Promise<void> => {
+        const running = runEffect({ type: 'execute', sessionId: 's1' }, h.deps);
+        await runEffect({ type: 'sendMessage', sessionId: 's1', message: 'use pg' }, h.deps);
+        finishExecution();
+        await running;
+      },
+    };
+  }
+
+  const conversationOf = (actions: Action[]): TuiState => {
+    let state: TuiState = { ...initialState(), sessionId: 's1' };
+    for (const action of actions) ({ state } = reduce(state, action));
+    return state;
+  };
+
+  it('shows the reply and the approval once, whichever subscription delivered them', async () => {
+    const reply = { type: 'planner_message', content: 'Which database?', timestamp: '2026-09-27T10:00:00.000Z', turnId: 't1' };
+    const decision = { type: 'approval_decided', kind: 'shell_command', subject: 'npm test', scope: 'npm test', granted: true, source: 'pre-approved' };
+
+    const { h, run } = twoStreams((s) => {
+      // The daemon commits the turn and broadcasts it before answering the
+      // REST call, so both subscriptions standing at that moment carry it.
+      for (const event of [reply, decision]) s.both(event);
+      return {
+        tasks: [],
+        conversationHistory: [{ role: 'assistant', content: 'Which database?', timestamp: '2026-09-27T10:00:00.000Z' }],
+      };
+    });
+    await run();
+
+    expect(conversationOf(h.actions).conversation.blocks).toMatchObject([
+      { type: 'message', role: 'planner', text: 'Which database?' },
+      { type: 'approval', kind: 'shell_command', subject: 'npm test', status: 'granted', decidedBy: 'pre-approved' },
+    ]);
+  });
+
+  it('still drops the copy when a research record lands between the two deliveries', async () => {
+    const reply = { type: 'planner_message', content: 'Which database?', timestamp: '10:00:00', turnId: 't1' };
+    const step = { type: 'research_step', tool: 'grep', args: '{"pattern":"db"}', toolCallId: 'c1', turnId: 't1' };
+
+    const { h, run } = twoStreams((s) => {
+      // The other subscription's copies lag behind a later record.
+      s.execution(reply);
+      s.execution(step);
+      s.planning(reply);
+      s.planning(step);
+      return { tasks: [], conversationHistory: [] };
+    });
+    await run();
+
+    const blocks = conversationOf(h.actions).conversation.blocks;
+    expect(blocks.filter((b) => b.type === 'message' && b.role === 'planner')).toHaveLength(1);
+    expect(blocks.filter((b) => b.type === 'tool')).toHaveLength(1);
+  });
+
+  it('shows the same words again when they are a new turn', async () => {
+    const { h, run } = twoStreams((s) => {
+      for (const at of ['10:00:00', '10:00:05']) {
+        s.both({ type: 'planner_message', content: 'Done.', timestamp: at, turnId: `t-${at}` });
+      }
+      return { tasks: [], conversationHistory: [] };
+    });
+    await run();
+
+    expect(conversationOf(h.actions).conversation.blocks.filter((b) => b.type === 'message' && b.role === 'planner')).toHaveLength(2);
   });
 });
 
@@ -1297,6 +1408,36 @@ describe('conversation compact effect', () => {
     expect(messageOf(h.actions, 'failed')).toMatch(/too short/);
     expect(state.status).toBe('idle');
     expect(state.busyLabel).toBe('');
+  });
+
+  it('keeps the daemon\'s late copy of the summary from landing as a spoken turn too', async () => {
+    const plan = { tasks: [], conversationHistory: condensed };
+    let onExecution: (event: unknown) => void = () => {};
+    let finishExecution: () => void = () => {};
+    const h = harness({
+      compactConversation: vi.fn().mockResolvedValue({ plan, summary: 'the state', keptMessages: 4 }),
+      streamExecution: vi.fn().mockImplementation((_id: string, cb: (event: unknown) => void, onReady?: (error?: Error) => void) => {
+        onExecution = cb;
+        onReady?.();
+        return new Promise<void>((resolve) => { finishExecution = resolve; });
+      }),
+    });
+
+    // A run is executing, so the session socket is live while the compaction
+    // runs — and the daemon broadcasts the summary on it before answering.
+    const running = runEffect({ type: 'execute', sessionId: 'session-1' }, h.deps);
+    await runEffect({ type: 'compactConversation', sessionId: 'session-1' }, h.deps);
+    onExecution({
+      type: 'planner_message', content: 'Conversation condensed: …', timestamp: '2026-01-02T00:00:00Z',
+    });
+    finishExecution();
+    await running;
+
+    let state: TuiState = initialState({ sessionId: 'session-1' });
+    for (const action of h.actions) ({ state } = reduce(state, action));
+    const messages = messagesOf(state);
+    expect(messages.filter((m) => m.role === 'planner')).toHaveLength(0);
+    expect(messages.filter((m) => m.role === 'system' && m.text === 'Conversation condensed: …')).toHaveLength(1);
   });
 });
 

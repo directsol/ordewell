@@ -87,3 +87,38 @@ own presentation; it never re-derives the conversation from raw messages.
   chose a single toggle, as in Claude Code. A per-block flag would also have to
   live in surface state keyed on block ids, growing with the conversation, for
   a distinction nobody asked for.
+
+## Amendment (2026-09-27) — Queued prompts
+
+A prompt typed while a planner turn is in flight was the TUI's alone: its
+reducer kept an array and took from both ends of it by hand, while VS Code
+locked the input for the whole turn and showed "queued" only for the
+Session's run-time edit queue — a different thing under the same word.
+
+- **One hold, in core (Q1).** `conversation/promptHold.ts` owns the queue as a
+  plain immutable list with four operations: hold, drain the oldest when a
+  turn ends, unsend the newest, and give everything back when a turn is
+  stopped. It is pure, so the TUI keeps it in reducer state and the VS Code
+  host keeps it in a field; neither re-implements the ordering.
+- **The host holds it in VS Code (Q2).** `ConversationViewHost` holds the
+  prompts the webview sends with `holdPrompt`, draws them through
+  `heldPrompts`, and answers `unsendPrompt` with `promptUnsent` — the host,
+  not the webview, decides what comes back, so a prompt already drained cannot
+  also reappear in the input. The next one goes when the host's handling of the
+  turn has returned, not on `planner_turn_ended`, which arrives while the turn
+  is still unwinding. A new or reloaded session drops the hold with the view.
+- **The same keys on both surfaces (Q3).** The input stays live during a turn.
+  Esc takes back the newest queued prompt while one is waiting; otherwise the
+  first Esc warns and a second within about two seconds stops the turn. Outside
+  a turn Esc clears the input, as before.
+- **Pending plan edits keep their queue, under their own name (Q4).** The
+  Session's run-time edit queue is unchanged in core; VS Code calls it a
+  pending plan edit in its protocol and on screen.
+
+### Rejected
+
+- **Holding in the webview.** It cannot tell whether the turn has already
+  ended on the host, and the host is where a held prompt has to be sent from.
+- **A mutable queue object in core.** The TUI reducer would have had to copy it
+  on every action to stay pure; a list with functions over it suits both
+  surfaces as is.

@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, type ConversationView } from '@ordewell/core';
+import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, type ConversationView, type PromptHold } from '@ordewell/core';
 import { emptyEditor, type EditorState } from './editor';
 
 export type RunStatus = 'idle' | 'planning' | 'researching' | 'executing';
@@ -355,7 +355,7 @@ export interface TuiState {
    * bubbles (so "did I send that?" has a visible answer) and go out one per
    * settling turn, oldest first.
    */
-  queuedPrompts: string[];
+  queuedPrompts: PromptHold;
   /**
    * A first Esc during a planner turn: the stop is armed and one more Esc
    * commits it. Cleared by `stopDisarmed`, which the runtime schedules, or by
@@ -472,7 +472,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
     handoff: null,
     overlay: null,
     pendingApprovals: [],
-    queuedPrompts: [],
+    queuedPrompts: EMPTY_HOLD,
     stopArmed: false,
     stopArmToken: 0,
     toast: '',

@@ -1058,15 +1058,27 @@ contract); *Avoid:* a finished subagent without an outcome claiming success —
 omit or failed, never guessed.
 
 **Queued prompt** — a message the user sent while a planner turn was in
-flight, held by the surface and sent as the turn's next input rather than
-bounced (the `ConversationBusyError` path stays for operations that would share
-the live context, such as a Compaction). Newest first in the hold, drawn
-newest-last onto the screen, and taken back by Esc — the newest one, restored
-to the drafting input; the planner keeps running. The TUI drains the queue on a
-turn ending.
+flight, held and sent as the next turn's input rather than bounced (the
+`ConversationBusyError` path stays for operations that would share the live
+context, such as a Compaction). One module owns it:
+`core/src/conversation/promptHold.ts`, a pure hold both surfaces keep — the TUI
+in its reducer state, VS Code on the host (`ConversationViewHost`). Prompts go
+out **oldest first**, one per settled turn; **unsend takes the newest** back
+into the drafting input, above any draft, and the planner keeps running. A
+stopped turn gives every held prompt back to the input, in the order typed; a
+new or reloaded session drops them. Drawn after the conversation, never in it:
+a prompt joins the conversation only once it is sent.
 *Avoid:* "pending message" (that names the whole queue's existence, not one
 entry); *Avoid:* treating unsend as cancel — nothing in flight is stopped; the
-prompt simply never goes.
+prompt simply never goes; *Avoid:* "queued" for a **Pending plan edit**.
+
+**Pending plan edit** — a structural edit the user sent while a *run* was live:
+the Session's run-time edit queue (`getQueuedMessages`, drained by
+`processQueuedMessages` at the next batch boundary), which VS Code lists above
+the input with a way to withdraw each one. It waits on a run, not on a planner
+turn, and is applied to the plan rather than sent as a prompt — a different
+concept from a queued prompt, which is why the surfaces name it apart.
+*Avoid:* "queued message" or "queued prompt" in UI text for it.
 
 ---
 
