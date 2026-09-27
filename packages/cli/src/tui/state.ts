@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, type ConversationView, type PromptHold } from '@ordewell/core';
+import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, type ConversationView, type PromptHold, type TurnGate } from '@ordewell/core';
 import { emptyEditor, type EditorState } from './editor';
 
 export type RunStatus = 'idle' | 'planning' | 'researching' | 'executing';
@@ -268,6 +268,8 @@ export interface TuiState {
    * `SessionMessage` and every line the TUI adds itself as a `LocalEntry`.
    */
   conversation: ConversationView;
+  /** The planner turn the conversation has open, and the one the user stopped — core's stop rule. */
+  turnGate: TurnGate;
   /**
    * Whether thinking, command and subagent blocks draw in full. One switch for
    * the whole conversation on purpose: with no block opening on its own there
@@ -447,6 +449,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
   return {
     editor: emptyEditor(),
     conversation: EMPTY_CONVERSATION,
+    turnGate: NO_TURN,
     detailAll: false,
     status: 'idle',
     busyLabel: '',

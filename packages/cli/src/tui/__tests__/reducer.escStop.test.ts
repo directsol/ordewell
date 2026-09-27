@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce } from '../reducer';
+import type { SessionMessage } from '@ordewell/core';
 import type { TuiState } from '../state';
+import { lastMessage, messagesOf } from './chat';
 
 /**
  * ESC during an in-flight planner turn: the first press arms a stop (or takes
@@ -92,5 +94,30 @@ describe('ESC while planning', () => {
 
     expect(effects).toEqual([]);
     expect(next.editor.text).toBe('');
+  });
+});
+
+describe('a stopped turn on screen', () => {
+  const turn = 't-1';
+  const hear = (state: TuiState, message: SessionMessage) => reduce(state, { type: 'sessionMessage', message, sessionId: 'session-1' }).state;
+  const escape = (state: TuiState) => reduce(state, { type: 'key', key: { name: 'escape' } }).state;
+
+  function stoppedMidReply(): TuiState {
+    let state = initialState({ status: 'planning', sessionId: 'session-1' });
+    state = hear(state, { type: 'planner_turn_started', turnId: turn, prompt: 'add a parser' });
+    state = hear(state, { type: 'planner_text_delta', turnId: turn, segmentId: 's1', text: 'Half a thou' });
+    return escape(escape(state));
+  }
+
+  it('ends at the stop, the way VS Code ends it, rather than when the daemon answers', () => {
+    expect(lastMessage(stoppedMidReply())).toMatchObject({ text: 'Half a thou', streaming: false });
+  });
+
+  it('drops what the stopped turn still streams while the daemon notices the abort', () => {
+    let state = stoppedMidReply();
+    state = hear(state, { type: 'planner_text_delta', turnId: turn, segmentId: 's1', text: 'ght, arriving late' });
+    state = hear(state, { type: 'planner_message', content: 'Half a thought, arriving late', timestamp: '', turnId: turn });
+
+    expect(messagesOf(state).map((m) => m.text)).toEqual(['add a parser', 'Half a thou']);
   });
 });

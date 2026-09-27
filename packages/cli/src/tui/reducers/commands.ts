@@ -1,5 +1,5 @@
 import {
-  ALL_PROVIDERS, EMPTY_CONVERSATION, EMPTY_HOLD, PROVIDER_PRIORITY, parseMaxParallel, runnerForProvider, type AiProvider,
+  ALL_PROVIDERS, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, PROVIDER_PRIORITY, parseMaxParallel, runnerForProvider, type AiProvider,
 } from '@ordewell/core';
 import { handoffCommand } from '../handoff';
 import { findCommand, type ParsedCommand } from '../slash';
@@ -189,6 +189,7 @@ export function newSession(state: TuiState): Step {
     tasks: [],
     planApproved: false,
     conversation: EMPTY_CONVERSATION,
+    turnGate: NO_TURN,
     selectedTask: 0,
     expandedTaskId: null,
     taskEditor: null,

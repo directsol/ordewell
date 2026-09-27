@@ -9,3 +9,7 @@ export { toolHeadline, outputPreview, outputLines } from './format';
 export type { OutputPreview } from './format';
 export { EMPTY_HOLD, holdPrompt, drainNext, unsendLatest, unsendAll, aheadOfDraft } from './promptHold';
 export type { PromptHold, TakenPrompt } from './promptHold';
+export { NO_TURN, followTurn, stopTurn } from './turnGate';
+export type { TurnGate, GatedConversation } from './turnGate';
+export { hasHiddenDetail } from './detail';
+export { taskStartedNotice } from './notices';

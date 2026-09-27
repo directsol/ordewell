@@ -1,4 +1,4 @@
-import { reduceConversation, type ConversationInput, type ConversationView, type LocalEntry } from '@ordewell/core';
+import { followTurn, reduceConversation, stopTurn, type ConversationInput, type ConversationView, type GatedConversation, type LocalEntry } from '@ordewell/core';
 import type { TuiState } from './state';
 
 /*
@@ -7,14 +7,18 @@ import type { TuiState } from './state';
  * the two match — and made safe to paint where it is drawn (see `sanitize`).
  */
 
-function fold(state: TuiState, input: ConversationInput): TuiState {
-  const conversation = reduceConversation(state.conversation, input);
-  if (conversation === state.conversation) return state;
+function show(state: TuiState, { view: conversation, gate: turnGate }: GatedConversation): TuiState {
+  const gated = turnGate === state.turnGate ? state : { ...state, turnGate };
+  if (conversation === state.conversation) return gated;
   // A new block snaps a scrolled-back pane to the tail — following the
   // conversation beats keeping the reading position. A block growing in
   // place is the same line still arriving, and leaves the pane where it is.
   const scroll = conversation.nextId > state.conversation.nextId ? 0 : state.scroll;
-  return { ...state, conversation, scroll };
+  return { ...gated, conversation, scroll };
+}
+
+function fold(state: TuiState, input: ConversationInput): TuiState {
+  return show(state, { view: reduceConversation(state.conversation, input), gate: state.turnGate });
 }
 
 /** A line the TUI adds itself: the user's prompt, a notice, an error. */
@@ -24,7 +28,12 @@ export function say(state: TuiState, role: LocalEntry['role'], text: string): Tu
 
 /** A planner message from the session, folded into the conversation. */
 export function hear(state: TuiState, message: ConversationInput): TuiState {
-  return fold(state, message);
+  return show(state, followTurn(state.conversation, state.turnGate, message));
+}
+
+/** The user stopped the planner: its turn ends on screen now, and what it still streams is dropped (core's stop rule). */
+export function cutTurn(state: TuiState): TuiState {
+  return show(state, stopTurn(state.conversation, state.turnGate));
 }
 
 /**

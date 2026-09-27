@@ -17,7 +17,7 @@ import type { AiProvider } from '@ordewell/core';
 import { isPlanRevision, planSummaryLabel, nextDock } from './planDock';
 import { DetailContext } from './detail';
 import type { HostToWebview, PendingPlanEdit, PlannerBackend, RunnerMeta, WebviewToHost } from '../../shared/protocol';
-import { EMPTY_HOLD, type PromptHold } from '@ordewell/core/plan-utils';
+import { EMPTY_HOLD, hasHiddenDetail, type PromptHold } from '@ordewell/core/plan-utils';
 import { applyConversationPatch, EMPTY_PATCHED_VIEW, patchedBlocks, type PatchedView } from '../../shared/conversationPatch';
 
 declare function acquireVsCodeApi(): {
@@ -596,11 +596,11 @@ export default function App() {
     pushSystem(`Task "${taskTitle}" cancelled.`);
   }, [pushSystem]);
 
+  // No notice of its own: the task's start comes back from the session and
+  // is announced by the host, as every start is.
   const handleForceStart = useCallback((taskId: string) => {
-    const taskTitle = planRef.current?.tasks.find((t) => t.id === taskId)?.title ?? taskId;
     vscode.postMessage({ type: 'sendSystemCommand', command: 'forceStart', taskId });
-    pushSystem(`Task "${taskTitle}" force started.`);
-  }, [pushSystem]);
+  }, []);
 
   const handleExecutePlan = useCallback(() => {
     vscode.postMessage({ type: 'sendSystemCommand', command: 'executePlan' });
@@ -613,10 +613,8 @@ export default function App() {
   }, [pushSystem]);
 
   const handleRunTask = useCallback((taskId: string) => {
-    const taskTitle = planRef.current?.tasks.find((t) => t.id === taskId)?.title ?? taskId;
     vscode.postMessage({ type: 'sendSystemCommand', command: 'runTask', taskId });
-    pushSystem(`Task "${taskTitle}" started.`);
-  }, [pushSystem]);
+  }, []);
 
   const handleMarkComplete = useCallback((taskId: string) => {
     const taskTitle = planRef.current?.tasks.find((t) => t.id === taskId)?.title ?? taskId;
@@ -848,15 +846,7 @@ export default function App() {
   const streaming = blocks.some((b) => (b.type === 'message' || b.type === 'thinking') && b.streaming);
   /** The one usage block, drawn pinned below the conversation rather than scrolling in it. */
   const usageBlock = useMemo(() => blocks.find((b) => b.type === 'usage'), [blocks]);
-  /**
-   * Whether the conversation has anything whose detail is hidden. The header
-   * toggle is the only expansion control — no block opens itself — so it is
-   * offered only when it would do something.
-   */
-  const hasDetail = useMemo(
-    () => blocks.some((b) => b.type === 'thinking' || b.type === 'tool' || b.type === 'subagent'),
-    [blocks],
-  );
+  const hasDetail = useMemo(() => hasHiddenDetail(blocks), [blocks]);
 
   /**
    * The plan, mounted once. Not a timeline entry: it is the live control surface

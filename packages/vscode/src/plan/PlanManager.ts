@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import {
   Session, LegacyPlanState, Task, flattenTasks, RunnerId, DiscoveredModel, enabledRunners,
-  validateModifiedPlan, warningsText, saveState, ModelResolver, RunnerRegistry, isCliProvider,
+  validateModifiedPlan, warningsText, saveState, ModelResolver, RunnerRegistry, isCliProvider, taskStartedNotice,
   type INotification,
 } from '@ordewell/core';
 import type { ChatViewProvider } from '../providers/ChatViewProvider';
@@ -392,6 +392,9 @@ export function handleSessionMessage(
     case 'task_output':
       deps.chatProvider.sendTaskOutput(msg.taskId, msg.text);
       break;
+    case 'task_started':
+      deps.chatProvider.conversation.note('system', taskStartedNotice(msg.title, msg.runner));
+      break;
     case 'status_update': {
       const plan = deps.getCurrentPlan();
       plan.status = deps.session.isExecuting
@@ -452,7 +455,6 @@ export function handleSessionMessage(
     case 'plan_generated':
     case 'review_approved':
     case 'task_updated':
-    case 'task_started':
     case 'planner_turn_started':
     case 'planner_turn_ended':
     case 'planner_text_retracted':

@@ -1,6 +1,6 @@
 import { aheadOfDraft, drainNext, unsendAll, unsendLatest as unsendNewest } from '@ordewell/core';
 import { plannerInFlight, type TuiState } from '../state';
-import { say } from '../transcript';
+import { cutTurn, say } from '../transcript';
 import { step, type Effect, type Step } from './shared';
 
 /**
@@ -46,7 +46,7 @@ export function stopPlanning(state: TuiState, sessionId: string): Step {
   const dismissed = state.overlay?.kind === 'approval'
     ? { ...state, overlay: null, pendingApprovals: [] }
     : state;
-  return step(queueToEditor({ ...dismissed, stopArmed: false }), [{ type: 'cancelPlanning', sessionId }]);
+  return step(queueToEditor(cutTurn({ ...dismissed, stopArmed: false })), [{ type: 'cancelPlanning', sessionId }]);
 }
 
 /**

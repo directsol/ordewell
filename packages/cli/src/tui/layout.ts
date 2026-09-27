@@ -6,7 +6,7 @@ import { taskRepoNames } from '../isolation';
 import { SLASH_COMMANDS, type SlashCategory } from './slash';
 import { isTaskRunning, planRows, plannerInFlight, selectedPlanRow, type PlanRow, type TuiState } from './state';
 import { modesForTask } from './taskAssignment';
-import { ALL_PROVIDERS, capConflictFiles, runnerForProvider, taskOrderLabel, type AiProvider, type DisplayBlock } from '@ordewell/core';
+import { ALL_PROVIDERS, capConflictFiles, hasHiddenDetail, runnerForProvider, taskOrderLabel, type AiProvider, type DisplayBlock } from '@ordewell/core';
 
 /**
  * What each pane's content actually is, and therefore how far it can scroll.
@@ -81,7 +81,7 @@ export function footerHints(state: TuiState): string[] {
   // Shown only once the conversation holds something it can expand: the
   // welcome alone must keep the footer to one row, or a 24-row terminal
   // loses the logo's last line.
-  const detailHint = state.conversation.blocks.some((b) => b.type === 'tool' || b.type === 'thinking' || b.type === 'subagent')
+  const detailHint = hasHiddenDetail(state.conversation.blocks)
     ? [state.detailAll ? 'ctrl-o collapse all' : 'ctrl-o expand all']
     : [];
   return [

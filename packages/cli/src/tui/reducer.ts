@@ -1,4 +1,4 @@
-import { EMPTY_HOLD, fromTranscript, holdPrompt } from '@ordewell/core';
+import { EMPTY_HOLD, fromTranscript, holdPrompt, taskStartedNotice } from '@ordewell/core';
 import { isolationOfPlan } from '../isolation';
 import { chatEditorRoom } from './geometry';
 import { chatScrollMax } from './layout';
@@ -102,8 +102,7 @@ export function reduce(state: TuiState, action: Action): Step {
     case 'taskStarted': {
       if (stale(state, action.sessionId)) return step(state);
       const tasks = state.tasks.map((t) => (t.id === action.taskId && !isTaskRunning(t) ? { ...t, status: 'in_progress' } : t));
-      const who = action.runner ? ` · ${action.runner}` : '';
-      const spoken = say(state, 'system', `Started "${action.title}"${who}`);
+      const spoken = say(state, 'system', taskStartedNotice(action.title, action.runner));
       return step({ ...spoken, tasks, status: 'executing', busyLabel: runLabel(tasks) });
     }
 

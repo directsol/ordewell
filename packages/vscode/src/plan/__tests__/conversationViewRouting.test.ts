@@ -49,6 +49,14 @@ describe('planner events reach the webview through the conversation view', () =>
     ]);
   });
 
+  it('announces a task starting in the same words the TUI uses', () => {
+    send({ type: 'task_started', taskId: 'x', order: 1, title: 'Add a parser', runner: 'claude-code' });
+
+    expect(screen.blocks()).toEqual([
+      expect.objectContaining({ type: 'message', role: 'system', text: 'Started "Add a parser" · claude-code' }),
+    ]);
+  });
+
   it('draws a silent approval decision as a card carrying its source', () => {
     send({ type: 'approval_decided', kind: 'shell_command', subject: 'npm test', scope: 'npm test', granted: true, source: 'remembered' });
 
