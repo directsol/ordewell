@@ -54,7 +54,7 @@ describe('GET /api/sessions/:id', () => {
     const res = await appWith(pool).request('/api/sessions/s1?workspace=/ws');
 
     expect(res.status).toBe(200);
-    const body: any = await res.json();
+    const body = (await res.json()) as { plan: { pendingTasks: Array<{ status: string }> }; meta: { id: string } };
     expect(body.plan.pendingTasks[0].status).toBe('in_progress');
     expect(body.meta.id).toBe('s1');
     expect(pool.getPlanState).toHaveBeenCalledWith('s1');
@@ -63,7 +63,7 @@ describe('GET /api/sessions/:id', () => {
   it('falls back to the saved plan when no live session holds that id', async () => {
     const res = await appWith(fakePool()).request('/api/sessions/s1?workspace=/ws');
 
-    const body: any = await res.json();
+    const body = (await res.json()) as { plan: { pendingTasks: Array<{ status: string }> } };
     expect(body.plan.pendingTasks[0].status).toBe('pending');
   });
 
@@ -96,7 +96,7 @@ describe('POST /api/sessions/:id/load', () => {
   it('returns the restored plan', async () => {
     const res = await app.request('/api/sessions/s1/load?workspace=/ws', { method: 'POST' });
 
-    const body: any = await res.json();
+    const body = (await res.json()) as { plan: { tasks: unknown[] } };
     expect(body.plan.tasks).toHaveLength(1);
   });
 
@@ -104,7 +104,7 @@ describe('POST /api/sessions/:id/load', () => {
   // GET /:id just to read it would be wasteful.
   it('returns the restored goal alongside the plan', async () => {
     const res = await app.request('/api/sessions/s1/load?workspace=/ws', { method: 'POST' });
-    expect((await res.json() as any).goal).toBe('Rate limiting');
+    expect(((await res.json()) as { goal?: string }).goal).toBe('Rate limiting');
   });
 
   it('falls back to the server cwd when no workspace is given', async () => {
@@ -122,7 +122,7 @@ describe('POST /api/sessions/:id/load', () => {
     const res = await app2.request('/api/sessions/nope/load', { method: 'POST' });
 
     expect(res.status).toBe(404);
-    expect((await res.json() as any).error).toBe('Session not found');
+    expect(((await res.json()) as { error?: string }).error).toBe('Session not found');
   });
 
   it('answers 500 when adopting fails for another reason', async () => {
@@ -146,7 +146,7 @@ describe('POST /api/sessions/:id/close', () => {
     const res = await app.request('/api/sessions/s1/close', { method: 'POST' });
 
     expect(res.status).toBe(200);
-    expect((await res.json() as any).ok).toBe(true);
+    expect(((await res.json()) as { ok?: boolean }).ok).toBe(true);
     expect(pool.destroy).toHaveBeenCalledWith('s1');
   });
 });

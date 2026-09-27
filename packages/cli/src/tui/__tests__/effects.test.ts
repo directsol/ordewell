@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, type Mock } from 'vitest';
+import { describe, it, expect, vi, type Mock, type Mocked } from 'vitest';
 import { runEffect, type EffectDeps, type OrdewellApi } from '../effects';
 import { initialState, reduce, type Action } from '../reducer';
 import type { Effect } from '../reducer';
@@ -36,7 +36,7 @@ function harness(api: Partial<OrdewellApi> = {}, over: Partial<EffectDeps> = {})
       setRunnerEnabled: vi.fn().mockResolvedValue({ ok: true }),
       getModels: vi.fn().mockResolvedValue({ models: [], providers: [] }),
       streamPlanning: vi.fn().mockReturnValue({ close: vi.fn() }),
-      streamExecution: vi.fn().mockImplementation((_id: string, _callback: (event: any) => void, onReady?: (error?: Error) => void) => {
+      streamExecution: vi.fn().mockImplementation((_id: string, _callback: (event: unknown) => void, onReady?: (error?: Error) => void) => {
         onReady?.();
         return Promise.resolve();
       }),
@@ -59,7 +59,7 @@ function harness(api: Partial<OrdewellApi> = {}, over: Partial<EffectDeps> = {})
     ...over,
   };
 
-  return { deps, actions, env, exit, api: deps.api as Record<string, any> };
+  return { deps, actions, env, exit, api: deps.api as Mocked<OrdewellApi> };
 }
 
 /** The error Node hands back when nothing is listening on the daemon's port. */
@@ -332,9 +332,9 @@ describe('planning', () => {
 
 describe('execution', () => {
   it('subscribes before execution so immediate task status updates reach the loading indicator', async () => {
-    let onEvent: ((event: any) => void) | undefined;
+    let onEvent: ((event: unknown) => void) | undefined;
     const h = harness({
-      streamExecution: vi.fn().mockImplementation((_id: string, callback: (event: any) => void, onReady?: (error?: Error) => void) => {
+      streamExecution: vi.fn().mockImplementation((_id: string, callback: (event: unknown) => void, onReady?: (error?: Error) => void) => {
         onEvent = callback;
         onReady?.();
         return Promise.resolve();
@@ -364,9 +364,9 @@ describe('execution', () => {
   });
 
   /** Drive one execution with a scripted list of daemon websocket messages. */
-  const withEvents = (...events: any[]) =>
+  const withEvents = (...events: unknown[]) =>
     harness({
-      streamExecution: vi.fn().mockImplementation((_id: string, cb: (e: any) => void, onReady?: (error?: Error) => void) => {
+      streamExecution: vi.fn().mockImplementation((_id: string, cb: (e: unknown) => void, onReady?: (error?: Error) => void) => {
         onReady?.();
         for (const event of events) cb(event);
         return Promise.resolve();
@@ -409,7 +409,7 @@ describe('execution', () => {
     const h = withEvents({ type: 'task_started', taskId: 'a', order: 1, title: 'Add route', runner: 'opencode' });
     await runEffect({ type: 'execute', sessionId: 's1' }, h.deps);
 
-    const started = h.actions.find((a) => a.type === 'taskStarted') as any;
+    const started = h.actions.find((a) => a.type === 'taskStarted') as Extract<Action, { type: 'taskStarted' }>;
     expect(started).toMatchObject({ taskId: 'a', title: 'Add route', runner: 'opencode' });
   });
 
@@ -417,7 +417,7 @@ describe('execution', () => {
     const h = withEvents({ type: 'checkpoint', taskId: 'a', taskTitle: 'Add route', summary: 'Wrote the handler' });
     await runEffect({ type: 'execute', sessionId: 's1' }, h.deps);
 
-    const notice = h.actions.find((a) => a.type === 'notice') as any;
+    const notice = h.actions.find((a) => a.type === 'notice') as Extract<Action, { type: 'notice' }>;
     expect(notice.message).toBe('· Checkpoint — Add route: Wrote the handler');
   });
 
@@ -426,7 +426,7 @@ describe('execution', () => {
     const h = withEvents({ type: 'checkpoint', taskId: 'a', taskTitle: 'Add route', summary: longSummary });
     await runEffect({ type: 'execute', sessionId: 's1' }, h.deps);
 
-    const notice = h.actions.find((a) => a.type === 'notice') as any;
+    const notice = h.actions.find((a) => a.type === 'notice') as Extract<Action, { type: 'notice' }>;
     expect(notice.message).not.toContain('\n');
     expect(notice.message).toContain('· Checkpoint — Add route:');
   });
@@ -435,7 +435,7 @@ describe('execution', () => {
     const h = withEvents({ type: 'review_needed', tasks: [] });
     await runEffect({ type: 'execute', sessionId: 's1' }, h.deps);
 
-    const notice = h.actions.find((a) => a.type === 'notice') as any;
+    const notice = h.actions.find((a) => a.type === 'notice') as Extract<Action, { type: 'notice' }>;
     expect(notice.message).toMatch(/approve/i);
   });
 
@@ -658,7 +658,7 @@ describe('task control', () => {
   it('a watched start subscribes before the request, so the task cannot start unobserved', async () => {
     const order: string[] = [];
     const h = harness({
-      streamExecution: vi.fn().mockImplementation((_id: string, onEvent: (event: any) => void, onReady?: () => void) => {
+      streamExecution: vi.fn().mockImplementation((_id: string, onEvent: (event: unknown) => void, onReady?: () => void) => {
         order.push('streamExecution');
         onReady?.();
         onEvent({ type: 'status_update', tasks: [{ id: 't1', status: 'in_progress' }] });
@@ -762,7 +762,7 @@ describe('planner switch', () => {
 
     await runEffect({ type: 'setPlanner', provider: 'claude-code' }, h.deps);
 
-    const notice = h.actions.find((a) => a.type === 'notice') as any;
+    const notice = h.actions.find((a) => a.type === 'notice') as Extract<Action, { type: 'notice' }>;
     expect(notice.message).toContain('Restored sonnet.');
   });
 
@@ -773,7 +773,7 @@ describe('planner switch', () => {
 
     await runEffect({ type: 'setPlanner', provider: 'claude-code' }, h.deps);
 
-    const notice = h.actions.find((a) => a.type === 'notice') as any;
+    const notice = h.actions.find((a) => a.type === 'notice') as Extract<Action, { type: 'notice' }>;
     expect(notice.message).toContain('default model, sonnet');
     expect(notice.message).toContain('/model');
   });
@@ -783,7 +783,7 @@ describe('planner switch', () => {
 
     await runEffect({ type: 'setPlanner', provider: 'claude-code' }, h.deps);
 
-    const notice = h.actions.find((a) => a.type === 'notice') as any;
+    const notice = h.actions.find((a) => a.type === 'notice') as Extract<Action, { type: 'notice' }>;
     expect(notice.message).toContain('Pick a model with /model.');
   });
 });
@@ -871,7 +871,7 @@ describe('catalogs and sessions', () => {
     });
     await runEffect({ type: 'loadModels' }, h.deps);
 
-    const loaded = h.actions.find((a) => a.type === 'modelsLoaded') as any;
+    const loaded = h.actions.find((a) => a.type === 'modelsLoaded') as Extract<Action, { type: 'modelsLoaded' }>;
     expect(loaded.models[0]).toMatchObject({ id: 'a/b', label: 'A B' });
   });
 
@@ -890,7 +890,7 @@ describe('catalogs and sessions', () => {
     });
     await runEffect({ type: 'loadModels' }, h.deps);
 
-    const loaded = h.actions.find((action) => action.type === 'modelsLoaded') as any;
+    const loaded = h.actions.find((action) => action.type === 'modelsLoaded') as Extract<Action, { type: 'modelsLoaded' }>;
     expect(loaded.models[0]).toMatchObject({
       id: 'gpt-5',
       runners: ['codex'],
@@ -911,8 +911,8 @@ describe('catalogs and sessions', () => {
     });
     await runEffect({ type: 'loadModels' }, h.deps);
 
-    const loaded = h.actions.find((a) => a.type === 'modelsLoaded') as any;
-    expect(loaded.orchestratorModels[0]).toMatchObject({
+    const loaded = h.actions.find((a) => a.type === 'modelsLoaded') as Extract<Action, { type: 'modelsLoaded' }>;
+    expect(loaded.orchestratorModels?.[0]).toMatchObject({
       id: 'deepseek/v4',
       label: 'DeepSeek V4',
       provider: 'OpenRouter',
@@ -927,7 +927,7 @@ describe('catalogs and sessions', () => {
     });
     await runEffect({ type: 'loadModels' }, h.deps);
 
-    const loaded = h.actions.find((a) => a.type === 'modelsLoaded') as any;
+    const loaded = h.actions.find((a) => a.type === 'modelsLoaded') as Extract<Action, { type: 'modelsLoaded' }>;
     expect(loaded.providers).toEqual(['openrouter', 'gemini']);
   });
 
@@ -959,7 +959,7 @@ describe('catalogs and sessions', () => {
     const h = harness();
     await runEffect({ type: 'loadSession', sessionId: 's9' }, h.deps);
 
-    const notice = h.actions.find((a) => a.type === 'notice') as any;
+    const notice = h.actions.find((a) => a.type === 'notice') as Extract<Action, { type: 'notice' }>;
     expect(notice.message).toMatch(/Rate limiting/);
   });
 
@@ -1003,7 +1003,7 @@ describe('failures', () => {
     const h = harness({ markTaskComplete: vi.fn().mockRejectedValue(new Error('Session not found')) });
     await runEffect({ type: 'taskAction', sessionId: 's1', taskId: 't1', action: 'complete' }, h.deps);
 
-    const failure = h.actions.find((a) => a.type === 'failed') as any;
+    const failure = h.actions.find((a) => a.type === 'failed') as Extract<Action, { type: 'failed' }>;
     expect(failure.message).toContain('/sessions');
     expect(failure.message).not.toMatch(/re-?plan/i);
   });

@@ -61,7 +61,7 @@ async function rejectStrayIds(runner: string, ids: string[], api: ApiClient): Pr
   let discovered: string[] = [];
   try {
     const { modelsByRunner } = await api.getModels();
-    discovered = (modelsByRunner?.[runner] ?? []).map((m: any) => String(m.modelId ?? m.id));
+    discovered = (modelsByRunner?.[runner] ?? []).map((m) => String(m.modelId));
   } catch {
     return;
   }

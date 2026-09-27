@@ -2,7 +2,8 @@ import http from 'http';
 import WebSocket from 'ws';
 import { DEFAULT_PORT } from './daemon';
 import { bearerHeaderValue, readDaemonToken, tokenSubprotocols, mintSessionId } from '@ordewell/core';
-import type { SerializedPlan, DiscoveredModel, SessionMessage, SessionNotice, RewindTarget, IsolationMergeResult } from '@ordewell/core';
+import type { SerializedPlan, DiscoveredModel, SessionMessage, SessionNotice, RewindTarget, IsolationMergeResult, SessionMeta } from '@ordewell/core';
+import type { RawCatalog } from './catalog';
 
 const DEFAULT_HTTP_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -54,15 +55,7 @@ export interface RunnersResponse {
   orchestratorModel: string;
 }
 
-export interface SessionMeta {
-  id: string;
-  goal: string;
-  runners: string[];
-  taskCount: number;
-  status: string;
-  createdAt: string;
-  updatedAt: string;
-}
+export type { SessionMeta };
 
 export interface TaskStatus {
   id: string;
@@ -245,21 +238,8 @@ export class ApiClient {
   }
 
   /** The full provider catalog the daemon has discovered (used by the TUI model picker). */
-  async getModels(): Promise<{
-    models: any[];
-    modelsByRunner?: Record<string, any[]>;
-    modesByRunner?: Record<string, any[]>;
-    providers?: string[];
-    orchestratorModels?: any[];
-    providerErrors?: Record<string, string>;
-  }> {
-    const res = await this.httpRequest<{
-      models: any[];
-      modelsByRunner?: Record<string, any[]>;
-      providers?: string[];
-      orchestratorModels?: any[];
-      providerErrors?: Record<string, string>;
-    } & ErrorResponse>('GET', '/api/models');
+  async getModels(): Promise<RawCatalog> {
+    const res = await this.httpRequest<RawCatalog & ErrorResponse>('GET', '/api/models');
     if (res.status !== 200) {
       throw new Error(res.data?.error || 'Failed to fetch models');
     }
@@ -374,9 +354,9 @@ export class ApiClient {
    * until the session is adopted there is no orchestrator behind it, so
    * execute/retry/cancel answer "Session not found".
    */
-  async adoptSession(sessionId: string, workspace?: string): Promise<{ plan: any; goal: string }> {
+  async adoptSession(sessionId: string, workspace?: string): Promise<{ plan: SerializedPlan; goal: string }> {
     const qs = workspace ? `?workspace=${encodeURIComponent(workspace)}` : '';
-    const res = await this.httpRequest<{ plan: any; goal?: string } & ErrorResponse>('POST', `/api/sessions/${sessionId}/load${qs}`);
+    const res = await this.httpRequest<{ plan: SerializedPlan; goal?: string } & ErrorResponse>('POST', `/api/sessions/${sessionId}/load${qs}`);
     if (res.status !== 200) {
       throw new Error(res.data?.error || 'Failed to load session');
     }

@@ -3,7 +3,7 @@ import { ApiClient, ensureDaemonOwned, findFreePort, resolvePort, stopDaemon } f
 import { flag, saveLastSession } from '../utils';
 import { findEnvFile, writeEnvVar } from '../utils/env';
 import { createApp } from './app';
-import { runEffect, type OrdewellApi } from './effects';
+import { runEffect } from './effects';
 import { registerSkillCommands } from './slash';
 import { openTerminal } from './terminal';
 import { openTaskTerminal } from './terminalLauncher';
@@ -51,7 +51,7 @@ export async function handleTui(subArgs: string[]): Promise<void> {
   // Not const: a daemon we did not start can die and be replaced by one we
   // did, and only the one we started may be stopped on the way out.
   let owned = ownedAtLaunch;
-  const api = new ApiClient(port, workspace) as unknown as OrdewellApi;
+  const api = new ApiClient(port, workspace);
 
   // eslint-disable-next-line prefer-const
   let terminal: ReturnType<typeof openTerminal> | undefined;

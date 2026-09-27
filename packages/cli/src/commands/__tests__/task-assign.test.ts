@@ -2,7 +2,12 @@ import { describe, it, expect, vi } from 'vitest';
 import http from 'http';
 import { ApiClient } from '../../apiClient';
 
-interface Recorded { method: string; url: string; body: any }
+interface RecordedBody {
+  assignedModel?: { modelId?: string; thinkingEffort?: string | null };
+  thinkingEffort?: string | null;
+  [key: string]: unknown;
+}
+interface Recorded { method: string; url: string; body: RecordedBody }
 
 const PLAN = {
   tasks: [
@@ -131,7 +136,7 @@ describe('ordewell task-effort', () => {
     // `null`, not absent: JSON drops undefined, and the stale persisted
     // top-level effort has to be cleared explicitly.
     expect(updates(d.sent)[0].body.thinkingEffort).toBeNull();
-    expect(updates(d.sent)[0].body.assignedModel.thinkingEffort).toBeUndefined();
+    expect(updates(d.sent)[0].body.assignedModel?.thinkingEffort).toBeUndefined();
     d.close();
   });
 

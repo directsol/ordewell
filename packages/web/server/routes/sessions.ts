@@ -37,10 +37,11 @@ export function sessionsRoute(pool: OrchestratorPool) {
       const id = c.req.param('id');
       const plan = pool.adoptSavedSession(id, ws);
       return c.json({ ok: true, plan, goal: pool.getGoal(id) });
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (err instanceof WorkspaceNotFoundError) return c.json({ error: err.message }, 400);
-      const status = err?.message === 'Session not found' ? 404 : 500;
-      return c.json({ error: err?.message ?? 'Failed to load session' }, status as any);
+      const message = err instanceof Error ? err.message : undefined;
+      const status = message === 'Session not found' ? 404 : 500;
+      return c.json({ error: message ?? 'Failed to load session' }, status);
     }
   });
 
