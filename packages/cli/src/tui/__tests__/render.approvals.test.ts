@@ -41,6 +41,29 @@ describe('approval overlay rendering', () => {
     expect(out).toMatch(/n den(y|ies)/i);
   });
 
+  it('names the take-back instead once a prompt is queued, when the first esc unsends it', () => {
+    const out = screenWith(SHELL, {
+      status: 'planning',
+      sessionId: 's1',
+      queuedPrompts: ['a parked thought'],
+    });
+    expect(out).toMatch(/esc takes back the queued prompt/i);
+    expect(out).not.toMatch(/esc twice stops planning/i);
+  });
+
+  it('keeps the take-back hint legible at narrow and wide widths', () => {
+    for (const cols of [40, 120]) {
+      const out = screenWith(SHELL, { status: 'planning', sessionId: 's1', queuedPrompts: ['held'], cols });
+      expect(out.replace(/\s+/g, ' ')).toMatch(/esc takes back the queued prompt/i);
+    }
+  });
+
+  it('keeps the deny wording while no turn is in flight', () => {
+    const out = screenWith(SHELL, { queuedPrompts: ['held but not a turn'] });
+    expect(out).toMatch(/n or esc denies/i);
+    expect(out).not.toMatch(/esc twice stops planning/i);
+  });
+
   it('labels a path request as leaving the workspace', () => {
     const out = screenWith({ id: 'ap-2', kind: 'external_path', subject: '/tmp/dump/a.log', scope: '/tmp/dump/*' });
     expect(out).toContain('/tmp/dump/a.log');

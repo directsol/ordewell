@@ -1,4 +1,4 @@
-import type { Effect, Step } from './reducer';
+import type { Effect, Step } from './reducers/shared';
 import { say } from './transcript';
 import { sanitize } from './ansi';
 import type { Key } from './keys';

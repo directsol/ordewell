@@ -1,0 +1,136 @@
+import type { ConversationMessage, PlannerUsage, ResearchLogEntry, SessionMessage } from '@ordewell/core';
+import type { Key } from '../keys';
+import type {
+  HandoffView, LandedTaskView, ModelView, ModeView, RewindTargetView, RunnerView, SessionView,
+  TaskIsolationView, TuiState,
+} from '../state';
+import { say } from '../transcript';
+
+/** Side effects the runtime performs; the reducer itself stays pure. */
+export type Effect =
+  /** `allowInit` is only ever set on the retry after the user confirms the "initialize this as a new workspace?" prompt — see `workspaceNeedsInit`. */
+  | { type: 'startConversation'; goal: string; allowInit?: boolean }
+  | { type: 'sendMessage'; sessionId: string; message: string }
+  | { type: 'command'; name: string; action: 'on' | 'off' }
+  | { type: 'setModel'; modelId: string }
+  | { type: 'setPlanner'; provider: string }
+  | { type: 'setPlannerEffort'; effort: string }
+  | { type: 'setApiKey'; provider: string; key: string }
+  | { type: 'setAllowlist'; runner: string; modelIds: string[] }
+  | { type: 'setRunnerEnabled'; runner: string; enabled: boolean }
+  /** The runner picker's whole confirmed set, so one visit reports one result. */
+  | { type: 'setRunners'; changes: { runner: string; enabled: boolean }[]; message: string }
+  | { type: 'setAutonomous'; enabled: boolean }
+  | { type: 'setMaxParallel'; limit: number }
+  | { type: 'setMouseCapture'; enabled: boolean }
+  /** A finished selection, already clipped to its pane and stripped of paint. */
+  | { type: 'copyText'; text: string }
+  | { type: 'loadModels' }
+  | { type: 'loadSessions' }
+  | { type: 'loadSession'; sessionId: string }
+  | { type: 'deleteSession'; sessionId: string }
+  | { type: 'forkConversation'; sessionId: string }
+  /** `pick` is `/rewind <n>`: the messages are wanted to quote message n in the confirmation, not to fill the picker. */
+  | { type: 'loadRewindTargets'; sessionId: string; pick?: number }
+  | { type: 'rewindConversation'; sessionId: string; index: number }
+  | { type: 'compactConversation'; sessionId: string }
+  | { type: 'isolationReviewDiff'; sessionId: string }
+  /** `branch` is only for the words the result is reported in; `repaired` likewise (ADR-0015). */
+  | { type: 'isolationMerge'; sessionId: string; branch: string; group?: boolean; repaired?: LandedTaskView[] }
+  | { type: 'isolationDiscard'; sessionId: string; branch: string }
+  | { type: 'isolationCleanup'; sessionId: string; branch: string }
+  /** Replays a run a dirty tree parked; `stash` puts tracked changes aside first, `shared` runs in the working tree this once. */
+  | { type: 'isolationContinue'; sessionId: string; mode: 'stash' | 'shared' }
+  | { type: 'resolveConflict'; sessionId: string; taskId: string }
+  | { type: 'saveSession'; sessionId: string }
+  | { type: 'closeSession'; sessionId: string }
+  | { type: 'execute'; sessionId: string }
+  | { type: 'stopExecution'; sessionId: string }
+  | { type: 'cancelPlanning'; sessionId: string }
+  | { type: 'processQueued'; sessionId: string }
+  /** Schedules the stop-arm expiry; the runtime owns the timer, not the reducer. */
+  | { type: 'disarmStop'; afterMs: number; arm: number }
+  /** `watch` asks the runtime to hold the execution stream open for this action — see `taskActionEffect`. */
+  | { type: 'taskAction'; sessionId: string; taskId: string; action: TaskAction; watch?: boolean }
+  | { type: 'addTask'; sessionId: string; title: string }
+  | { type: 'updateTask'; sessionId: string; taskId: string; changes: Record<string, unknown>; message: string }
+  | { type: 'removeTask'; sessionId: string; taskId: string }
+  | { type: 'openTaskTerminal'; sessionId: string; taskId: string }
+  | { type: 'respondApproval'; sessionId: string; approvalId: string; granted: boolean }
+  /** Startup refreshes silently; only a typed `/refresh` sets `announce`. */
+  | { type: 'refresh'; announce?: boolean }
+  | { type: 'exit' };
+
+export type TaskAction = 'complete' | 'uncomplete' | 'skip' | 'retry' | 'cancel' | 'force-start';
+
+export type Action =
+  | { type: 'key'; key: Key }
+  | { type: 'sessionStarted'; sessionId: string; goal: string }
+  | { type: 'sessionCleared' }
+  /** A saved session's records, which the conversation is rebuilt from as a reload would show it. */
+  | { type: 'chatRestored'; history: ConversationMessage[]; researchLog?: ResearchLogEntry[]; plannerUsage?: PlannerUsage; sessionId?: string }
+  | { type: 'planUpdated'; plan: unknown; sessionId?: string }
+  /** One planner message from the session, as it came: core's conversation view decides what it shows. */
+  | { type: 'sessionMessage'; message: SessionMessage; sessionId?: string }
+  | { type: 'taskStarted'; taskId: string; title: string; runner?: string; sessionId?: string }
+  | { type: 'taskStatus'; taskId: string; status: string; sessionId?: string }
+  | { type: 'tasksStatus'; updates: Record<string, { status: string; idleSince?: string | null; isolation?: TaskIsolationView }>; sessionId?: string }
+  | { type: 'isolationBlocked'; message: string; repos?: string[]; sessionId?: string }
+  | { type: 'isolationHandoff'; handoff: HandoffView; sessionId?: string }
+  | { type: 'handoffDiff'; diff: string; sessionId?: string }
+  /** The run and its record are gone; nothing is left to hand off or to mark. */
+  | { type: 'runCleared'; sessionId?: string }
+  | { type: 'queueReady'; sessionId?: string }
+  /** The scheduled expiry of an armed stop; the arm simply lapses. */
+  | { type: 'stopDisarmed'; arm: number }
+  | { type: 'executionComplete'; summary?: { total: number; completed: number; failed: number }; stopped?: boolean; sessionId?: string }
+  | { type: 'settingsLoaded'; settings: Record<string, unknown> }
+  | { type: 'modelsLoaded'; models: ModelView[]; orchestratorModels?: ModelView[]; providers?: string[]; providerErrors?: Record<string, string>; modesByRunner?: Record<string, ModeView[]> }
+  | { type: 'sessionsLoaded'; sessions: SessionView[] }
+  | { type: 'sessionForked'; sessionId: string; goal: string }
+  | { type: 'inputPrefilled'; text: string; sessionId?: string }
+  | { type: 'rewindTargetsLoaded'; targets: RewindTargetView[]; sessionId?: string; pick?: number }
+  | { type: 'runnersLoaded'; runners: RunnerView[]; orchestratorModel?: string }
+  | { type: 'failed'; message: string }
+  /** The workspace has no project marker — offer to initialize it rather than just failing. */
+  | { type: 'workspaceNeedsInit'; goal: string; workspace: string }
+  | { type: 'notice'; message: string }
+  | { type: 'resize'; rows: number; cols: number }
+  | { type: 'spinnerTick' };
+
+export interface Step {
+  state: TuiState;
+  effects: Effect[];
+}
+
+export function step(state: TuiState, effects: Effect[] = []): Step {
+  return { state, effects };
+}
+
+export const fail = (state: TuiState, message: string): Step => step(say(state, 'error', message));
+
+/**
+ * A planner/execution result carries the session id it was produced for. A
+ * turn from a session that `/new` has since replaced must not touch the
+ * fresh state, even though its promise/socket callback fires afterwards.
+ */
+export const stale = (state: TuiState, sessionId: string | undefined): boolean =>
+  sessionId !== undefined && sessionId !== state.sessionId;
+
+/** Keeps a value inside `0..max`, where every offset this package clamps shares its zero. */
+export function clamp(value: number, max: number): number {
+  return Math.max(0, Math.min(max, value));
+}
+
+/** Keeps the cursor on a real row; an empty list has row 0 as its only resting place. */
+export function clampSelection(index: number, rows: number): number {
+  return Math.max(0, Math.min(index, rows - 1));
+}
+
+/** Commands that only make sense once a plan exists. */
+export function withSession(state: TuiState, run: (sessionId: string) => Step): Step {
+  if (!state.sessionId) {
+    return fail(state, 'No active plan — describe a goal first, or load a session with /sessions.');
+  }
+  return run(state.sessionId);
+}

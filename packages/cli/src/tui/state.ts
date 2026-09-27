@@ -386,6 +386,15 @@ export const isTaskRunning = (task: { status: string }): boolean =>
  */
 export const anyTaskRunning = (state: TuiState): boolean => state.tasks.some(isTaskRunning);
 
+/**
+ * A planner turn the user can still call off — research rounds included.
+ * Every in-flight question and hint is asked through here, so a new status
+ * that counts as planning cannot be missed in one place and honoured in
+ * another.
+ */
+export const plannerInFlight = (state: TuiState): boolean =>
+  state.status === 'planning' || state.status === 'researching';
+
 /** One navigable row of the plan pane — a top-level task, or a subtask shown under an open parent. */
 export interface PlanRow {
   task: TaskView;

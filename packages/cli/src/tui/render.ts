@@ -9,7 +9,7 @@ import { chatEditorRoom, chatPaneWidth, paneColumns, planPaneWidth } from './geo
 import { diffRoom, handoffActions } from './handoff';
 import { handoffBase, handoffBranch, isRepoGroup, repoResultLines } from '../isolation';
 import { capConflictFiles } from '@ordewell/core';
-import { SKILL_IDS, visibleItems, type Overlay, type PickerState, type TuiState } from './state';
+import { SKILL_IDS, plannerInFlight, visibleItems, type Overlay, type PickerState, type TuiState } from './state';
 
 /**
  * The whole frame as `state.rows` lines, each at most `state.cols` columns
@@ -413,8 +413,12 @@ function renderOverlay(state: TuiState, rows: number, cols: number): string[] {
         // ESC is not "deny" while a turn is in flight — it kills the turn and
         // takes this prompt with it. Offering it as the deny key there would
         // teach the wrong thing about the most destructive key on the sheet.
-        style.grey(state.status === 'planning' || state.status === 'researching'
-          ? 'y or enter allows · n denies · esc twice stops planning'
+        // With a prompt queued the first ESC unsends that instead, so the hint
+        // names the take-back rather than the twice-to-stop.
+        style.grey(plannerInFlight(state)
+          ? state.queuedPrompts.length > 0
+            ? 'y or enter allows · n denies · esc takes back the queued prompt'
+            : 'y or enter allows · n denies · esc twice stops planning'
           : 'y or enter allows · n or esc denies'),
       ],
       rows,

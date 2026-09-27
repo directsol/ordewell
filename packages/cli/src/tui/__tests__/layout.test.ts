@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { capConflictFiles } from '@ordewell/core';
 import { initialState, reduce, type Step } from '../reducer';
 import { render } from '../render';
-import { bodyRows, chatBodyLines, chatLayout, chatScrollMax, planOffset, planScrollExtent } from '../layout';
+import { stripAnsi, style } from '../ansi';
+import { bodyRows, chatBodyLines, chatLayout, chatScrollMax, footerHints, helpLayout, planOffset, planScrollExtent } from '../layout';
 import type { TaskView, TuiState } from '../state';
 import { chatOf } from './chat';
 
@@ -242,5 +243,62 @@ describe('plan pane — conflict row', () => {
     const state = initialState({ sessionId: 's1', rows: 20, cols: 200, tasks: [conflictTask({})], focus: 'plan' });
 
     expect(plain(state)).toContain('⚠ merge conflict — its work is kept on its own branch');
+  });
+});
+
+describe('the armed stop cue', () => {
+  const armed = (cols: number): TuiState =>
+    initialState({ sessionId: 's1', status: 'planning', stopArmed: true, rows: 24, cols });
+
+  it('renders once, as the red status row, at narrow and wide widths', () => {
+    style.enabled = true;
+    try {
+      for (const cols of [40, 120]) {
+        const frame = render(armed(cols)).join('\n');
+        expect(frame.match(/Press Esc again to stop/g) ?? []).toHaveLength(1);
+        expect(frame).not.toContain('esc again to stop');
+        expect(frame).toContain('\x1b[31mPress Esc again to stop');
+      }
+    } finally {
+      style.enabled = false;
+    }
+  });
+
+  it('leaves the footer naming what one esc does instead of repeating the armed cue', () => {
+    const hints = footerHints(armed(80));
+    expect(hints).not.toContain('esc again to stop');
+    expect(hints).toContain('esc ×2 stop planning');
+  });
+
+  it('keeps the footer height steady across arming, so the body does not move', () => {
+    const unarmed = initialState({ sessionId: 's1', status: 'planning', rows: 24, cols: 80 });
+    expect(bodyRows(armed(80))).toBe(bodyRows(unarmed));
+  });
+});
+
+describe('the help sheet footer', () => {
+  const helpFooter = (): string => stripAnsi(helpLayout(200, 120).lines.join('\n'));
+
+  it('names the keys that actually work in the panes', () => {
+    const footer = helpFooter();
+    expect(footer).toContain('tab switches panes');
+    expect(footer).toContain('pgup/pgdn scroll');
+    expect(footer).toContain('ctrl-o toggles full detail');
+    expect(footer).toContain('esc takes back a queued prompt');
+  });
+
+  it('drops the arrow keys and the removed per-block expansion mentions', () => {
+    const footer = helpFooter();
+    expect(footer).not.toContain('↑↓');
+    expect(footer).not.toContain('alt-enter');
+    expect(footer).not.toMatch(/alt[+-]?(↑|↓)/);
+  });
+
+  it('renders within narrow and wide frames', () => {
+    for (const cols of [40, 120]) {
+      const lines = render(initialState({ rows: 24, cols, overlay: { kind: 'help', scroll: 0 } }));
+      expect(lines).toHaveLength(24);
+      expect(lines.every((line) => stripAnsi(line).length <= cols)).toBe(true);
+    }
   });
 });
