@@ -31,10 +31,11 @@ Meanwhile paths were not confined at all. `PoolFileSystem.resolve()` was `path.i
 
 Path confinement moved into `BaseFileSystem` as template methods: every public method resolves and authorizes before delegating to an adapter `*Impl`, which therefore only ever receives an absolute, approved path. Out-of-workspace access is an `ask`, scoped to the containing directory.
 
-Both halves have to agree on what the shell will actually do with a string, or the confinement leaks. Two ways it did:
+Both halves have to agree on what the shell will actually do with a string, or the confinement leaks. Three ways it did:
 
 - **Quoting is the shell's, not ours.** Splitting on a bare `/[|;&]/` made `rg "error|warn" src` two segments — so the planner's commonest search asked for approval, scoped to the nonsense binary `warn"` — while leaving quotes on argument tokens hid `cat "/etc/passwd"` from the path check entirely (`looksLikePath('"/etc/passwd"')` is false). One lexer now owns both answers.
 - **`~` is expanded because the shell expands it.** `path.resolve(root, '~/.ssh/id_rsa')` yields `<root>/~/.ssh/id_rsa`, which reads as *inside* the workspace, so an auto-tier `cat ~/.ssh/id_rsa` passed confinement unprompted and then read the real file. `resolveWithin` expands `~` before resolving.
+- **A path is anything that climbs, not only what starts with `../`.** `looksLikePath` recognised a relative path by its first characters, so `cat src/../../etc/passwd` — which the shell resolves through a directory that exists — was a plain name to the check and read the file unprompted. An argument with a `..` segment anywhere is now a path (2026-09-27).
 
 `ApprovalPolicy` decides and remembers; `PendingApprovals` parks the promise; `Session` announces on the **existing broadcast seam** and exposes `resolveApproval(id, granted)`. Every surface answers through that one call.
 
