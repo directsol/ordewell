@@ -184,6 +184,17 @@ function taskDigest(output: string): string {
   return inner ? inner[1] : output;
 }
 
+/**
+ * `read`/`write`/`edit` results come back wrapped in a `<path>`/`<type>`/`<content>`
+ * envelope instead of plain text (unlike `bash`'s stdout), so the row's `⎿`
+ * preview would otherwise show those tags verbatim. A tool whose output has no
+ * `<content>` tag — bash, glob, grep — is returned unchanged.
+ */
+function unwrapFileToolOutput(output: string): string {
+  const inner = output.match(/<content>\n?([\s\S]*?)\n?<\/content>/);
+  return inner ? inner[1] : output;
+}
+
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -471,7 +482,7 @@ export class OpenCodeAdapter implements AgentAdapter {
         type: 'tool_result',
         id: callId,
         name,
-        output: part.state?.output ?? part.state?.error ?? '',
+        output: unwrapFileToolOutput(part.state?.output ?? part.state?.error ?? ''),
         success: status === 'completed',
         subagentId,
       });
