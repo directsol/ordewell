@@ -1,5 +1,6 @@
 import {
-  ALL_PROVIDERS, CLI_PROVIDERS, EMPTY_CONVERSATION, fromTranscript, parseMaxParallel, PROVIDER_PRIORITY, runnerForProvider,
+  aheadOfDraft, ALL_PROVIDERS, CLI_PROVIDERS, drainNext, EMPTY_CONVERSATION, EMPTY_HOLD, fromTranscript, holdPrompt,
+  parseMaxParallel, PROVIDER_PRIORITY, runnerForProvider, unsendAll, unsendLatest as unsendNewest,
   type AiProvider, type ConversationMessage, type DisplayBlock, type PlannerUsage, type ResearchLogEntry,
   type SessionMessage,
 } from '@ordewell/core';
@@ -144,17 +145,17 @@ function step(state: TuiState, effects: Effect[] = []): Step {
  * or a plan refresh running alongside a run, is not a settling turn.
  */
 function drainQueue(state: TuiState, settled: TuiState): Step {
-  const [next, ...rest] = state.queuedPrompts;
+  const next = drainNext(state.queuedPrompts);
   // The arm aimed at the turn that just ended lapses with it — the next turn
   // starts unarmed, and its first Esc has to earn the stop again.
   const ended = disarmStop(settled);
-  if (next === undefined) return step(ended);
-  const spoken = say(ended, 'user', next);
+  if (!next) return step(ended);
+  const spoken = say(ended, 'user', next.text);
   const effect: Effect | null = state.sessionId
-    ? { type: 'sendMessage', sessionId: state.sessionId, message: next }
+    ? { type: 'sendMessage', sessionId: state.sessionId, message: next.text }
     : null;
   return step(
-    { ...spoken, queuedPrompts: rest, status: 'planning', busyLabel: '' },
+    { ...spoken, queuedPrompts: next.rest, status: 'planning', busyLabel: '' },
     effect ? [effect] : [],
   );
 }
@@ -246,7 +247,7 @@ export function reduce(state: TuiState, action: Action): Step {
         sessionId: null,
         goal: '',
         pendingApprovals: [],
-        queuedPrompts: [],
+        queuedPrompts: EMPTY_HOLD,
         stopArmed: false,
         overlay: state.overlay?.kind === 'approval' ? null : state.overlay,
       });
@@ -426,7 +427,7 @@ export function reduce(state: TuiState, action: Action): Step {
         busyLabel: '',
         planApproved: false,
         pendingApprovals: [],
-        queuedPrompts: [],
+        queuedPrompts: EMPTY_HOLD,
         stopArmed: false,
         overlay: state.overlay?.kind === 'approval' ? null : state.overlay,
       });
@@ -993,9 +994,9 @@ function stopPlanning(state: TuiState, sessionId: string): Step {
  * left — so this is always replacing an empty box.
  */
 function queueToEditor(state: TuiState): TuiState {
-  if (state.queuedPrompts.length === 0) return state;
-  const text = state.queuedPrompts.join('\n');
-  return { ...state, queuedPrompts: [], editor: { ...state.editor, text, cursor: text.length } };
+  const all = unsendAll(state.queuedPrompts);
+  if (!all) return state;
+  return { ...state, queuedPrompts: all.rest, editor: { ...state.editor, text: all.text, cursor: all.text.length } };
 }
 
 /**
@@ -1005,14 +1006,14 @@ function queueToEditor(state: TuiState): TuiState {
  * the user was composing rather than joining its history.
  */
 function unsendLatest(state: TuiState): Step {
-  const [latest, ...rest] = [...state.queuedPrompts].reverse();
-  const draft = state.editor.text;
-  const text = draft ? `${latest}\n${draft}` : latest;
+  const latest = unsendNewest(state.queuedPrompts);
+  if (!latest) return step(state);
+  const text = aheadOfDraft(latest.text, state.editor.text);
   return step({
     ...state,
-    queuedPrompts: rest.reverse(),
+    queuedPrompts: latest.rest,
     stopArmed: false,
-    editor: { ...state.editor, text, cursor: latest.length, historyIndex: state.editor.history.length, draft: '' },
+    editor: { ...state.editor, text, cursor: latest.text.length, historyIndex: state.editor.history.length, draft: '' },
   });
 }
 
@@ -1562,7 +1563,7 @@ function submit(state: TuiState): Step {
   // otherwise show a message the daemon has not even received yet, and the
   // first turn's registration race turns a second prompt into a 404.
   if (plannerInFlight(state)) {
-    return step({ ...cleared, queuedPrompts: [...state.queuedPrompts, text] });
+    return step({ ...cleared, queuedPrompts: holdPrompt(state.queuedPrompts, text) });
   }
 
   const spoken = say(cleared, 'user', text);
@@ -1815,7 +1816,7 @@ function newSession(state: TuiState): Step {
     // Prompts belong to the session that raised them; the old planner is gone
     // and its pending requests deny on their own timeout.
     pendingApprovals: [],
-    queuedPrompts: [],
+    queuedPrompts: EMPTY_HOLD,
     stopArmed: false,
     overlay: state.overlay?.kind === 'approval' ? null : state.overlay,
   }, closeEffects);

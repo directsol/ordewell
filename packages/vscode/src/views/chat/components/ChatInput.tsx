@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import type { AiProvider } from '@ordewell/core';
-import type { QueuedPrompt } from '../../../shared/protocol';
+import { aheadOfDraft } from '@ordewell/core/plan-utils';
+import type { PendingPlanEdit } from '../../../shared/protocol';
 
 // Core owns the union; a hand-copied duplicate diverged the moment ADR-0009
 // added the three harness planners.
@@ -38,11 +39,15 @@ interface ChatInputProps {
   configuredProviders?: ApiProvider[];
   isProcessing?: boolean;
   onStop?: () => void;
+  /** Esc with no suggestion list open. True when the key was spent; otherwise it clears the input. */
+  onEscape?: () => boolean;
   disabledReason?: string;
-  /** Prompts the host is holding until the next task batch. */
-  queued?: QueuedPrompt[];
-  onRemoveQueued?: (id: string) => void;
+  /** Plan edits the host is holding until the next task batch. */
+  pendingEdits?: PendingPlanEdit[];
+  onRemovePendingEdit?: (id: string) => void;
   prefill?: string;
+  /** Queued text taken back from the host; it lands above the current draft. */
+  unsent?: { text: string; seq: number } | null;
   /** Discovered skills (global ~/.ordewell/skills/ + workspace .ordewell/skills/) merged into the / suggestion dropdown. */
   skills?: SkillEntry[];
 }
@@ -265,10 +270,12 @@ export default function ChatInput({
   configuredProviders = [],
   isProcessing = false,
   onStop,
+  onEscape,
   disabledReason,
-  queued = [],
-  onRemoveQueued,
+  pendingEdits = [],
+  onRemovePendingEdit,
   prefill,
+  unsent,
   skills = [],
 }: ChatInputProps) {
   const [text, setText] = useState('');
@@ -451,6 +458,13 @@ export default function ChatInput({
     }
   }, [prefill]);
 
+  useEffect(() => {
+    if (!unsent) return;
+    setText((draft) => aheadOfDraft(unsent.text, draft));
+    pendingCursorRef.current = unsent.text.length;
+    textareaRef.current?.focus();
+  }, [unsent]);
+
   const canSubmit = isProcessing || (!disabled && text.trim().length > 0);
 
   const applyModel = (id: string) => {
@@ -495,8 +509,10 @@ export default function ChatInput({
     setText('');
   };
 
+  // `canSubmit` is also true for a Stop button with nothing typed; the button
+  // stops on click, but Enter comes here and must not send an empty prompt.
   const handleSubmit = () => {
-    if (!canSubmit) return;
+    if (disabled || !text.trim()) return;
     if (isModelCommand) {
       // Models can only be SET by selecting from the list (applyModel), never by
       // committing free-typed text. Any typed text is just a filter; submitting
@@ -580,6 +596,12 @@ export default function ChatInput({
       return;
     }
 
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (!onEscape?.()) setText('');
+      return;
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -587,7 +609,7 @@ export default function ChatInput({
   };
 
   const getPlaceholderText = () => {
-    if (disabled) return 'Generating plan...';
+    if (disabled && disabledReason) return disabledReason;
     return placeholder || 'Type / for commands or describe what you want to build...';
   };
 
@@ -650,21 +672,21 @@ export default function ChatInput({
 
   return (
     <div className={`chat-input ${disabled ? 'disabled' : ''}`}>
-      {queued.length > 0 && (
-        <div className="queued-prompts" aria-label="Queued messages">
-          {queued.map((m) => (
-            <div key={m.id} className="queued-prompt">
-              <span className="chat-msg-queued-badge">queued</span>
-              <span className="queued-prompt-text" title={m.text}>{m.text}</span>
+      {pendingEdits.length > 0 && (
+        <div className="pending-plan-edits" aria-label="Pending plan edits">
+          {pendingEdits.map((m) => (
+            <div key={m.id} className="pending-plan-edit">
+              <span className="pending-plan-edit-badge">pending edit</span>
+              <span className="pending-plan-edit-text" title={m.text}>{m.text}</span>
               <button
                 type="button"
-                className="queued-prompt-remove"
-                title="Remove from the queue and put it back in the input"
-                aria-label={`Remove queued message: ${m.text}`}
+                className="pending-plan-edit-remove"
+                title="Withdraw this edit and put it back in the input"
+                aria-label={`Withdraw pending plan edit: ${m.text}`}
                 onClick={() => {
                   setText(m.text);
                   textareaRef.current?.focus();
-                  onRemoveQueued?.(m.id);
+                  onRemovePendingEdit?.(m.id);
                 }}
               >
                 ×
@@ -711,7 +733,7 @@ export default function ChatInput({
               className={`send-btn${isProcessing ? ' processing' : ''}`}
               onClick={isProcessing && onStop ? onStop : handleSubmit}
               disabled={!canSubmit}
-              title={isProcessing ? 'Stop (Ctrl+C)' : disabled && disabledReason ? disabledReason : 'Send (Enter)'}
+              title={isProcessing ? 'Stop (Esc Esc)' : disabled && disabledReason ? disabledReason : 'Send (Enter)'}
               type="button"
             >
               {isProcessing ? (

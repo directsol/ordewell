@@ -221,3 +221,70 @@ describe('ConversationViewHost', () => {
     expect(screen.posts).toEqual([]);
   });
 });
+
+describe('ConversationViewHost queued prompts', () => {
+  let screen: ReturnType<typeof webview>;
+  let host: ConversationViewHost;
+  const lastHold = () => screen.posts.filter((m) => m.type === 'heldPrompts').at(-1);
+
+  beforeEach(() => {
+    screen = webview();
+    host = new ConversationViewHost(screen.post);
+  });
+
+  it('holds prompts typed during a turn and, when it ends, gives up the oldest to send next', () => {
+    host.receive(started);
+    host.holdPrompt('also cover caching');
+    host.holdPrompt('and the CLI');
+    expect(lastHold()).toEqual({ type: 'heldPrompts', prompts: ['also cover caching', 'and the CLI'] });
+
+    host.receive({ type: 'planner_turn_ended', turnId: TURN, outcome: 'message' });
+    const next = host.nextPrompt();
+
+    expect(next).toBe('also cover caching');
+    expect(lastHold()).toEqual({ type: 'heldPrompts', prompts: ['and the CLI'] });
+  });
+
+  it('gives the newest back to the input on unsend, and the turn keeps going', () => {
+    host.receive(started);
+    host.holdPrompt('one');
+    host.holdPrompt('two');
+
+    host.unsendPrompt();
+
+    expect(screen.posts.filter((m) => m.type === 'promptUnsent')).toEqual([{ type: 'promptUnsent', text: 'two' }]);
+    expect(lastHold()).toEqual({ type: 'heldPrompts', prompts: ['one'] });
+    expect(screen.posts.some((m) => m.type === 'plannerTurn' && !m.active)).toBe(false);
+  });
+
+  it('gives every held prompt back when the user stops the turn, rather than sending them after it', () => {
+    host.receive(started);
+    host.holdPrompt('one');
+    host.holdPrompt('two');
+
+    host.stop();
+
+    expect(screen.posts.filter((m) => m.type === 'promptUnsent')).toEqual([{ type: 'promptUnsent', text: 'one\ntwo' }]);
+    expect(host.nextPrompt()).toBeUndefined();
+  });
+
+  it('drops held prompts with the conversation on a new session, without putting them in the input', () => {
+    host.receive(started);
+    host.holdPrompt('for the old session');
+
+    host.reset();
+
+    expect(screen.posts.some((m) => m.type === 'promptUnsent')).toBe(false);
+    expect(lastHold()).toEqual({ type: 'heldPrompts', prompts: [] });
+    expect(host.nextPrompt()).toBeUndefined();
+  });
+
+  it('shows a reloaded webview what is still held', () => {
+    host.holdPrompt('still waiting');
+    screen.posts.length = 0;
+
+    host.resync();
+
+    expect(lastHold()).toEqual({ type: 'heldPrompts', prompts: ['still waiting'] });
+  });
+});
