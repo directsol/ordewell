@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- **The planner chat streams and shows what it used.** A planner's reply text
+  appears as it is written instead of all at once, and the chat draws a token
+  line from what the provider or runner reports — input, output and cached
+  tokens, per-currency cost where stated, and context-window fill. Research
+  subagents get their own cards with their brief, model, outcome and digest,
+  and their usage counts into the line. A tool call reads as one line that the
+  header's expand-all button opens.
+- **Queue a prompt while the planner is working.** A message sent mid-turn is
+  held and shown with an × to take it back; Esc withdraws the newest one, and
+  with none queued the first Esc arms a stop and the second within about two
+  seconds stops the turn (the button reads "Stop (Esc Esc)").
+- **An approval card, plan markers and the plan dock.** A planner approval
+  draws as a card naming what is approved and who decided it, and a committed
+  plan becomes a marker in the conversation.
+
+### Fixed
+
+- **The chat panel follows light themes.** The focused input, hovered and
+  expanded cards and inline code no longer render as dark blocks, and muted
+  text stays readable.
+- **A check you marked complete reads "Marked by you"**, not "Model Review" —
+  your decision is no longer presented as a model verdict.
+
 ## [0.5.4] — 2026-09-26
 
 ### Fixed

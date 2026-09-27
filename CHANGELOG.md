@@ -50,6 +50,31 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 - **The TUI's piped research log matches the chat pane.** Steps print as
   `Read(src/auth.ts)` rather than `read_file auth.ts`.
 
+### Fixed
+
+- **The planner conversation draws each turn once.** While a run is going, a
+  planner turn reaches the surfaces on two subscriptions at the same time; the
+  TUI now shows one reply and one approval card for it, and a reply a reload
+  has already drawn is not spoken again.
+- **A harness planner's one-shot plan streams to the "building plan"
+  display.** `ordewell plan` with research off showed an empty plan display
+  while the model wrote the plan, because only the API providers' token stream
+  was forwarded.
+- **A planner conversation no longer breaks after a turn gives up on its tool
+  calls.** When a model kept asking for tools past the turn's budget, the
+  history was left with calls nothing had answered, and OpenAI-compatible APIs
+  then refused every later message in that session.
+- **The command classifier refuses a command name the shell computes.** A
+  substitution in the command position (`$(printf rm) -rf build`), a brace
+  list, or a path glued onto a short flag (`grep -f/etc/passwd`) is now
+  refused or prompted instead of running unprompted; computed arguments are
+  confined like any other path, and bash's `|&` reads as a pipe. This narrows
+  the planner's exploration envelope ([ADR-0008](docs/adr/0008-planner-exploration-envelope.md)),
+  it does not widen it.
+- **VS Code names a check you made as yours.** A task you marked complete
+  reads "Marked by you" rather than presenting your decision as a model
+  review.
+
 ## [0.5.4] — 2026-09-26
 
 ### Fixed
