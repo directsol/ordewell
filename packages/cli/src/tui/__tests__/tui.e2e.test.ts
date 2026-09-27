@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createApp, type App } from '../app';
 import { openTerminal, type Terminal } from '../terminal';
-import { ConversationQueue, runEffect, type OrdewellApi } from '../effects';
+import { runEffect, type OrdewellApi } from '../effects';
 import { stripAnsi } from '../ansi';
 import type { RewindTargetView } from '../state';
 
@@ -73,6 +73,8 @@ function fakeDaemon() {
       return { status: 'started' };
     }),
     stopExecution: vi.fn(async () => ({ status: 'stopped' })),
+    cancelPlanning: vi.fn(async () => ({ cancelled: true })),
+    processQueued: vi.fn(async () => ({ ok: true })),
     taskControl: vi.fn(async () => ({ ok: true })),
     markTaskComplete: vi.fn(async () => ({ ok: true })),
     markTaskIncomplete: vi.fn(async () => ({ ok: true })),
@@ -132,7 +134,6 @@ function harness() {
   const input = new FakeInput();
   const output = new FakeOutput();
   const daemon = fakeDaemon();
-  const queue = new ConversationQueue();
   const envWrites: Record<string, string> = {};
   const onExit = vi.fn();
   const clipboard: string[] = [];
@@ -147,7 +148,6 @@ function harness() {
       runEffect(effect, {
         api: daemon.api,
         workspace: '/ws',
-        conversationQueue: queue,
         port: 3742,
         dispatch: (action) => app.dispatch(action),
         newSessionId: () => `session-${++sessionCounter}`,
@@ -281,6 +281,85 @@ describe('TUI end to end', () => {
       expect(h.daemon.mocks.sendConversationMessage).toHaveBeenCalledWith('session-1', 'Use SQLite');
     });
     expect(h.daemon.log.indexOf('sendMessage')).toBeGreaterThan(h.daemon.log.indexOf('startConversation'));
+  });
+
+  it('a prompt typed while a turn is in flight waits as a queued bubble, then goes out as a normal user turn', async () => {
+    const h = harness();
+    let releaseFirstTurn: () => void = () => {};
+    h.daemon.mocks.startConversation.mockImplementationOnce(async () => {
+      h.daemon.log.push('startConversation');
+      await new Promise<void>((resolve) => { releaseFirstTurn = resolve; });
+      return planPayload();
+    });
+
+    h.type('Build the login flow');
+    h.type('\r');
+    await vi.waitFor(() => expect(h.app.getState().sessionId).toBe('session-1'));
+
+    h.type('Use SQLite');
+    h.type('\r');
+
+    // Parked, visibly, not sent.
+    await vi.waitFor(() => expect(h.app.getState().queuedPrompts).toEqual(['Use SQLite']));
+    expect(h.screen()).toContain('Use SQLite');
+    expect(h.screen()).toContain('queued · esc to unsend');
+    expect(h.daemon.mocks.sendConversationMessage).not.toHaveBeenCalled();
+
+    releaseFirstTurn();
+    await vi.waitFor(() => expect(h.daemon.mocks.sendConversationMessage).toHaveBeenCalledWith('session-1', 'Use SQLite'));
+    // No longer queued — it is a spoken turn now.
+    expect(h.app.getState().queuedPrompts).toEqual([]);
+    expect(h.app.getState().messages.some((m) => m.role === 'user' && m.content === 'Use SQLite')).toBe(true);
+  });
+
+  it('esc takes a queued prompt back into the editor while the turn keeps running', async () => {
+    const h = harness();
+    let releaseFirstTurn: () => void = () => {};
+    h.daemon.mocks.startConversation.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { releaseFirstTurn = resolve; });
+      return planPayload();
+    });
+
+    h.type('Build the login flow');
+    h.type('\r');
+    await vi.waitFor(() => expect(h.app.getState().sessionId).toBe('session-1'));
+
+    h.type('Use SQLite');
+    h.type('\r');
+    await vi.waitFor(() => expect(h.app.getState().queuedPrompts).toEqual(['Use SQLite']));
+
+    h.type('\x1b');
+    await vi.waitFor(() => expect(h.app.getState().queuedPrompts).toEqual([]));
+    expect(h.app.getState().editor.text).toBe('Use SQLite');
+    expect(h.daemon.mocks.cancelPlanning).not.toHaveBeenCalled();
+
+    releaseFirstTurn();
+    await settle();
+  });
+
+  it('double esc arms then stops the in-flight turn, with the red hint between the presses', async () => {
+    const h = harness();
+    let releaseFirstTurn: () => void = () => {};
+    h.daemon.mocks.startConversation.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { releaseFirstTurn = resolve; });
+      return planPayload();
+    });
+
+    h.type('Build the login flow');
+    h.type('\r');
+    await vi.waitFor(() => expect(h.app.getState().sessionId).toBe('session-1'));
+    expect(h.app.getState().status).toBe('planning');
+
+    h.type('\x1b');
+    await vi.waitFor(() => expect(h.app.getState().stopArmed).toBe(true));
+    expect(h.screen()).toContain('Press Esc again to stop');
+
+    h.type('\x1b');
+    await vi.waitFor(() => expect(h.daemon.mocks.cancelPlanning).toHaveBeenCalledWith('session-1'));
+    expect(h.app.getState().stopArmed).toBe(false);
+
+    releaseFirstTurn();
+    await settle();
   });
 
   it('/run subscribes to the execution stream before launching, then paints progress and the summary', async () => {

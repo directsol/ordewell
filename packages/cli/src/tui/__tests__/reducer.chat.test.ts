@@ -197,7 +197,10 @@ describe('reduce — one planner turn, two delivery paths', () => {
 
   it('still settles the busy status on the duplicate, since it is the same turn ending', () => {
     const busy = { ...spoken('Which database?'), status: 'planning' as const, busyLabel: 'reading files', thinkingLine: 'hmm' };
-    const { state } = reduce(busy, { type: 'plannerMessage', content: 'Which database?', sessionId: 's1' });
+    // `planUpdated` is the settle: the reply's text (this action) is dispatched
+    // first, then the settle follows and ends the turn.
+    const replied = reduce(busy, { type: 'plannerMessage', content: 'Which database?', sessionId: 's1' }).state;
+    const { state } = reduce(replied, { type: 'planUpdated', plan: { tasks: [] }, sessionId: 's1' });
     expect(state.status).toBe('idle');
     expect(state.busyLabel).toBe('');
     expect(state.thinkingLine).toBe('');

@@ -3,7 +3,7 @@ import { ApiClient, ensureDaemonOwned, findFreePort, resolvePort, stopDaemon } f
 import { flag, saveLastSession } from '../utils';
 import { findEnvFile, writeEnvVar } from '../utils/env';
 import { createApp } from './app';
-import { ConversationQueue, runEffect, type OrdewellApi } from './effects';
+import { runEffect, type OrdewellApi } from './effects';
 import { registerSkillCommands } from './slash';
 import { openTerminal } from './terminal';
 import { openTaskTerminal } from './terminalLauncher';
@@ -52,7 +52,6 @@ export async function handleTui(subArgs: string[]): Promise<void> {
   // did, and only the one we started may be stopped on the way out.
   let owned = ownedAtLaunch;
   const api = new ApiClient(port, workspace) as unknown as OrdewellApi;
-  const conversationQueue = new ConversationQueue();
 
   // eslint-disable-next-line prefer-const
   let terminal: ReturnType<typeof openTerminal> | undefined;
@@ -73,7 +72,6 @@ export async function handleTui(subArgs: string[]): Promise<void> {
       runEffect(effect, {
         api,
         workspace,
-        conversationQueue,
         port,
         dispatch: (action) => app.dispatch(action),
         newSessionId: () => mintSessionId(),

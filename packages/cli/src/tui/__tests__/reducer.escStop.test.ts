@@ -3,9 +3,9 @@ import { initialState, reduce } from '../reducer';
 import type { TuiState } from '../state';
 
 /**
- * ESC stops the planner (a planning turn in flight, any planner backend)
- * before it falls back to anything ESC did before this existed. See the
- * precedence note on `handleKey`.
+ * ESC during an in-flight planner turn: the first press arms a stop (or takes
+ * back the newest queued prompt), the second press commits the stop. Esc when
+ * idle does what it always did. See the precedence note on `handleKey`.
  */
 
 function press(overrides: Partial<TuiState> = {}, editorText = '') {
@@ -15,17 +15,24 @@ function press(overrides: Partial<TuiState> = {}, editorText = '') {
 }
 
 describe('ESC while planning', () => {
-  it('emits cancelPlanning instead of clearing the draft', () => {
-    const { state, effects } = press({ status: 'planning', sessionId: 'session-1' }, 'unsent draft');
+  it('arms on the first press and emits cancelPlanning on the second, keeping the draft throughout', () => {
+    const base = initialState({ status: 'planning', sessionId: 'session-1' });
+    const state = { ...base, editor: { ...base.editor, text: 'unsent draft', cursor: 12 } };
+    const armed = reduce(state, { type: 'key', key: { name: 'escape' } });
 
+    expect(armed.effects).toEqual([{ type: 'disarmStop', afterMs: 2000, arm: 1 }]);
+    expect(armed.state.stopArmed).toBe(true);
+    expect(armed.state.editor.text).toBe('unsent draft');
+
+    const { state: stopped, effects } = reduce(armed.state, { type: 'key', key: { name: 'escape' } });
     expect(effects).toEqual([{ type: 'cancelPlanning', sessionId: 'session-1' }]);
-    // The draft is untouched — cancelPlanning owns this ESC, not the editor clear.
-    expect(state.editor.text).toBe('unsent draft');
+    expect(stopped.editor.text).toBe('unsent draft');
   });
 
-  it('also stops a research turn (the other in-flight planner status)', () => {
-    const { effects } = press({ status: 'researching', sessionId: 'session-1' });
-    expect(effects).toEqual([{ type: 'cancelPlanning', sessionId: 'session-1' }]);
+  it('also arms for a research turn (the other in-flight planner status)', () => {
+    const { state, effects } = press({ status: 'researching', sessionId: 'session-1' }, 'while it looks things up');
+    expect(effects).toEqual([{ type: 'disarmStop', afterMs: 2000, arm: 1 }]);
+    expect(state.stopArmed).toBe(true);
   });
 
   it('does nothing special without a session, even mid-status', () => {
@@ -40,23 +47,26 @@ describe('ESC while planning', () => {
       status: 'planning',
       sessionId: 'session-1',
       overlay: { kind: 'confirm', title: 'New session?', message: 'Discard the current plan?', action: { kind: 'new-session' } },
-    });
+    }, undefined);
 
     expect(effects).toEqual([]);
     expect(state.overlay).toBeNull(); // confirm's own escape handling: cancels
   });
 
-  it('stops the planner from an open approval prompt instead of denying one tool call', () => {
+  it('esc from an open approval prompt arms instead of denying one call, and the second esc stops the whole turn', () => {
     const request = { id: 'ap-1', kind: 'shell_command' as const, subject: 'npm test', scope: 'npm test' };
-    const { state, effects } = press({
+    const base = initialState({
       status: 'planning',
       sessionId: 'session-1',
       overlay: { kind: 'approval', request },
-      pendingApprovals: [{ id: 'ap-2', kind: 'shell_command', subject: 'npm run build', scope: 'npm run build' }],
+      pendingApprovals: [{ id: 'ap-2', kind: 'shell_command' as const, subject: 'npm run build', scope: 'npm run build' }],
     });
+    const armed = reduce(base, { type: 'key', key: { name: 'escape' } });
+    expect(armed.state.overlay).toMatchObject({ kind: 'approval' });
 
-    // One denial would just hand the planner its next tool call — the user
-    // pressing ESC wants the turn dead, so the whole queue goes with it.
+    const { state, effects } = reduce(armed.state, { type: 'key', key: { name: 'escape' } });
+    // One denial would just hand the planner its next tool call — a second ESC
+    // wants the turn dead, so the whole queue goes with it.
     expect(effects).toEqual([{ type: 'cancelPlanning', sessionId: 'session-1' }]);
     expect(state.overlay).toBeNull();
     expect(state.pendingApprovals).toEqual([]);

@@ -3,6 +3,7 @@ import { cursorInLines } from './editor';
 import { activeToken, skillMatchKind, slashTokens, tokenCompletions } from './slash';
 import {
   bodyRows, chatInputWrap, chatLayout, footerHints, helpLayout, packHints, planLayout, planOffset,
+  stopHint,
 } from './layout';
 import { chatEditorRoom, chatPaneWidth, paneColumns, planPaneWidth } from './geometry';
 import { diffRoom, handoffActions } from './handoff';
@@ -204,10 +205,14 @@ function scrolledBackMark(state: TuiState): string {
 
 function renderStatus(state: TuiState, cols: number): string {
   const mark = scrolledBackMark(state);
+  // A standing stop-arm outranks the busy label: with the arm up, the next key
+  // decides the turn and that is what the row must say, in red, hard left.
+  const armed = stopHint(state);
   if (state.status === 'idle') {
     const notes = [mark, state.toast].filter(Boolean).join(' · ');
     return notes ? truncate(style.grey(notes), cols) : '';
   }
+  if (armed) return truncate(style.red(armed), cols);
   const scrolled = mark ? style.grey(`${mark} · `) : '';
   const label = state.busyLabel ? ` ${state.busyLabel}` : '';
   const verb = state.status === 'executing' ? 'Executing'
@@ -419,7 +424,7 @@ function renderOverlay(state: TuiState, rows: number, cols: number): string[] {
         // takes this prompt with it. Offering it as the deny key there would
         // teach the wrong thing about the most destructive key on the sheet.
         style.grey(state.status === 'planning' || state.status === 'researching'
-          ? 'y or enter allows · n denies · esc stops planning'
+          ? 'y or enter allows · n denies · esc twice stops planning'
           : 'y or enter allows · n or esc denies'),
       ],
       rows,
