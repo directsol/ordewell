@@ -3,19 +3,23 @@
  * Visual harness for the Ordewell VS Code chat webview.
  *
  * Serves the built webview bundle (packages/vscode/dist/webviews) with a
- * mocked `acquireVsCodeApi`, and exposes `window.__replay(events, delayMs)`
- * so a browser (or Playwright) can replay a scripted extension→webview event
- * stream and watch the UI behave exactly as it would inside VS Code:
- * sequential top-to-bottom rendering, thinking dropdowns streaming open,
- * task cards on plan commit.
+ * mocked `acquireVsCodeApi`. The page itself carries no scenario data or
+ * scripted progress events — see bench/live/scenarios.mjs and host-driver.mjs
+ * for that: a driving script (webview-screenshot.mjs,
+ * webview-restore-assertions.mjs) runs a real `ConversationViewHost` in Node
+ * and relays exactly what it posts into the page via `window.__send`, the way
+ * `ChatViewProvider.postMessage` would. A message the page sends back out
+ * (`vscode.postMessage`) is both recorded in `window.__posted` and, if the
+ * driving script installed `window.__toHost` (via Playwright's
+ * `page.exposeFunction`), forwarded there — so a click or an Esc in the page
+ * can round-trip through the same host and come back as a real reply.
  *
  * Usage:
- *   npm run build -w packages/vscode          # build the bundle first
- *   node bench/live/webview-harness.mjs        # serves on http://127.0.0.1:3798
+ *   npm run build -w packages/core -w packages/vscode   # build the bundles first
+ *   node bench/live/webview-harness.mjs                 # serves on http://127.0.0.1:3798
  *
- * Then open the page, or drive it with Playwright (see
- * bench/live/webview-screenshot.mjs). A default demo scenario is available
- * via `window.__replayDemo()`.
+ * `?theme=dark|light` sets the `--vscode-*` custom properties a driving
+ * script wants for contrast screenshots; dark is the default.
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -26,51 +30,67 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(__dirname, '../../packages/vscode/dist/webviews');
 const port = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : 3798);
 
-const DEMO_SCENARIO = [
-  { type: 'setConfiguredProviders', providers: ['openrouter'] },
-  { type: 'setRunnerList', runnerList: [{ id: 'claude-code', displayName: 'Claude Code' }] },
-  { type: 'setEnabledRunnerIds', enabledRunnerIds: ['claude-code'] },
-  { type: 'setSkillToggles', toggles: { 'grilling': true, tdd: true, prd: false } },
-  { user: 'make this project better' },
-  { type: 'researchProgress', progress: { type: 'thinking', text: 'The goal is vague. Let me explore the workspace before asking anything. ' } },
-  { type: 'researchProgress', progress: { type: 'thinking', text: 'I will list the directory tree first, then read the README.' } },
-  // Non-reasoning models narrate between tool calls as plain content tokens;
-  // the webview must fold this prose into the thinking trace IN PLACE so
-  // commands and thinking stay interleaved in execution order.
-  { type: 'streamToken', token: 'Let me inspect the repository structure first.' },
-  { type: 'researchProgress', progress: { type: 'tool_call', tool: 'list_dir', toolArgs: '{"path":".","depth":2}' } },
-  { type: 'researchProgress', progress: { type: 'tool_result', step: { id: 's1', tool: 'list_dir', args: '{"path":"."}', result: 'src/\nREADME.md', timestamp: '' } } },
-  { type: 'streamToken', token: 'Now the README to see what the project claims to do.' },
-  { type: 'researchProgress', progress: { type: 'tool_call', tool: 'read_file', toolArgs: '{"path":"README.md"}' } },
-  { type: 'researchProgress', progress: { type: 'tool_result', step: { id: 's2', tool: 'read_file', args: '{"path":"README.md"}', result: '# Demo', timestamp: '' } } },
-  { type: 'researchProgress', progress: { type: 'thinking', text: ' The repo has no tests. I should ask whether code health or features matter more.' } },
-  { type: 'researchProgress', progress: { type: 'plan_token', planToken: 'Looking at the repo, "make it better" could go several ways.\n\n**Question**: ' } },
-  { type: 'researchProgress', progress: { type: 'plan_token', planToken: 'should I focus on code health (tests, types) or user-facing behavior?\n\nMy recommendation: code health — the project has no tests.' } },
-  { type: 'newMessage', message: { role: 'assistant', content: 'Looking at the repo, "make it better" could go several ways.\n\n**Question**: should I focus on code health (tests, types) or user-facing behavior?\n\nMy recommendation: code health — the project has no tests.', timestamp: new Date().toISOString() } },
-  { user: 'code health please' },
-  { type: 'researchProgress', progress: { type: 'thinking', text: 'They chose code health. Next design branch: which test framework.' } },
-  { type: 'newMessage', message: { role: 'assistant', content: '**Question**: for the test setup, do you prefer node:test (zero deps) or vitest?\n\nMy recommendation: node:test, matching the bench harness convention.', timestamp: new Date().toISOString() } },
-  { user: 'node:test please' },
-  { type: 'researchProgress', progress: { type: 'thinking', text: 'Both branches resolved. The interview is complete — time to outline.' } },
-  { type: 'newMessage', message: { role: 'assistant', content: 'Outline:\n\n1. Set up node:test and a first unit test (src/index.test.ts)\n2. Write docs\n\nReply "confirm" and I will emit the task plan.', timestamp: new Date().toISOString() } },
-  { user: 'confirm' },
-  { type: 'researchProgress', progress: { type: 'thinking', text: 'Emitting the final JSON now.' } },
-  {
-    type: 'planUpdated',
-    plan: {
-      tasks: [
-        { id: 't1', order: 1, title: 'Set up node:test harness', description: 'First slice', type: 'ai', status: 'pending', dependencies: [], subtasks: [], assignedRunner: 'claude-code', completionMarker: 'm1', taskMode: 'acceptEdits', assignedModel: { modelId: 'deepseek/deepseek-v4-flash', modelLabel: 'DeepSeek V4 Flash' } },
-        { id: 't2', order: 2, title: 'Write docs', description: 'Document it', type: 'user', status: 'pending', dependencies: ['t1'], subtasks: [], assignedRunner: 'claude-code', completionMarker: 'm2', taskMode: 'acceptEdits', userSteps: [{ order: 1, instruction: 'Update README', completed: false }] },
-      ],
-      generatedAt: new Date().toISOString(),
-      status: 'draft',
-      runners: ['claude-code'],
-      lastUpdated: new Date().toISOString(),
-    },
+// Approximate values for VS Code's built-in Dark Modern / Light Modern themes
+// — every var the stylesheet reads (see styles.css's :root), so a screenshot
+// under each theme is a real contrast check rather than the stylesheet's own
+// hardcoded fallbacks (which are dark regardless of what theme is asked for).
+const THEMES = {
+  dark: {
+    '--vscode-editor-background': '#1e1e1e',
+    '--vscode-sideBar-background': '#181818',
+    '--vscode-editorWidget-background': '#252526',
+    '--vscode-quickInput-background': '#252526',
+    '--vscode-list-hoverBackground': '#2a2d2e',
+    '--vscode-input-background': '#3c3c3c',
+    '--vscode-input-placeholderForeground': '#a6a6a6',
+    '--vscode-panel-border': '#2b2b2b',
+    '--vscode-widget-border': '#303031',
+    '--vscode-foreground': '#cccccc',
+    '--vscode-descriptionForeground': '#9d9d9d',
+    '--vscode-errorForeground': '#f14c4c',
+    '--vscode-focusBorder': '#007fd4',
+    '--vscode-button-background': '#0e639c',
+    '--vscode-testing-iconPassed': '#73c991',
+    '--vscode-testing-iconFailed': '#f14c4c',
+    '--vscode-textLink-foreground': '#3794ff',
+    '--vscode-textPreformat-background': 'rgba(255, 255, 255, 0.1)',
+    '--vscode-font-family': "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    '--vscode-editor-font-family': "Menlo, Monaco, 'Courier New', monospace",
+    'color-scheme': 'dark',
   },
-];
+  light: {
+    '--vscode-editor-background': '#ffffff',
+    '--vscode-sideBar-background': '#f3f3f3',
+    '--vscode-editorWidget-background': '#f3f3f3',
+    '--vscode-quickInput-background': '#f9f9f9',
+    '--vscode-list-hoverBackground': '#f2f2f2',
+    '--vscode-input-background': '#ffffff',
+    '--vscode-input-placeholderForeground': '#767676',
+    '--vscode-panel-border': '#e5e5e5',
+    '--vscode-widget-border': '#e5e5e5',
+    '--vscode-foreground': '#3b3b3b',
+    '--vscode-descriptionForeground': '#717171',
+    '--vscode-errorForeground': '#a1260d',
+    '--vscode-focusBorder': '#0090f1',
+    '--vscode-button-background': '#005fb8',
+    '--vscode-testing-iconPassed': '#388a34',
+    '--vscode-testing-iconFailed': '#a1260d',
+    '--vscode-textLink-foreground': '#005fb8',
+    '--vscode-textPreformat-background': 'rgba(0, 0, 0, 0.06)',
+    '--vscode-font-family': "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    '--vscode-editor-font-family': "Menlo, Monaco, 'Courier New', monospace",
+    'color-scheme': 'light',
+  },
+};
 
-const PAGE = `<!DOCTYPE html>
+function themeStyle(name) {
+  const vars = THEMES[name] ?? THEMES.dark;
+  const decls = Object.entries(vars).map(([k, v]) => `${k}: ${v};`).join(' ');
+  return `:root { ${decls} }`;
+}
+
+function page(theme) {
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -78,7 +98,8 @@ const PAGE = `<!DOCTYPE html>
 <link rel="stylesheet" href="/assets/chat.css">
 <title>Ordewell webview harness</title>
 <style>
-  body { max-width: 480px; margin: 0 auto; border-left: 1px solid #333; border-right: 1px solid #333; }
+  ${themeStyle(theme)}
+  body { margin: 0; }
 </style>
 </head>
 <body>
@@ -86,10 +107,16 @@ const PAGE = `<!DOCTYPE html>
 <script>
   window.__posted = [];
   window.acquireVsCodeApi = () => ({
-    postMessage: (m) => { window.__posted.push(m); },
+    postMessage: (m) => {
+      window.__posted.push(m);
+      if (window.__toHost) window.__toHost(m);
+    },
     getState: () => undefined,
     setState: () => {},
   });
+  // Relays one HostToWebview message into the page, exactly as
+  // ChatViewProvider.postMessage would deliver it over the real webview
+  // message channel.
   window.__send = (msg) => window.dispatchEvent(new MessageEvent('message', { data: msg }));
   window.__typeUser = (text) => {
     const ta = document.querySelector('.chat-input-row textarea');
@@ -99,27 +126,24 @@ const PAGE = `<!DOCTYPE html>
     ta.dispatchEvent(new Event('input', { bubbles: true }));
     ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   };
-  window.__replay = async (events, delayMs = 120) => {
-    for (const ev of events) {
-      if (ev.user) window.__typeUser(ev.user);
-      else window.__send(ev);
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
+  window.__pressEscape = () => {
+    const ta = document.querySelector('.chat-input-row textarea');
+    ta?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   };
-  window.__demo = ${JSON.stringify(DEMO_SCENARIO)};
-  window.__replayDemo = (delayMs) => window.__replay(window.__demo, delayMs);
 </script>
 <script type="module" src="/chat.js"></script>
 </body>
 </html>`;
+}
 
 const server = http.createServer((req, res) => {
-  const url = req.url.split('?')[0];
-  if (url === '/' || url === '/index.html') {
-    res.writeHead(200, { 'content-type': 'text/html' }).end(PAGE);
+  const url = new URL(req.url, 'http://127.0.0.1');
+  if (url.pathname === '/' || url.pathname === '/index.html') {
+    const theme = url.searchParams.get('theme') === 'light' ? 'light' : 'dark';
+    res.writeHead(200, { 'content-type': 'text/html' }).end(page(theme));
     return;
   }
-  const file = path.join(dist, url.replace(/^\//, ''));
+  const file = path.join(dist, url.pathname.replace(/^\//, ''));
   if (!file.startsWith(dist) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
     res.writeHead(404).end('not found');
     return;

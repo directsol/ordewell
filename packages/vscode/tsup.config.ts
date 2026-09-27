@@ -1,7 +1,10 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/extension.ts'],
+  // harnessHost.ts is a second, vscode-free entry point so bench/live's
+  // webview harness can import the real ConversationViewHost from a built
+  // file that never requires('vscode') (extension.js does, at load time).
+  entry: ['src/extension.ts', 'src/harnessHost.ts'],
   outDir: 'dist',
   format: ['cjs'],
   // Only `vscode` is provided by the host. Everything else — including

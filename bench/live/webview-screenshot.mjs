@@ -1,144 +1,315 @@
 #!/usr/bin/env node
 /**
- * Drive the webview harness with Playwright and capture screenshots of the
- * chat at key moments: mid-thinking (dropdown collapsed, title streaming),
- * after the planner's question, and after the plan commit. Also asserts the
- * sequential-timeline invariants:
+ * Drive the webview harness with a real `ConversationViewHost` (ADR-0017) and
+ * capture screenshots of every state packages/vscode/src/views/chat draws,
+ * asserting the DOM at each one:
  *
- *   - every item renders top-to-bottom in arrival order
- *   - thinking dropdowns are collapsed by default, even while streaming;
- *     the title opens them and clicking the opened text collapses them
- *   - streamed prose renders as a thinking dropdown, never as bare message text
- *   - there is exactly one stop control (the chat input's), never a second
- *     cancel button next to the thinking block
+ *   - a reply streams in place as message text, settles, then loses its cursor
+ *   - thinking and a command row stay collapsed by default while streaming
+ *   - a command row's preview is exactly 3 lines, with a "+N lines" hint
+ *   - "building plan" becomes a plan marker chip once the plan commits
+ *   - a subagent card is collapsed by default; the header's one expand-all
+ *     toggle opens it (and every other block) at once — there is no
+ *     per-block control
+ *   - the approval card shows Allow/Deny while pending, then settles
+ *   - the token line is pinned below the conversation, not inside it
+ *   - a retracted attempt's text never reaches the screen
+ *   - a prompt typed while a turn is live is held, with its own × unsend;
+ *     Esc takes it back, and Esc Esc (nothing queued) arms then stops the turn
+ *
+ * Runs at 420px (the sidebar width) and 900px, under both a dark and a light
+ * VS Code theme (bench/live/webview-harness.mjs's `?theme=`) — the full state
+ * tour at 420/dark, a representative subset at the other three combinations.
  *
  * Usage:
- *   node bench/live/webview-harness.mjs &        # serve the bundle
+ *   node bench/live/webview-harness.mjs &
  *   node bench/live/webview-screenshot.mjs [--out DIR]
  */
 import path from 'node:path';
 import fs from 'node:fs';
-import { chromium } from 'playwright';
+import { chromium } from './load-playwright.mjs';
+import { createDriver } from './host-driver.mjs';
+import { MAIN_SCENARIO, RELOAD_FIXTURE, RELOAD_PLAN } from './scenarios.mjs';
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? process.argv[i + 1] : fallback;
 }
 const OUT = arg('out', 'bench/live/screenshots');
-const URL = arg('url', 'http://127.0.0.1:3798/');
+const BASE = arg('url', 'http://127.0.0.1:3798');
 fs.mkdirSync(OUT, { recursive: true });
 
 const failures = [];
 const check = (cond, msg) => {
-  console.log(`${cond ? '  ✓' : '  ✗'} ${msg}`);
+  console.log(`  ${cond ? '✓' : '✗'} ${msg}`);
   if (!cond) failures.push(msg);
 };
 
-// Prefer Playwright's own download; fall back to a system/preinstalled
-// chromium path (e.g. /opt/pw-browsers/chromium) via CHROMIUM_PATH.
 const executablePath = process.env.CHROMIUM_PATH
   || (fs.existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined);
 const browser = await chromium.launch(executablePath ? { executablePath } : {});
-const page = await browser.newPage({ viewport: { width: 480, height: 900 } });
-await page.goto(URL);
-await page.waitForSelector('.chat-container');
 
-const demo = await page.evaluate(() => window.__demo.length);
-console.log(`replaying ${demo} scripted events…`);
+async function send(page, msg) {
+  await page.evaluate((m) => window.__send(m), msg);
+}
+async function sendAll(page, msgs) {
+  if (msgs.length) await page.evaluate((arr) => arr.forEach((m) => window.__send(m)), msgs);
+}
 
-// 1. Setup + user message + thinking stream (stop mid-thinking).
-await page.evaluate(() => window.__replay(window.__demo.slice(0, 7), 40));
-await page.screenshot({ path: path.join(OUT, '1-thinking-streaming.png') });
+/**
+ * Walk up from `selector` to the nearest element with a real background, and
+ * blend a translucent foreground over it — this codebase's muted text
+ * (`--text-muted`, `color-mix(in srgb, ... transparent)`) is exactly the kind
+ * of low-contrast choice worth checking, and Chrome serializes it as
+ * `color(srgb r g b / a)` rather than `rgb()`, so both need parsing.
+ */
+async function contrastRatio(page, selector) {
+  return page.evaluate((sel) => {
+    const toRgba = (s) => {
+      const rgb = s.match(/rgba?\(([^)]+)\)/);
+      if (rgb) {
+        const [r, g, b, a = 1] = rgb[1].split(',').map((n) => parseFloat(n));
+        return [r, g, b, a];
+      }
+      const fn = s.match(/color\(srgb\s+([^)]+)\)/);
+      if (fn) {
+        const parts = fn[1].split('/');
+        const [r, g, b] = parts[0].trim().split(/\s+/).map((n) => parseFloat(n) * 255);
+        const a = parts[1] !== undefined ? parseFloat(parts[1]) : 1;
+        return [r, g, b, a];
+      }
+      return null;
+    };
+    const blend = ([r, g, b, a], [br, bg, bb]) => [
+      r * a + br * (1 - a), g * a + bg * (1 - a), b * a + bb * (1 - a),
+    ];
+    const luminance = ([r, g, b]) => {
+      const f = (c) => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+      return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+    };
+    const el = document.querySelector(sel);
+    if (!el) return null;
+    const fg = toRgba(getComputedStyle(el).color);
+    let node = el;
+    let bg = null;
+    while (node && !bg) {
+      const rgba = toRgba(getComputedStyle(node).backgroundColor);
+      if (rgba && rgba[3] > 0) bg = rgba;
+      node = node.parentElement;
+    }
+    if (!fg || !bg || fg[3] === 0) return null;
+    const blended = fg[3] < 1 ? blend(fg, bg) : fg;
+    const [l1, l2] = [luminance(blended), luminance(bg)].sort((a, b) => b - a);
+    return (l1 + 0.05) / (l2 + 0.05);
+  }, selector);
+}
 
-check(await page.locator('.chat-msg-user').count() === 1, 'user request rendered first');
-check(await page.locator('.activity-think.expanded').count() === 0, 'thinking dropdown is COLLAPSED while streaming');
-check((await page.locator('.activity-think-toggle').first().innerText()).includes('Thinking…'), 'streaming title reads "Thinking…"');
-check(await page.locator('.chat-msg-interrupt-btn').count() === 0, 'no extra cancel button next to the thinking block');
-check(await page.locator('.send-btn.processing').count() === 1, 'the single stop control lives in the chat input');
+async function assertMark(page, mark) {
+  switch (mark) {
+    case 'empty':
+      check(await page.locator('.empty-state').count() === 1, 'empty: no-conversation state shown before anything streams');
+      break;
+    case 'reply-streaming':
+      check(await page.locator('.chat-msg-user').count() === 1, 'reply-streaming: the user bubble rendered first');
+      check((await page.locator('.chat-msg-planner.streaming .chat-msg-content').innerText()).includes('Which'), 'reply-streaming: reply text streams in place as message text');
+      check(await page.locator('.chat-msg-planner.streaming .chat-msg-cursor').count() === 1, 'reply-streaming: the streaming cursor is shown');
+      check(await page.locator('.send-btn.processing').count() === 1, 'reply-streaming: the stop control lives in the chat input');
+      break;
+    case 'reply-settled': {
+      const text = await page.locator('.chat-msg-planner').last().innerText();
+      check(text.includes('Which store: SQLite or Postgres?'), 'reply-settled: the settled message replaces the streamed text');
+      check(await page.locator('.chat-msg-planner.streaming').count() === 0, 'reply-settled: no bubble is still marked streaming');
+      check(await page.locator('.send-btn.processing').count() === 0, 'reply-settled: input back to send state');
+      break;
+    }
+    case 'thinking-collapsed':
+      check(await page.locator('.activity-think').count() === 1, 'thinking-collapsed: a thinking block renders');
+      check(await page.locator('.activity-think.expanded').count() === 0, 'thinking-collapsed: collapsed by default');
+      break;
+    case 'command-row': {
+      const preview = await page.locator('.cmd-row-preview').innerText();
+      check(preview.split('\n').length === 3, `command-row: preview is exactly 3 lines (got ${preview.split('\n').length})`);
+      check((await page.locator('.cmd-row-more').innerText()).includes('+3 line'), 'command-row: hidden-line count shown');
+      check(await page.locator('.cmd-row.expanded').count() === 0, 'command-row: collapsed by default');
+      break;
+    }
+    case 'building-plan':
+      check((await page.locator('.plan-revision-chip').innerText()) === 'Building plan…', 'building-plan: chip reads "Building plan…"');
+      check(await page.locator('.plan-revision-chip').isDisabled(), 'building-plan: chip is not clickable while building');
+      break;
+    case 'plan-marker':
+      check((await page.locator('.plan-revision-chip').innerText()).includes('Plan generated'), 'plan-marker: chip settles to "Plan generated"');
+      check((await page.locator('.plan-revision-chip').innerText()).includes('2 tasks'), 'plan-marker: task count shown');
+      check(await page.locator('.plan-dock .task-card').count() === 2, 'plan-marker: the plan dock shows both task cards');
+      break;
+    case 'subagent-collapsed':
+      check(await page.locator('.subagent-card').count() === 2, 'subagent-collapsed: both subagents rendered');
+      check(await page.locator('.subagent-card.expanded').count() === 0, 'subagent-collapsed: collapsed by default');
+      check((await page.locator('.subagent-card-status').first().innerText()).length > 0, 'subagent-collapsed: status label shown collapsed');
+      break;
+    case 'approval-pending':
+      check(await page.locator('.approval-card.pending .approval-card-allow').count() === 1, 'approval-pending: Allow button shown');
+      check(await page.locator('.approval-card.pending .approval-card-deny').count() === 1, 'approval-pending: Deny button shown');
+      break;
+    case 'approval-settled':
+      check(await page.locator('.approval-card.granted').count() === 1, 'approval-settled: card settles to granted');
+      check(await page.locator('.approval-card.pending').count() === 0, 'approval-settled: no pending card left for this request');
+      check(await page.locator('.approval-card.granted .approval-card-allow').count() === 0, 'approval-settled: settled card has no action buttons');
+      break;
+    case 'usage-line': {
+      const usage = await page.locator('.usage-line').innerText();
+      check(usage.includes('in') && usage.includes('out'), 'usage-line: token counts shown');
+      check(usage.includes('context'), 'usage-line: context fill shown');
+      check(usage.includes('subagent'), 'usage-line: subagent count shown');
+      check(await page.locator('.message-list .usage-line').count() === 0, 'usage-line: pinned outside the scrolling message list');
+      break;
+    }
+    case 'retracted-attempt': {
+      const text = await page.locator('.message-list').innerText();
+      check(!text.includes('taskOps'), 'retracted-attempt: the retracted JSON attempt never reached the screen');
+      check(!text.includes('Split it'), 'retracted-attempt: the retracted prose attempt never reached the screen');
+      check(text.includes('Task 3 splits cleanly into 3a and 3b.'), 'retracted-attempt: the settled reply is shown');
+      break;
+    }
+    case 'turn-open':
+      check(await page.locator('.send-btn.processing').count() === 1, 'turn-open: input shows the turn is live');
+      break;
+  }
+}
 
-// The title opens the live block; clicking the opened text collapses it again.
-await page.locator('.activity-think-toggle').first().click();
-check(await page.locator('.activity-think.expanded').count() === 1, 'title click opens the streaming thinking block');
-check((await page.locator('.activity-think-pre').innerText()).includes('explore the workspace'), 'thinking text visible when opened mid-stream');
-await page.locator('.activity-think-body').first().click();
-check(await page.locator('.activity-think.expanded').count() === 0, 'clicking the opened text collapses it');
+async function expandAllRoundTrip(page) {
+  check(await page.locator('.detail-toggle').count() === 1, 'header: one expand-all control, no per-block controls');
+  await page.locator('.detail-toggle').click();
+  check(await page.locator('.activity-think.expanded').count() >= 1, 'expand-all: thinking opens');
+  check(await page.locator('.cmd-row.expanded').count() >= 1, 'expand-all: command rows open');
+  check(await page.locator('.subagent-card.expanded').count() === 2, 'expand-all: every subagent opens together, not one at a time');
+  await page.screenshot({ path: path.join(OUT, 'expand-all.png') });
+  await page.locator('.detail-toggle').click();
+  check(await page.locator('.activity-think.expanded').count() === 0, 'expand-all: collapses back as one toggle');
+}
 
-// Narrated prose (content tokens) must render as a thinking dropdown at its
-// point in the stream, never as bare message text below the activities.
-await page.evaluate(() => window.__replay(window.__demo.slice(7, 8), 40));
-check(await page.locator('.chat-msg-planner .chat-msg-content').count() === 0, 'streamed prose is not shown as bare message text');
-check(await page.locator('.activity-think').count() === 2, 'streamed prose renders as its own thinking dropdown');
+async function queuedPromptAndEscape(page) {
+  // Someone typing a follow-up while a turn streams is watching it, i.e. at
+  // the bottom already — App's own scroll-pin only follows new content while
+  // `userPinnedToBottomRef` is true, which a scripted mid-conversation jump
+  // (rather than a real user's scroll) may otherwise leave unset.
+  await page.evaluate(() => document.querySelector('.message-list')?.scrollTo(0, 1e6));
+  await page.waitForTimeout(60); // let the scroll listener record the pin before typing races it
+  await page.evaluate(() => window.__typeUser('add caching too'));
+  // The scroll-into-view on a newly queued prompt is `behavior: 'smooth'`;
+  // a short wait here would screenshot mid-animation with the bubble still
+  // clipped below the fold.
+  await page.waitForTimeout(500);
+  check(await page.locator('.queued-prompt').count() === 1, 'queued-prompt: held while the turn is live');
+  check((await page.locator('.queued-prompt-bubble').innerText()) === 'add caching too', 'queued-prompt: shows the held text');
+  check(await page.locator('.queued-prompt-unsend').count() === 1, 'queued-prompt: the newest carries the × unsend');
+  await page.screenshot({ path: path.join(OUT, 'queued-prompt.png') });
 
-// 2. Narrated prose + tool calls + question message.
-await page.evaluate(() => window.__replay(window.__demo.slice(8, 17), 40));
-await page.screenshot({ path: path.join(OUT, '2-question-turn.png') });
+  await page.evaluate(() => window.__pressEscape());
+  await page.waitForTimeout(60);
+  check(await page.locator('.queued-prompt').count() === 0, 'esc-unsend: Esc takes back the queued prompt');
+  check(await page.locator('.chat-input-row textarea').inputValue() === 'add caching too', 'esc-unsend: the text lands back in the input');
 
-check(await page.locator('.activity-tool-call').count() >= 2, 'command executions rendered inside the turn');
+  await page.evaluate(() => window.__pressEscape());
+  await page.waitForTimeout(60);
+  check(await page.locator('.stop-hint').count() === 1, 'esc-arm: first Esc (nothing queued) arms the stop hint');
+  await page.screenshot({ path: path.join(OUT, 'esc-armed.png') });
 
-// Thinking and command executions must interleave in execution order —
-// narrated prose folds into thinking dropdowns at its point in the stream,
-// never pooling above or below the command list.
-const activitySeq = await page.evaluate(() =>
-  [...document.querySelectorAll('.chat-msg-activities > *')].map((el) =>
-    el.classList.contains('activity-think') ? 'think' : 'tool'),
-);
-check(
-  JSON.stringify(activitySeq) === JSON.stringify(['think', 'tool', 'think', 'tool', 'think']),
-  `thinking and commands interleave in execution order (got ${activitySeq.join(',')})`,
-);
-check((await page.locator('.chat-msg-planner .chat-msg-content').last().innerText()).includes('Question'), 'planner question rendered as chat message');
-check(await page.locator('.activity-think.expanded').count() === 0, 'thinking dropdowns collapsed once the turn finished');
-check(await page.locator('.send-btn.processing').count() === 0, 'input back to send state after the question');
+  await page.evaluate(() => window.__pressEscape());
+  await page.waitForTimeout(60);
+  const posted = await page.evaluate(() => window.__posted.some((m) => m.type === 'stopResearch'));
+  check(posted, 'esc-esc: second Esc sends stopResearch');
+  check(await page.locator('.send-btn.processing').count() === 0, 'esc-esc: the turn stops on screen');
+  check(await page.locator('.stop-hint').count() === 0, 'esc-esc: the stop hint clears once stopped');
+}
 
-// Sequential order: user bubble before the planner turn in the DOM.
-const order = await page.evaluate(() => {
-  const nodes = [...document.querySelectorAll('.message-list .chat-msg')];
-  return nodes.map((n) => (n.classList.contains('chat-msg-user') ? 'user' : 'planner'));
-});
-check(order[0] === 'user' && order[1] === 'planner', `timeline is user→planner top-to-bottom (got ${order.join(',')})`);
+async function reloadScenario(page) {
+  const driver = createDriver();
+  await page.evaluate(() => window.__posted.length = 0);
+  await send(page, { type: 'restoreChat' });
+  driver.host.reload(RELOAD_FIXTURE);
+  await sendAll(page, driver.take());
+  await send(page, { type: 'planUpdated', plan: RELOAD_PLAN });
+  await page.waitForTimeout(60);
 
-// 3. Answer, outline, confirm, plan commit.
-await page.evaluate(() => window.__replay(window.__demo.slice(17), 40));
-await page.waitForSelector('.plan-card-group', { timeout: 5000 });
-await page.screenshot({ path: path.join(OUT, '3-plan-committed.png'), fullPage: true });
+  const text = await page.locator('.message-list').innerText();
+  check(text.includes('add a parser'), 'reload: the user goal is restored');
+  check(text.includes('Which formats do you need?'), 'reload: the planner reply before the plan is restored');
+  check(text.includes('Anything else you want tweaked?'), 'reload: the planner reply after the plan is restored');
+  check(await page.locator('.plan-revision-chip').count() === 1, 'reload: the plan marker is restored');
+  check(await page.locator('.cmd-row').count() === 1, 'reload: a tool row survives reload (R1)');
+  check(await page.locator('.subagent-card').count() === 1, 'reload: a subagent (with its digest) survives reload (R1)');
+  check(await page.locator('.subagent-card-digest').innerText() === 'No parser exists yet.', 'reload: the subagent digest is shown even collapsed');
+  check(await page.locator('.activity-think').count() === 0, 'reload: thinking is deliberately NOT reconstructed (R1)');
+  check(await page.locator('.usage-line').count() === 1, 'reload: the token line survives reload (R1)');
+  check(await page.locator('.plan-dock .task-card').count() === 1, 'reload: the plan dock repopulates from the reload');
 
-check(await page.locator('.plan-card-group').count() === 1, 'plan cards rendered at the commit point');
-const fullOrder = await page.evaluate(() => {
-  const nodes = [...document.querySelectorAll('.message-list > *')];
-  return nodes.map((n) => {
-    if (n.classList.contains('chat-msg-user')) return 'user';
-    if (n.querySelector('.plan-card-group')) return 'plan';
-    if (n.classList.contains('chat-msg')) return 'planner';
-    return null;
-  }).filter(Boolean);
-});
-console.log(`  timeline: ${fullOrder.join(' → ')}`);
-check(fullOrder[fullOrder.length - 1] === 'plan', 'plan block is the final timeline item');
-check(
-  JSON.stringify(fullOrder.slice(0, 6)) === JSON.stringify(['user', 'planner', 'user', 'planner', 'user', 'planner']),
-  'strict user→planner alternation preserved across the whole conversation',
-);
+  // Anchor position: the plan marker sits before the trailing planner message.
+  const order = await page.evaluate(() => [...document.querySelectorAll('.message-list .conversation > *')]
+    .map((el) => (el.classList.contains('plan-revision-chip-row') ? 'plan' : el.className.includes('chat-msg-planner') ? 'planner' : el.className)));
+  const planIdx = order.indexOf('plan');
+  check(planIdx > 0 && planIdx < order.length - 1, `reload: plan marker anchored before the trailing message (order: ${order.join(',')})`);
 
-// 4. Reopen a collapsed thinking dropdown — the FULL streamed text must be
-// there (both the first and the last delta) and nothing visually clipped.
-await page.locator('.activity-think-toggle').first().click();
-check(await page.locator('.activity-think.expanded').count() === 1, 'collapsed thinking dropdown reopens on click');
-const reopened = await page.locator('.activity-think.expanded .activity-think-pre').innerText();
-check(
-  reopened.includes('The goal is vague')
-    && reopened.includes('then read the README.')
-    && reopened.trim().endsWith('Let me inspect the repository structure first.'),
-  'reopened thinking shows the full streamed text including folded prose (start and end intact)',
-);
-const clipped = await page.evaluate(() => {
-  const el = document.querySelector('.activity-think.expanded .activity-think-pre');
-  return el ? el.scrollHeight > el.clientHeight + 1 : true;
-});
-check(!clipped, 'reopened thinking text is not visually clipped');
-await page.screenshot({ path: path.join(OUT, '4-thinking-reopened.png') });
+  await page.screenshot({ path: path.join(OUT, 'reload-from-transcript.png') });
+}
+
+const COMBOS = [
+  { width: 420, theme: 'dark', primary: true },
+  { width: 900, theme: 'dark' },
+  { width: 420, theme: 'light' },
+  { width: 900, theme: 'light' },
+];
+const REPRESENTATIVE = new Set(['plan-marker', 'approval-pending', 'usage-line', 'subagent-collapsed']);
+const CONTRAST_SELECTORS = ['.chat-msg-content', '.cmd-row-head', '.usage-line-tokens', '.approval-card-subject', '.plan-revision-chip'];
+
+for (const combo of COMBOS) {
+  console.log(`\n== ${combo.width}px, ${combo.theme} theme ${combo.primary ? '(primary)' : ''} ==`);
+  const page = await browser.newPage({ viewport: { width: combo.width, height: 1400 } });
+  const driver = createDriver();
+  await page.goto(`${BASE}/?theme=${combo.theme}`);
+  await page.exposeFunction('__toHost', async (msg) => {
+    if (!driver.reply(msg)) return;
+    driver.host.flush();
+    await sendAll(page, driver.take());
+  });
+  await page.waitForSelector('.chat-container');
+
+  const suffix = combo.primary ? '' : `-${combo.width}-${combo.theme}`;
+
+  for (const s of MAIN_SCENARIO) {
+    if (s.post) {
+      await send(page, s.post);
+    } else if (s.drive) {
+      s.drive(driver.host);
+      driver.host.flush();
+      await sendAll(page, driver.take());
+    } else if (s.mark) {
+      const shouldShoot = combo.primary || REPRESENTATIVE.has(s.mark);
+      if (shouldShoot) {
+        await page.waitForTimeout(30);
+        await page.screenshot({ path: path.join(OUT, `${s.mark}${suffix}.png`) });
+      }
+      if (combo.primary) await assertMark(page, s.mark);
+      if (s.mark === 'subagent-collapsed' && combo.primary) await expandAllRoundTrip(page);
+      if (s.mark === 'turn-open') {
+        if (combo.primary) await queuedPromptAndEscape(page);
+      }
+    }
+  }
+
+  if (combo.primary) await reloadScenario(page);
+
+  for (const sel of CONTRAST_SELECTORS) {
+    const ratio = await contrastRatio(page, sel);
+    if (ratio === null) continue; // not present in every combo (e.g. after Esc closed the turn)
+    check(ratio >= 4.5, `contrast ${combo.width}/${combo.theme} ${sel}: ${ratio.toFixed(2)}:1 (WCAG AA text needs 4.5:1)`);
+  }
+
+  await page.close();
+}
 
 await browser.close();
-console.log(`\nscreenshots: ${OUT}/1-thinking-streaming.png, 2-question-turn.png, 3-plan-committed.png, 4-thinking-reopened.png`);
+console.log(`\nscreenshots: ${OUT}/`);
 if (failures.length) {
   console.log(`${failures.length} FAILURE(S)`);
   process.exit(1);
