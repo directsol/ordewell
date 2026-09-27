@@ -588,8 +588,11 @@ async function visibilitySuite() {
   // Parallel same-tool calls must be distinguishable — a surface matching by
   // tool name alone would put vc-2's body on vc-1's line.
   assert(byId.get('vc-1')?.result !== byId.get('vc-2')?.result, 'parallel same-tool results stay distinct', failures);
+  // Reasoning inside a turn now streams as `planner_thinking_delta` (it has a
+  // turn and segment to attach to); `plan_thinking` remains for turn-less
+  // reasoning. Accept either until they collapse into one message.
   assert(
-    broadcasts.some((m) => m.type === 'plan_thinking' && m.text.length > 0),
+    broadcasts.some((m) => (m.type === 'plan_thinking' || m.type === 'planner_thinking_delta') && m.text.length > 0),
     'reasoning is broadcast for the surfaces that render it',
     failures,
   );
