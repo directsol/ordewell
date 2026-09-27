@@ -4,7 +4,7 @@
  */
 
 // eslint-disable-next-line no-control-regex
-const ANSI_OR_CTRL_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[()][AB012]|\x1b[=>]|[\x00-\x08\x0b-\x1f\x7f]/g;
+export const ANSI_OR_CTRL_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[()][AB012]|\x1b[=>]|[\x00-\x08\x0b-\x1f\x7f]/g;
 
 /**
  * Collapse terminal rendering out of raw PTY output: strip ANSI/OSC escape
