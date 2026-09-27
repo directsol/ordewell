@@ -1307,6 +1307,31 @@ describe('CliAgentAiService — one-shot plan generation', () => {
     expect(svc.hasActiveConversation()).toBe(false);
   });
 
+  // The plan display a vendor planner's one-shot feeds token by token. The
+  // agent's narration around the envelope is prose, which a one-shot does not
+  // stream.
+  it('streams the plan envelope to the plan display, and nothing of the narration', async () => {
+    const plan = planJson();
+    const svc = new CliAgentAiService(fakeConfig({ aiProvider: 'claude-code' }), {
+      createAdapter: scriptedAdapter([[
+        { type: 'assistant_text', text: 'Here is the plan.' },
+        { type: 'tool_call', id: 'c1', name: 'Read', args: { file_path: 'README.md' } },
+        { type: 'tool_result', id: 'c1', name: 'Read', output: '# App', success: true },
+        { type: 'assistant_text_delta', text: plan.slice(0, 40) },
+        { type: 'assistant_text_delta', text: plan.slice(40) },
+        { type: 'assistant_text', text: plan },
+        { type: 'turn_end' },
+      ]]),
+      workspaceRoot: () => '/repo',
+    });
+    const tokens: string[] = [];
+
+    const tasks = await svc.generatePlanDirect('Add the thing', ['claude-code'], {}, (token) => tokens.push(token));
+
+    expect(tasks).toHaveLength(1);
+    expect(tokens.join('')).toBe(plan);
+  });
+
   it('generates a validated plan through a Codex session', async () => {
     const { svc, spawned } = service('codex', [...codexHandshake(), fixture('codex', 'plan', { PLAN: planJson('codex') })]);
     const tasks = await svc.sendPlanningPrompt('Plan the thing', ['codex']);

@@ -22,6 +22,7 @@ import {
 } from '../PlanPrompts';
 import { generatePlanWithRepair } from '../PlanRepair';
 import { settleReply, type ReplyAttempt } from '../settleReply';
+import { ReplySplitter } from '../replyStream';
 import { redactSecrets } from '../../utils/redactSecrets';
 import { abortScope } from '../../utils/abortScope';
 import { runnerForProvider } from '../ProviderRegistry';
@@ -502,7 +503,9 @@ export class CliAgentAiService implements IAiService {
   /**
    * A single agent session that answers one prompt and exits. Used by every
    * non-conversational entry point; the plan is parsed from the reply text by
-   * the same extractor the conversational path uses.
+   * the same extractor the conversational path uses. Its envelope streams to
+   * the plan display, as a vendor planner's one-shot does, and the prose
+   * around it is not streamed at all, since no turn is open to show it in.
    */
   private async oneShot(prompt: string, onProgress?: (p: ResearchProgress) => void, signal?: AbortSignal): Promise<{ text: string; researchLog: ResearchLogEntry[] }> {
     const previous = this.adapter;
@@ -523,9 +526,14 @@ export class CliAgentAiService implements IAiService {
         startOptions,
         runners: [],
       };
+      const splitter = new ReplySplitter();
       const turn = await this.runTurn(
         'Follow the instructions in your system prompt and produce the plan now.',
-        onProgress ?? (() => {}),
+        (p) => {
+          if (p.type !== 'text_delta') return onProgress?.(p);
+          const routed = p.segmentId && p.text ? splitter.push(p.segmentId, p.text) : null;
+          if (routed?.route === 'plan') onProgress?.({ type: 'plan_token', planToken: routed.text, segmentId: p.segmentId });
+        },
         signal,
       );
       if (turn.error) throw new Error(turn.error);
