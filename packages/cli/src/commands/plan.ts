@@ -230,6 +230,7 @@ export async function handlePlan(
   });
 
   try {
+    await stream.ready;
     let plan: SerializedPlan | undefined;
     let models: DiscoveredModel[] = [];
 

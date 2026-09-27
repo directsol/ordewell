@@ -152,6 +152,24 @@ describe('ApiClient', () => {
     stream.close();
   });
 
+  it('streamPlanning says when its socket is open, and settles too when it cannot connect', async () => {
+    const wss = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => wss.once('listening', () => resolve()));
+    const port = (wss.address() as { port: number }).port;
+    let subscribed = false;
+    wss.on('connection', () => { subscribed = true; });
+    servers.push({ close: () => wss.close() });
+
+    const stream = new ApiClient(port).streamPlanning('session-x', () => {});
+    await stream.ready;
+    expect(subscribed || (await new Promise((r) => setTimeout(() => r(subscribed), 50)))).toBe(true);
+    stream.close();
+
+    const refused = new ApiClient(1).streamPlanning('session-x', () => {});
+    await expect(refused.ready).resolves.toBeUndefined();
+    refused.close();
+  });
+
   it('updateSettings sends PATCH to /api/settings with the payload', async () => {
     const srv = await startCustomServer((req, res) => {
       let body = '';

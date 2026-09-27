@@ -105,6 +105,21 @@ describe('planning', () => {
   const heard = (actions: Action[]): SessionMessage[] =>
     actions.flatMap((a) => (a.type === 'sessionMessage' ? [a.message] : []));
 
+  it('opens the planning socket before sending the turn, so the turn\'s start is not broadcast into nothing', async () => {
+    let open: () => void = () => {};
+    const h = harness({
+      streamPlanning: vi.fn().mockReturnValue({ close: vi.fn(), ready: new Promise<void>((resolve) => { open = resolve; }) }),
+    });
+
+    const sent = runEffect({ type: 'sendMessage', sessionId: 's1', message: 'add streaming' }, h.deps);
+    await Promise.resolve();
+    expect(h.api.sendConversationMessage).not.toHaveBeenCalled();
+
+    open();
+    await sent;
+    expect(h.api.sendConversationMessage).toHaveBeenCalledWith('s1', 'add streaming');
+  });
+
   it('passes the turn\'s messages to the reducer as they came, one action each', async () => {
     const step = {
       id: 'rs-1', tool: 'bash', args: '{"command":"rm -rf /"}', result: 'Command refused: writes are the runners\' job.',
