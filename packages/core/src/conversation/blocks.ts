@@ -120,6 +120,8 @@ export interface PlanBlock {
   text: string;
   taskCount?: number;
   turnId?: string;
+  /** While building: the segment whose envelope is streaming, which a retraction of that segment takes back. */
+  segmentId?: string;
 }
 
 /** The token line. There is at most one, and it is always the last block. */

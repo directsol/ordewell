@@ -344,7 +344,7 @@ export class Session {
       hasLiveWork: () => this.hasLiveWork,
       mutate: (op, notify) => this.mutatePlan(op, notify),
       broadcast: (msg) => this.broadcast(msg),
-      broadcastPlan: () => this.broadcastPlan(),
+      broadcastPlan: (turnId) => this.broadcastPlan(turnId),
       validateOps: (ops) => applyTaskOps(this.store.planTasks, ops, this.plan!.runners, this.editCatalog()),
       adoptTasks: (tasks, how) => this.adoptPlannerTasks(tasks, how),
       capturePrd: (text) => this.capturePrd(text),
@@ -483,7 +483,7 @@ export class Session {
         if (progress.tool) this.broadcast({ type: 'research_step', tool: progress.tool, toolLabel: progress.toolLabel, args: progress.toolArgs || '', subagentId, toolCallId: progress.toolCallId, turnId });
         return;
       case 'plan_token':
-        if (progress.planToken) this.broadcast({ type: 'plan_token', token: progress.planToken, turnId });
+        if (progress.planToken) this.broadcast({ type: 'plan_token', token: progress.planToken, turnId, segmentId });
         return;
       case 'tool_result':
         if (progress.step) {
@@ -1545,13 +1545,14 @@ export class Session {
     this.unsubObserver = null;
   }
 
-  private broadcastPlan(): void {
+  private broadcastPlan(turnId?: string): void {
     if (!this.plan) return;
     this.broadcast({
       type: 'plan_generated',
       plan: serializePlan(this.plan),
       goal: this.goal,
       runners: this.plan.runners,
+      ...(turnId ? { turnId } : {}),
     });
   }
 

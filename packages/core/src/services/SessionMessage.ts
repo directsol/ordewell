@@ -61,7 +61,12 @@ export type PlannerTurnOutcome = 'message' | 'plan' | 'task_ops' | 'stopped' | '
  *   tagged with its `subagentId`.
  */
 export type SessionMessage =
-  | { type: 'plan_generated'; plan: SerializedPlan; goal: string; runners: RunnerId[] }
+  /**
+   * The plan, whole. `turnId` names the planner turn whose commit this
+   * broadcast carries, so the turn's building plan becomes the marker; it is
+   * absent on every other broadcast of the plan.
+   */
+  | { type: 'plan_generated'; plan: SerializedPlan; goal: string; runners: RunnerId[]; turnId?: string }
   /**
    * The settled reply of a planner turn, emitted by the session once the turn
    * is classified. Authoritative over any `planner_text_delta` of its turn's
@@ -99,6 +104,8 @@ export type SessionMessage =
    * Text streamed for an attempt the turn discarded (a corrective retry) is
    * taken back: a surface removes it. With `segmentId`, only that segment;
    * without, all of the turn's text not yet settled by a `planner_message`.
+   * A segment that streamed to the plan display (`plan_token`) takes the
+   * turn's building plan with it.
    */
   | { type: 'planner_text_retracted'; turnId: string; segmentId?: string }
   /**
@@ -160,7 +167,9 @@ export type SessionMessage =
   | { type: 'research_step'; tool: string; toolLabel?: string; args: string; subagentId?: string; toolCallId?: string; turnId?: string }
   // The "building plan" display only: a JSON envelope as it streams, never
   // reply prose. `turnId` is absent for a one-shot plan, which has no turn.
-  | { type: 'plan_token'; token: string; turnId?: string }
+  // `segmentId` names the segment the envelope streams in; a turn's next
+  // envelope is a new segment, and the display starts over with it.
+  | { type: 'plan_token'; token: string; turnId?: string; segmentId?: string }
   | { type: 'research_step_done'; step: ResearchStep; subagentId?: string; turnId?: string }
   // Planner research wants something outside its default envelope and is
   // blocked until a human answers. Broadcast rather than returned, because the

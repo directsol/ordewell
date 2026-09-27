@@ -20,13 +20,8 @@ import {
   buildPlanWithResults,
   buildModifyPlanPrompt,
 } from '../PlanPrompts';
-import {
-  classifyPlannerReply,
-  generatePlanWithRepair,
-  reEmitPlanPrompt,
-  reEmitTaskOpsPrompt,
-  reEmitTaskQueryPrompt,
-} from '../PlanRepair';
+import { generatePlanWithRepair } from '../PlanRepair';
+import { settleReply, type ReplyAttempt } from '../settleReply';
 import { redactSecrets } from '../../utils/redactSecrets';
 import { runnerForProvider } from '../ProviderRegistry';
 import { collectResearchContext } from '../ContextCollector';
@@ -37,9 +32,6 @@ import { OpenCodeAdapter } from './OpenCodeAdapter';
 import { mapAgentTool, normalizeAgentArgs } from './agentTools';
 import { DEFAULT_PLANNER_MODES, type PlannerModes } from '../plannerModes';
 
-/** Corrective re-emits allowed for botched JSON, matching the API backend. */
-const MAX_JSON_REPAIRS = 2;
-
 /**
  * How many times a turn that backgrounded a subagent may be asked to wait for
  * it. Bounded like the repair loop and for the same reason: an agent that keeps
@@ -48,6 +40,16 @@ const MAX_JSON_REPAIRS = 2;
  * running, and one retry is what turns "not yet" into the report.
  */
 const MAX_AGENT_WAITS = 2;
+
+function waitForAgentsPrompt(running: number): string {
+  return [
+    `You ended your turn with ${running} subagent(s) still running in the background.`,
+    'Ordewell hands the conversation back to the user when your turn ends, so anything you say after it never reaches them —',
+    'the results you promised to report would be lost.',
+    'Wait for those agents to finish NOW, in this reply, and do not end your turn until you have their results.',
+    'Then give the user your synthesis. In future replies, await your agents inside the turn rather than backgrounding them.',
+  ].join(' ');
+}
 
 /** Kept out of the reply text and the log; a long trace would drown both. */
 const LOG_MAX_CHARS = 10000;
@@ -86,8 +88,8 @@ interface HarnessTurn {
  * `GeminiService`. It deliberately does **not** extend {@link BaseAiService}:
  * that class's body is Ordewell executing research tools on a model's behalf,
  * which is precisely the part a coding agent replaces. What it reuses instead
- * is everything above the transport — `classifyPlannerReply`, the bounded
- * corrective re-emit loop, `parsePlanJson`, the `ResearchProgress` events the
+ * is everything above the transport — `settleReply` (reply classification
+ * and the bounded corrective retries), `parsePlanJson`, the `ResearchProgress` events the
  * four surfaces already render. That is why this backend reaches VS Code, the
  * web UI, the CLI and the TUI without any of them learning a coding agent is
  * on the other end.
@@ -223,10 +225,10 @@ export class CliAgentAiService implements IAiService {
   }
 
   /**
-   * Drive one user message to a settled planner turn. Same shape as the API
-   * backend's conversation loop minus the tool rounds — those belong to the
-   * agent now — and with the same two policies layered on top: the
-   * empty-reply nudge, and a bounded corrective re-emit for botched JSON.
+   * Drive one user message to a settled planner turn through
+   * {@link settleReply}, the loop the API backend settles through too. The
+   * tool rounds belong to the agent now, so one call is one agent turn —
+   * continued while it left subagents running in the background.
    */
   private async runConversation(
     message: string,
@@ -235,139 +237,51 @@ export class CliAgentAiService implements IAiService {
   ): Promise<ConversationTurn> {
     const conversation = this.conversation!;
     const combined = this.startAbortScope(signal);
-    const researchLog: ResearchLogEntry[] = [];
-    let pending = message;
-    let emptyNudgeSent = false;
-    let jsonRepairAttempts = 0;
     let agentWaits = 0;
     // Text from turns Ordewell continued past on the user's behalf. A wait is
     // not a new user message, so the reply they read is the whole answer.
     const carried: string[] = [];
-    const replyText = (text: string) => [...carried, text].filter((part) => part.trim()).join('\n\n');
 
-    try {
-      for (;;) {
-        const turn = await this.runTurn(pending, onProgress, combined);
+    const send = async (text: string): Promise<ReplyAttempt> => {
+      let turn = await this.runTurn(text, onProgress, combined);
+      const researchLog: ResearchLogEntry[] = [...turn.researchLog];
+      // The agent ended its turn with subagents still running, so whatever
+      // they find is about to be said into a closed turn. Ask for it while a
+      // turn is still open — this is the whole recovery, and it is bounded.
+      while (turn.backgroundAgents > 0 && agentWaits < MAX_AGENT_WAITS && turn.text.trim() && !turn.error && !turn.aborted && !combined?.aborted) {
+        agentWaits++;
+        carried.push(turn.text);
+        turn = await this.runTurn(waitForAgentsPrompt(turn.backgroundAgents), onProgress, combined);
         researchLog.push(...turn.researchLog);
-
-        if (turn.aborted || combined?.aborted) {
-          // Every segment this turn streamed is about to be folded into one
-          // settled bubble (`replyText`); left in place, an earlier segment a
-          // tool call sealed would still show, duplicating its own text.
-          onProgress({ type: 'text_retracted' });
-          onProgress({ type: 'interrupted' });
-          return { kind: 'message', text: replyText(turn.text), researchLog };
-        }
-
+      }
+      return {
+        text: turn.text,
+        researchLog,
+        aborted: turn.aborted || combined?.aborted,
         // Fail visibly, per the repo's fail-safe contract: an agent that died,
         // hit its rate limit, or lost its login must say so in the chat rather
         // than leave an empty planner bubble.
-        if (turn.error) {
-          return { kind: 'message', text: turn.error, researchLog };
-        }
+        failure: turn.error,
+        fullText: [...carried, turn.text].filter((part) => part.trim()).join('\n\n'),
+      };
+    };
 
-        if (!turn.text.trim()) {
-          // An agent whose tool was refused can end its turn on the refusal,
-          // saying nothing. Naming it keeps the failure visible instead of
-          // reporting a blank reply the user cannot act on.
-          const refused = turn.researchLog.find((step) => step.outcome === 'denied');
-          if (!emptyNudgeSent) {
-            emptyNudgeSent = true;
-            // Deltas can stream for a run whose complete text then comes back
-            // empty; the nudged reply answers in their place.
-            onProgress({ type: 'text_retracted' });
-            pending = refused
-              ? `Your last reply was empty because "${refused.toolLabel ?? refused.tool}" was refused: you are planning read-only and confined to this workspace. Do not retry it. Answer the user now with what you already know, or ask your next question.`
-              : 'Your last reply was empty. Respond to the user now: answer their last message directly, ask your next question, or emit the plan JSON.';
-            continue;
-          }
-          return {
-            kind: 'message',
-            text: refused
-              ? `The planner stopped without replying: "${refused.toolLabel ?? refused.tool}" was refused because planning is read-only and confined to this workspace.`
-              : 'The planner returned an empty reply twice. Please rephrase or try again.',
-            researchLog,
-          };
-        }
-
-        // The agent ended its turn with subagents still running, so whatever
-        // they find is about to be said into a closed turn. Ask for it while a
-        // turn is still open — this is the whole recovery, and it is bounded.
-        if (turn.backgroundAgents > 0 && agentWaits < MAX_AGENT_WAITS && !combined?.aborted) {
-          agentWaits++;
-          carried.push(turn.text);
-          pending = [
-            `You ended your turn with ${turn.backgroundAgents} subagent(s) still running in the background.`,
-            'Ordewell hands the conversation back to the user when your turn ends, so anything you say after it never reaches them —',
-            'the results you promised to report would be lost.',
-            'Wait for those agents to finish NOW, in this reply, and do not end your turn until you have their results.',
-            'Then give the user your synthesis. In future replies, await your agents inside the turn rather than backgrounding them.',
-          ].join(' ');
-          continue;
-        }
-
-        const reply = classifyPlannerReply(turn.text, {
-          runners: conversation.runners,
-          runnerModes: conversation.runnerModes,
-          autonomousDefault: conversation.autonomousDefault,
-        });
-
-        switch (reply.kind) {
-          case 'task_ops':
-            return { kind: 'task_ops', ops: reply.ops, text: replyText(turn.text), researchLog };
-
-          // The read channel is a text envelope precisely so it reaches here
-          // too: a harness planner has no Ordewell tool loop to call into.
-          case 'task_query':
-            return { kind: 'task_query', query: reply.query, text: replyText(turn.text), researchLog };
-
-          case 'plan':
-            // A committed plan closes the conversation, matching the API
-            // backend: post-plan chat re-enters through `startConversation`
-            // with the plan's own transcript rather than inheriting this
-            // session's context.
-            this.conversation = null;
-            return { kind: 'plan', tasks: reply.tasks, text: replyText(turn.text), researchLog };
-
-          // As in the API backend, the re-emit replaces what the botched
-          // attempt streamed.
-          case 'broken_task_ops':
-            if (jsonRepairAttempts < MAX_JSON_REPAIRS && !combined?.aborted) {
-              jsonRepairAttempts++;
-              onProgress({ type: 'text_retracted' });
-              pending = reEmitTaskOpsPrompt(reply.error.message);
-              continue;
-            }
-            break;
-
-          case 'broken_task_query':
-            if (jsonRepairAttempts < MAX_JSON_REPAIRS && !combined?.aborted) {
-              jsonRepairAttempts++;
-              onProgress({ type: 'text_retracted' });
-              pending = reEmitTaskQueryPrompt(reply.error.message);
-              continue;
-            }
-            break;
-
-          case 'broken_plan':
-            if (jsonRepairAttempts < MAX_JSON_REPAIRS && !combined?.aborted) {
-              jsonRepairAttempts++;
-              onProgress({ type: 'text_retracted' });
-              pending = reEmitPlanPrompt(reply.error.message);
-              continue;
-            }
-            break;
-
-          case 'prose':
-            break;
-        }
-
-        // Same reasoning as the interrupted return above: `replyText` is the
-        // whole turn's text, a tool call's earlier segment included, so the
-        // settled bubble must not sit next to that segment's own leftover one.
-        onProgress({ type: 'text_retracted' });
-        return { kind: 'message', text: replyText(turn.text), researchLog };
-      }
+    try {
+      const turn = await settleReply({
+        message,
+        send,
+        classify: { runners: conversation.runners, runnerModes: conversation.runnerModes, autonomousDefault: conversation.autonomousDefault },
+        onProgress,
+        signal: combined,
+        // `runTurn` folds every run of text the agent's turn produced into its
+        // reply, a tool call's earlier segment included.
+        replyJoinsSegments: true,
+      });
+      // A committed plan closes the conversation, matching the API backend:
+      // post-plan chat re-enters through `startConversation` with the plan's
+      // own transcript rather than inheriting this session's context.
+      if (turn.kind === 'plan') this.conversation = null;
+      return turn;
     } finally {
       this.activeAbort = null;
     }
