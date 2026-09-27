@@ -13,7 +13,7 @@ export type SavedConversation = Pick<LegacyPlanState, 'conversationHistory' | 'r
 
 /** What a turn streams — everything a stop cuts off. Usage, approvals and transcript markers are facts and still land. */
 const TURN_STREAM = new Set<SessionMessage['type']>([
-  'planner_text_delta', 'planner_thinking_delta', 'planner_text_retracted', 'planner_message', 'plan_thinking', 'plan_token',
+  'planner_text_delta', 'planner_thinking_delta', 'planner_text_retracted', 'planner_message', 'plan_token',
   'research_step', 'research_step_done', 'subagent_started', 'subagent_finished', 'planner_turn_ended',
 ]);
 

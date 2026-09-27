@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatStepLine, isTransient } from '../researchLog';
+import { createStepLog, formatStepLine, isTransient } from '../researchLog';
 import type { WsEvent } from '../../apiClient';
 import type { ResearchStep } from '@ordewell/core';
 
@@ -66,13 +66,6 @@ describe('formatStepLine', () => {
     expect(formatStepLine(done({ result: '' }, { subagentId: 'sub-1' }))).toBe('  ↳ ✓ Read(src/auth.ts)');
   });
 
-  it('drops reasoning unless --verbose asked for it', () => {
-    const event: WsEvent = { type: 'plan_thinking', text: 'Considering  the\nauth flow' };
-
-    expect(formatStepLine(event)).toBeNull();
-    expect(formatStepLine(event, { verbose: true })).toBe('  · Considering the auth flow');
-  });
-
   it('prints nothing for lifecycle events or a malformed done event', () => {
     expect(formatStepLine({ type: 'status_update', tasks: [] })).toBeNull();
     expect(formatStepLine({ type: 'plan_token', token: 'x' })).toBeNull();
@@ -86,6 +79,53 @@ describe('isTransient', () => {
   it('holds the status line only for a call still in flight', () => {
     expect(isTransient({ type: 'research_step', tool: 'grep', args: '{}' })).toBe(true);
     expect(isTransient(done())).toBe(false);
-    expect(isTransient({ type: 'plan_thinking', text: 'x' })).toBe(false);
+    expect(isTransient({ type: 'planner_thinking_delta', text: 'x' })).toBe(false);
+  });
+});
+
+describe('createStepLog', () => {
+  const thought = (text: string, extra: Partial<Extract<WsEvent, { type: 'planner_thinking_delta' }>> = {}): WsEvent =>
+    ({ type: 'planner_thinking_delta', turnId: 't1', text, ...extra });
+
+  it('drops reasoning unless --verbose asked for it', () => {
+    const log = createStepLog();
+
+    expect(log.push(thought('Considering the auth flow'))).toEqual([]);
+    expect(log.flush()).toEqual([]);
+  });
+
+  // The API backends stream thinking a token at a time, in segments.
+  it('prints an API backend\'s streamed thinking as one line once the run ends', () => {
+    const log = createStepLog({ verbose: true });
+
+    const lines = [
+      thought('Considering ', { segmentId: 'r1' }),
+      thought(' the\nauth flow', { segmentId: 'r1' }),
+      { type: 'research_step_done', step: step() } as WsEvent,
+      thought('Now the store.', { segmentId: 'r2' }),
+    ].flatMap((e) => log.push(e));
+
+    expect(lines).toEqual([
+      { text: '  · Considering the auth flow', transient: false },
+      { text: '✓ Read(src/auth.ts) → export const auth = 1;', transient: false },
+    ]);
+    expect(log.flush()).toEqual([{ text: '  · Now the store.', transient: false }]);
+    expect(log.flush()).toEqual([]);
+  });
+
+  it('prints a harness planner\'s unsegmented thinking, each thinker on its own line', () => {
+    const log = createStepLog({ verbose: true });
+
+    const lines = [
+      thought('Grep for the cache.'),
+      thought('Scan src.', { subagentId: 'sa1' }),
+      { type: 'research_step', tool: 'grep', args: '{"pattern":"cache"}' } as WsEvent,
+    ].flatMap((e) => log.push(e));
+
+    expect(lines).toEqual([
+      { text: '  · Grep for the cache.', transient: false },
+      { text: '  · Scan src.', transient: false },
+      { text: 'Grep(cache)', transient: true },
+    ]);
   });
 });

@@ -191,7 +191,7 @@ describe('reduce — stale session results', () => {
     it('strips them from streamed reasoning', () => {
       const { state } = reduce(initialState(), {
         type: 'sessionMessage',
-        message: { type: 'plan_thinking', text: 'weighing\x07 options\x1b[2J' },
+        message: { type: 'planner_thinking_delta', text: 'weighing\x07 options\x1b[2J' },
       });
       expect(plain(state)).toContain('weighing options');
       for (const code of ['\x07', '\x1b[2J']) expect(render(state).join('\n')).not.toContain(code);

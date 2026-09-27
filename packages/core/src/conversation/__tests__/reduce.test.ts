@@ -55,6 +55,27 @@ describe('reduceConversation', () => {
     });
   });
 
+  describe('thinking', () => {
+    // Harness planners never segment their thinking; the API loops do.
+    it('folds thinking deltas into one block per run, with a segment or without', () => {
+      const view = play([
+        { type: 'planner_turn_started', turnId: 't1', prompt: 'why?' },
+        { type: 'planner_thinking_delta', turnId: 't1', text: 'Grep for ' },
+        { type: 'planner_thinking_delta', turnId: 't1', text: 'the cache.' },
+        { type: 'research_step', tool: 'grep', args: '{"pattern":"cache"}', toolCallId: 'c1', turnId: 't1' },
+        { type: 'planner_thinking_delta', turnId: 't1', segmentId: 'r1', text: 'Found ' },
+        { type: 'planner_thinking_delta', turnId: 't1', segmentId: 'r1', text: 'it.' },
+        { type: 'planner_thinking_delta', turnId: 't1', segmentId: 'r2', text: 'Now the store.' },
+      ]);
+
+      expect(unkeyed(view.blocks).filter((b) => b.type === 'thinking')).toEqual([
+        { type: 'thinking', text: 'Grep for the cache.', streaming: false, turnId: 't1' },
+        { type: 'thinking', text: 'Found it.', streaming: false, turnId: 't1', segmentId: 'r1' },
+        { type: 'thinking', text: 'Now the store.', streaming: true, turnId: 't1', segmentId: 'r2' },
+      ]);
+    });
+  });
+
   describe('tool calls', () => {
     it('matches each result of a parallel round to its own call by id, whatever order they return in', () => {
       const view = play(parallelRound);
