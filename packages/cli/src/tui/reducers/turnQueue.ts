@@ -16,7 +16,7 @@ export function drainQueue(state: TuiState, settled: TuiState): Step {
   const next = drainNext(state.queuedPrompts);
   // The arm aimed at the turn that just ended lapses with it — the next turn
   // starts unarmed, and its first Esc has to earn the stop again.
-  const ended = disarmStop(settled);
+  const ended = disarmStop({ ...settled, stopRequested: false });
   if (!next) return step(ended);
   const spoken = say(ended, 'user', next.text);
   const effect: Effect | null = state.sessionId
@@ -46,7 +46,7 @@ export function stopPlanning(state: TuiState, sessionId: string): Step {
   const dismissed = state.overlay?.kind === 'approval'
     ? { ...state, overlay: null, pendingApprovals: [] }
     : state;
-  return step(queueToEditor(cutTurn({ ...dismissed, stopArmed: false })), [{ type: 'cancelPlanning', sessionId }]);
+  return step(queueToEditor(cutTurn({ ...dismissed, stopArmed: false, stopRequested: true })), [{ type: 'cancelPlanning', sessionId }]);
 }
 
 /**

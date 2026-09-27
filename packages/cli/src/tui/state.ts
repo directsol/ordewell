@@ -369,6 +369,11 @@ export interface TuiState {
    * previous arm scheduled can never disarm a later one out of turn.
    */
   stopArmToken: number;
+  /**
+   * The user stopped the turn still in flight. The daemon answers an aborted
+   * turn with an error, and that error is the stop itself, not news.
+   */
+  stopRequested: boolean;
   toast: string;
   rows: number;
   cols: number;
@@ -487,6 +492,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
     queuedPrompts: EMPTY_HOLD,
     stopArmed: false,
     stopArmToken: 0,
+    stopRequested: false,
     toast: '',
     rows: 24,
     cols: 80,

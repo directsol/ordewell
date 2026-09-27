@@ -249,7 +249,8 @@ export function reduce(state: TuiState, action: Action): Step {
       }, ['set-planner', 'set-task-runner']));
 
     case 'failed': {
-      const reported = { ...say(state, 'error', action.message), status: 'idle' as const, busyLabel: '' };
+      const quiet = plannerInFlight(state) && state.stopRequested;
+      const reported = { ...(quiet ? state : say(state, 'error', action.message)), status: 'idle' as const, busyLabel: '' };
       // A planner turn dying IS a turn ending — the queue would otherwise wait
       // on a next one that never comes. An execution failure (or any failure
       // with no turn running) drains nothing.
@@ -395,5 +396,5 @@ function submit(state: TuiState): Step {
     ? { type: 'sendMessage', sessionId: state.sessionId, message: text }
     : { type: 'startConversation', goal: text };
 
-  return step({ ...spoken, status: 'planning' }, [effect]);
+  return step({ ...spoken, status: 'planning', stopRequested: false }, [effect]);
 }

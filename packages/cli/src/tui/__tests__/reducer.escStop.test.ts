@@ -121,3 +121,33 @@ describe('a stopped turn on screen', () => {
     expect(messagesOf(state).map((m) => m.text)).toEqual(['add a parser', 'Half a thou']);
   });
 });
+
+describe('the stopped turn\'s own failure', () => {
+  const escape = (state: TuiState) => reduce(state, { type: 'key', key: { name: 'escape' } }).state;
+  const fail = (state: TuiState, message: string) => reduce(state, { type: 'failed', message }).state;
+
+  it('is not reported as an error: the user asked for it, and the stop says so itself', () => {
+    const stopped = escape(escape(initialState({ status: 'planning', sessionId: 'session-1' })));
+
+    const after = fail(stopped, 'Request was aborted.');
+
+    expect(after.status).toBe('idle');
+    expect(messagesOf(after).filter((m) => m.role === 'error')).toEqual([]);
+  });
+
+  it('is only the stopped turn\'s: a later turn failing is still an error', () => {
+    const stopped = escape(escape(initialState({ status: 'planning', sessionId: 'session-1' })));
+    const settled = fail(stopped, 'Request was aborted.');
+
+    const next = fail({ ...settled, status: 'planning' }, 'rate limited');
+
+    expect(lastMessage(next)).toMatchObject({ role: 'error', text: 'rate limited' });
+  });
+  it('does not outlive its turn when nothing ended it on screen, such as a new session', () => {
+    const base = initialState({ status: 'idle', sessionId: 'session-1', stopRequested: true });
+    const typed = { ...base, editor: { ...base.editor, text: 'try again', cursor: 9 } };
+    const sent = reduce(typed, { type: 'key', key: { name: 'enter' } }).state;
+
+    expect(lastMessage(fail(sent, 'rate limited'))).toMatchObject({ role: 'error', text: 'rate limited' });
+  });
+});
