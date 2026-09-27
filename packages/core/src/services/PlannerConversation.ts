@@ -537,8 +537,8 @@ export class PlannerConversation {
   private async resume(
     message: string,
     priorHistory: ConversationMessage[],
-    signal?: AbortSignal,
-    onProgress: (progress: ResearchProgress) => void = (p) => this.host.onProgress(p),
+    signal: AbortSignal | undefined,
+    onProgress: (progress: ResearchProgress) => void,
   ): Promise<ConversationTurn> {
     const runners = this.requirePlan().runners;
     const opening = await this.host.opening(runners);

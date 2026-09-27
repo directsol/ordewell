@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { ResearchChat, ResearchTurn, ToolResult } from '../BaseAiService';
 import type { IFileSystem } from '../../interfaces/IFileSystem';
 import { runResearchAgent, mapWithConcurrency, SUBAGENT_LIMITS } from '../ResearchSubagents';
+import type { UsageRecord } from '../../models/Usage';
 
 function textTurn(text: string): ResearchTurn {
   return { text, toolCalls: [], hasToolCalls: false };
@@ -211,19 +212,21 @@ describe('runResearchAgent', () => {
     expect(events.filter((e) => (e as { type: string }).type === 'thinking')).toEqual([{ type: 'thinking', text: 'Considering the auth flow…' }]);
   });
 
-  it('forwards each turn\'s reported usage through the progress channel (#49)', async () => {
-    const first = { source: 'openai', model: 'gpt-4o', inputTokens: 100 };
-    const second = { source: 'openai', model: 'gpt-4o', inputTokens: 50 };
-    const chat = scriptedChat([
-      { ...toolTurn('read_file', { path: 'src/a.ts' }), usage: first },
-      { ...textTurn('digest'), usage: second },
-    ]);
+  it('files each call the chat reports under the subagent that made it (#49)', async () => {
+    const chat = scriptedChat([toolTurn('read_file', { path: 'src/a.ts' }), textTurn('digest')]);
     const { fs } = fakeFs();
     const events: import('../../models/Task').ResearchProgress[] = [];
+    const createChat = (_onReasoning: unknown, onUsage: (record: UsageRecord) => void) => ({
+      sendMessage: async (text: string) => { onUsage({ source: 'openai', model: 'gpt-4o', inputTokens: 100 }); return chat.sendMessage(text); },
+      sendToolResults: async (results: ToolResult[]) => { onUsage({ source: 'openai', model: 'gpt-4o', inputTokens: 50 }); return chat.sendToolResults(results); },
+    });
 
-    await runResearchAgent('brief', { createChat: () => chat, fs, onProgress: (p) => events.push(p) });
+    await runResearchAgent('brief', { createChat, fs, subagentId: 'sa1', onProgress: (p) => events.push(p) });
 
-    expect(events.filter((p) => p.type === 'usage').map((p) => p.record)).toEqual([first, second]);
+    expect(events.filter((p) => p.type === 'usage').map((p) => p.record)).toEqual([
+      { source: 'openai', model: 'gpt-4o', inputTokens: 100, subagentId: 'sa1' },
+      { source: 'openai', model: 'gpt-4o', inputTokens: 50, subagentId: 'sa1' },
+    ]);
   });
 
   it('does not report progress for refused tool calls', async () => {

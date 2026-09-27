@@ -1,7 +1,7 @@
 import type { ConversationMessage, ResearchLogEntry, ResearchStep, SubagentLogEntry } from '../models/Task';
-import { plannerContextFill, type PlannerUsage } from '../models/Usage';
-import type { DisplayBlock, SubagentBlock } from './blocks';
-import { isMeasured, planMarker, toolFromStep } from './records';
+import { isMeasured, usageLine, type PlannerUsage } from '../models/Usage';
+import type { DisplayBlock } from './blocks';
+import { planMarker, settledMessage, subagentBlock, toolFromStep, usageBlock } from './records';
 import type { ConversationView } from './reduce';
 
 /** One top-level block before it has an id, and where it falls in time. */
@@ -19,7 +19,7 @@ const SETTLED = 2;
 function fromEntry(entry: ConversationMessage): Placed['build'] {
   if (entry.kind === 'plan_generated') return (id) => ({ type: 'plan', id: id(), text: '', ...planMarker(entry.content) });
   const role = entry.kind === 'system' || entry.kind === 'compaction' ? 'system' : entry.role === 'user' ? 'user' : 'planner';
-  return (id) => ({ type: 'message', id: id(), role, text: entry.content, streaming: false });
+  return (id) => settledMessage(id(), role, entry.content);
 }
 
 function spawnBrief(step: ResearchStep): string | undefined {
@@ -54,7 +54,7 @@ function research(log: readonly ResearchLogEntry[]): Placed[] {
 
   for (const entry of log) {
     if ('type' in entry) {
-      if (entry.type === 'system') placed.push({ at: entry.timestamp, rank: RESEARCH, build: (id) => ({ type: 'message', id: id(), role: 'system', text: entry.content, streaming: false }) });
+      if (entry.type === 'system') placed.push({ at: entry.timestamp, rank: RESEARCH, build: (id) => settledMessage(id(), 'system', entry.content) });
       continue;
     }
     if (entry.subagentId && ownSubagent.has(entry.subagentId)) continue;
@@ -75,12 +75,10 @@ function research(log: readonly ResearchLogEntry[]): Placed[] {
     placed.push({
       at: entry.timestamp,
       rank: RESEARCH,
-      build: (id): SubagentBlock => ({
-        type: 'subagent', id: id(), subagentId: entry.subagentId, brief: entry.brief, status: entry.outcome, digest: entry.digest,
+      build: (id) => subagentBlock(id(), {
+        subagentId: entry.subagentId, brief: entry.brief, status: entry.outcome, digest: entry.digest,
         children: steps.map((step) => toolFromStep(id(), step)),
-        ...(toolCallId ? { toolCallId } : {}),
-        ...(entry.model ? { model: entry.model } : {}),
-        ...(entry.usage ? { usage: entry.usage } : {}),
+        toolCallId, model: entry.model, usage: entry.usage,
       }),
     });
   }
@@ -119,14 +117,7 @@ export function fromTranscript(
   const id = () => `b${nextId++}`;
   const blocks = placed.map((item) => item.build(id));
 
-  if (plannerUsage && isMeasured(plannerUsage.totals)) {
-    const contextFill = plannerContextFill(plannerUsage);
-    blocks.push({
-      type: 'usage', id: id(), totals: plannerUsage.totals,
-      ...(plannerUsage.bySubagent ? { bySubagent: plannerUsage.bySubagent } : {}),
-      ...(contextFill ? { contextFill } : {}),
-    });
-  }
+  if (plannerUsage && isMeasured(plannerUsage.totals)) blocks.push(usageBlock(id(), usageLine(plannerUsage)));
 
   const transcriptAt = history.reduce<string | undefined>((latest, e) => (latest === undefined || e.timestamp > latest ? e.timestamp : latest), undefined);
   return { blocks, nextId, ...(transcriptAt ? { transcriptAt } : {}) };

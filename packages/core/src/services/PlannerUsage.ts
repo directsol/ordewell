@@ -1,6 +1,7 @@
 import {
   addPlannerUsage,
-  plannerContextFill,
+  isMeasured,
+  usageLine,
   type PlannerUsage,
   type UsageRecord,
 } from '../models/Usage';
@@ -39,11 +40,7 @@ export class PlannerUsageLedger {
 
   /** Whether anything has been recorded — a plan with no usage says nothing. */
   get hasUsage(): boolean {
-    const { totals } = this.usage;
-    return totals.inputTokens !== undefined
-      || totals.outputTokens !== undefined
-      || totals.cachedInputTokens !== undefined
-      || Object.keys(totals.reportedCost ?? {}).length > 0;
+    return isMeasured(this.usage.totals);
   }
 
   /** The value persisted onto the plan state. */
@@ -53,13 +50,6 @@ export class PlannerUsageLedger {
 
   /** The broadcast message for the totals as they stand now. */
   message(turnId?: string): PlannerUsageMessage {
-    const contextFill = plannerContextFill(this.usage);
-    return {
-      type: 'planner_usage',
-      ...(turnId ? { turnId } : {}),
-      totals: this.usage.totals,
-      ...(this.usage.bySubagent ? { bySubagent: this.usage.bySubagent } : {}),
-      ...(contextFill ? { contextFill } : {}),
-    };
+    return { type: 'planner_usage', ...(turnId ? { turnId } : {}), ...usageLine(this.usage) };
   }
 }

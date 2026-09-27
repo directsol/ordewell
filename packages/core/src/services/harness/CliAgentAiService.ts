@@ -23,6 +23,7 @@ import {
 import { generatePlanWithRepair } from '../PlanRepair';
 import { settleReply, type ReplyAttempt } from '../settleReply';
 import { redactSecrets } from '../../utils/redactSecrets';
+import { abortScope } from '../../utils/abortScope';
 import { runnerForProvider } from '../ProviderRegistry';
 import { collectResearchContext } from '../ContextCollector';
 import type { AgentAdapter, AgentEvent, AgentProcessDeps, AgentStartOptions } from './AgentAdapter';
@@ -109,6 +110,12 @@ export class CliAgentAiService implements IAiService {
   private lastNativeSessionId: string | null = null;
   private conversation: { startOptions: AgentStartOptions; runners: RunnerId[]; runnerModes?: Record<RunnerId, RunnerModeInfo[]>; autonomousDefault?: boolean } | null = null;
   private activeAbort: AbortController | null = null;
+  /**
+   * Every subagent this conversation has reported starting, and finishing.
+   * Agents restate a subagent's state as it changes, and one can finish a turn
+   * or a process restart after it started; surfaces get each once, in order.
+   */
+  private readonly subagents = { started: new Set<string>(), finished: new Set<string>() };
 
   constructor(private config: IConfig, deps: CliAgentAiServiceDeps = {}) {
     const runner = runnerForProvider(config.aiProvider);
@@ -154,6 +161,8 @@ export class CliAgentAiService implements IAiService {
     // the previous goal's agent session.
     this.lastNativeSessionId = null;
     this.conversation = null;
+    this.subagents.started.clear();
+    this.subagents.finished.clear();
   }
 
   // --- Conversation (ADR-0002) ---
@@ -236,7 +245,8 @@ export class CliAgentAiService implements IAiService {
     signal?: AbortSignal,
   ): Promise<ConversationTurn> {
     const conversation = this.conversation!;
-    const combined = this.startAbortScope(signal);
+    this.activeAbort = abortScope(signal);
+    const combined = this.activeAbort.signal;
     let agentWaits = 0;
     // Text from turns Ordewell continued past on the user's behalf. A wait is
     // not a new user message, so the reply they read is the whole answer.
@@ -394,10 +404,14 @@ export class CliAgentAiService implements IAiService {
         }
 
         case 'subagent_started':
+          if (this.subagents.started.has(event.subagentId)) return;
+          this.subagents.started.add(event.subagentId);
           onProgress({ type: 'subagent_started', subagentId: event.subagentId, brief: event.brief, model: event.model });
           return;
 
         case 'subagent_finished':
+          if (!this.subagents.started.has(event.subagentId) || this.subagents.finished.has(event.subagentId)) return;
+          this.subagents.finished.add(event.subagentId);
           onProgress({
             type: 'subagent_finished', subagentId: event.subagentId, outcome: event.outcome, digest: event.digest,
             usage: subagentUsage.get(event.subagentId),
@@ -476,14 +490,6 @@ export class CliAgentAiService implements IAiService {
     if (!conversation) throw new Error('No active planner conversation.');
     await this.startAdapter({ ...conversation.startOptions, resumeSessionId: this.lastNativeSessionId ?? undefined });
     return this.adapter!;
-  }
-
-  private startAbortScope(callerSignal?: AbortSignal): AbortSignal | undefined {
-    this.activeAbort = new AbortController();
-    if (!callerSignal) return this.activeAbort.signal;
-    if (callerSignal.aborted) { this.activeAbort.abort(); return this.activeAbort.signal; }
-    callerSignal.addEventListener('abort', () => this.activeAbort?.abort(), { once: true });
-    return this.activeAbort.signal;
   }
 
   private plannerModel(): string | undefined {

@@ -17,6 +17,7 @@ import { classifyOutcome } from './researchStepSummary';
 import { addUsage, type UsageTotals } from '../models/Usage';
 import type { ConversationTurn } from './AiService';
 import type { UsageRecord } from '../models/Usage';
+import { abortScope } from '../utils/abortScope';
 
 /**
  * Read-only, side-effect-free tools that can share a round. Deliberately a
@@ -53,12 +54,6 @@ export interface ResearchTurn {
   finishReason?: string;
   /** Exact prompt tokens this turn consumed, when the provider reports usage — drives proactive compaction. */
   promptTokens?: number;
-  /**
-   * What this call consumed, when the provider reported it (#49). Carried on the
-   * turn so a subagent's run loop can route it through the progress channel,
-   * which tags it with the subagent's id.
-   */
-  usage?: UsageRecord;
 }
 
 export interface ResearchChat {
@@ -96,11 +91,8 @@ export abstract class BaseAiService {
 
   pruneContext(): number { return this.conversation?.ctx.chat.compactHistory?.() ?? 0; }
 
-  protected startAbortScope(callerSignal?: AbortSignal): AbortSignal | undefined {
-    this.activeAbort = new AbortController();
-    if (!callerSignal) return this.activeAbort.signal;
-    if (callerSignal.aborted) { this.activeAbort.abort(); return this.activeAbort.signal; }
-    callerSignal.addEventListener('abort', () => this.activeAbort?.abort(), { once: true });
+  protected startAbortScope(callerSignal?: AbortSignal): AbortSignal {
+    this.activeAbort = abortScope(callerSignal);
     return this.activeAbort.signal;
   }
 
@@ -151,9 +143,10 @@ export abstract class BaseAiService {
    * Build a fresh chat for one research subagent (own history, subagent system
    * prompt, cheap model). Null means the provider does not support subagents —
    * the spawn tool then degrades to a steering message. `onReasoning` streams
-   * live reasoning deltas on models that expose them, same as the top-level loop.
+   * live reasoning deltas on models that expose them, same as the top-level loop;
+   * `onUsage` takes each call's usage, as the planner's own chat reports it.
    */
-  protected createSubagentChat(_onReasoning?: (delta: string) => void): ResearchChat | null { return null; }
+  protected createSubagentChat(_onReasoning?: (delta: string) => void, _onUsage?: (record: UsageRecord) => void): ResearchChat | null { return null; }
 
   /**
    * One spawn_research_agent tool call, executed at the service layer (not in
@@ -174,11 +167,11 @@ export abstract class BaseAiService {
     }
     // Every usage record that surfaces from this subagent's own loop belongs to
     // it, so the finish event can carry the totals. Providers that report none
-    // simply leave the getter undefined.
+    // leave them undefined.
     let usage: UsageTotals | undefined;
     return runResearchAgent(prompt, {
-      createChat: (onReasoning) => {
-        const chat = this.createSubagentChat(onReasoning);
+      createChat: (onReasoning, onUsage) => {
+        const chat = this.createSubagentChat(onReasoning, onUsage);
         if (!chat) throw new Error('subagent chats are not available for this provider');
         return chat;
       },

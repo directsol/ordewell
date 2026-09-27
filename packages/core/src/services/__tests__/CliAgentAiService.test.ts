@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { CliAgentAiService } from '../harness/CliAgentAiService';
 import { createAiService } from '../AiService';
 import { fakeConfig, fakeFileSystem } from '../../testing';
@@ -386,6 +386,38 @@ describe('CliAgentAiService — Claude Code', () => {
     expect(turn.kind).toBe('message');
   });
 
+  // Each turn links its own stop to the caller's signal. A caller aborting a
+  // signal it gave a turn that already ended must not stop the turn running now.
+  it('leaves the running turn alone when a finished turn\'s signal is aborted', async () => {
+    const signals: Array<AbortSignal | undefined> = [];
+    let release = () => {};
+    const svc = new CliAgentAiService(fakeConfig({ aiProvider: 'claude-code' }), {
+      workspaceRoot: () => '/repo',
+      createAdapter: () => ({
+        agentId: 'claude-code',
+        start: async () => {},
+        nativeSessionId: () => null,
+        dispose: () => {},
+        send: async (_message, onEvent, signal) => {
+          signals.push(signal);
+          if (signals.length === 2) await new Promise<void>((resolve) => { release = resolve; });
+          onEvent({ type: 'assistant_text', text: 'ok' });
+          onEvent({ type: 'turn_end' });
+        },
+      }),
+    });
+    const finished = new AbortController();
+    await svc.startConversation(request({ signal: finished.signal }));
+    const running = svc.continueConversation('next', () => {}, new AbortController().signal);
+    await vi.waitFor(() => expect(signals).toHaveLength(2));
+
+    finished.abort();
+
+    expect(signals[1]?.aborted).toBe(false);
+    release();
+    expect(await running).toMatchObject({ kind: 'message', text: 'ok' });
+  });
+
   it('restarts from the agent session after a stop, rather than writing into a killed process', async () => {
     // Stop kills the process by contract, and `dispose()` is terminal. Reusing
     // the same adapter for the next message threw instead of answering.
@@ -570,6 +602,25 @@ describe('CliAgentAiService — streamed events (#47)', () => {
       { type: 'subagent_finished', subagentId: 'sa1', outcome: 'done', digest: 'src/cache.ts', usage: { inputTokens: 400, outputTokens: 20 } },
       { type: 'usage', record: { source: 'claude-code', inputTokens: 5000, outputTokens: 80, reportedCost: { amount: 0.04, currency: 'USD' } } },
     ]);
+  });
+
+  // Agents restate a subagent's state as it changes — a tool part updated,
+  // a later call listing every child's status — and one may finish in a later
+  // turn than it started in. Surfaces get one start and one finish, in order.
+  it('reports each subagent starting once and finishing once, across turns, and never a finish without a start', async () => {
+    const started = { type: 'subagent_started', subagentId: 'sa1', brief: 'find the cache' } as const;
+    const finished = { type: 'subagent_finished', subagentId: 'sa1', outcome: 'done', digest: 'src/cache.ts' } as const;
+    const svc = scripted(
+      [started, started, { type: 'assistant_text', text: 'Looking.' }, { type: 'turn_end' }],
+      [finished, started, finished, { type: 'subagent_finished', subagentId: 'ghost', outcome: 'failed', digest: '' }, { type: 'assistant_text', text: 'Found it.' }, { type: 'turn_end' }],
+    );
+    const { events, onProgress } = collector();
+
+    await svc.startConversation(request({ onProgress }));
+    await svc.continueConversation('go on', onProgress);
+
+    expect(events.filter((e) => e.type === 'subagent_started' || e.type === 'subagent_finished').map((e) => `${e.type}:${e.subagentId}`))
+      .toEqual(['subagent_started:sa1', 'subagent_finished:sa1']);
   });
 });
 
@@ -861,6 +912,9 @@ describe('CliAgentAiService — Codex', () => {
     const subUsage = events.flatMap((e) => (e.type === 'usage' && e.record ? [e.record] : [])).find((r) => r.subagentId === 'thr-codex-sub1');
     expect(subUsage).toMatchObject({ inputTokens: 13944, outputTokens: 99, cachedInputTokens: 9984 });
     expect(subUsage?.contextWindow).toBeUndefined();
+
+    // Restated at every status change on the wire; reported once.
+    expect(events.filter((e) => e.type === 'subagent_started' || e.type === 'subagent_finished').map((e) => e.type)).toEqual(['subagent_started', 'subagent_finished']);
   });
 });
 
@@ -1211,6 +1265,9 @@ describe('CliAgentAiService — OpenCode', () => {
     // The child session's own totals as the server reported them when the
     // recording was made: input 5244 + cache reads 9472, output 314.
     expect(finished?.usage).toMatchObject({ inputTokens: 14716, outputTokens: 314 });
+
+    // Restated at every status change on the wire; reported once.
+    expect(events.filter((e) => e.type === 'subagent_started' || e.type === 'subagent_finished').map((e) => e.type)).toEqual(['subagent_started', 'subagent_finished']);
   });
 
   it('connects the event stream before sending, so an early permission is not missed', async () => {
@@ -1341,6 +1398,21 @@ describe('CliAgentAiService — Claude Code partial messages, usage and subagent
       inputTokens: 38629, cachedInputTokens: 28030, outputTokens: 176, reportedCost: { USD: 0.049754 },
     });
     expect(plannerContextFill(usage)).toEqual({ usedTokens: 20025, windowTokens: 1000000 });
+  });
+
+  // A prompt of 0 would read as an empty context; absent is "not reported" (ADR-0017 U1).
+  it('leaves the prompt out of a call that reported only its output, rather than counting it as zero', async () => {
+    const lines = [
+      { type: 'stream_event', event: { type: 'message_start', message: { model: 'claude-sonnet-5' } } },
+      { type: 'stream_event', event: { type: 'message_delta', usage: { output_tokens: 7 } } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Hi.' }] } },
+      { type: 'result', subtype: 'success' },
+    ];
+    const { svc } = service('claude-code', [lines.map((l) => `${JSON.stringify(l)}\n`).join('')]);
+    const { events, onProgress } = collector();
+    await svc.startConversation(request({ onProgress }));
+
+    expect(usageRecords(events)).toEqual([{ source: 'claude-code', model: 'claude-sonnet-5', outputTokens: 7 }]);
   });
 
   // `total_cost_usd` is the session's running total: 0.075482 after the first

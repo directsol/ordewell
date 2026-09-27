@@ -5,9 +5,9 @@ import { resolveResearchShell } from './researchShell';
 import { resolveWithin } from './pathScope';
 import { classifyOutcome } from './researchStepSummary';
 import type { IFileSystem, ToolOutcome } from '../interfaces/IFileSystem';
-import type { ResearchChat, ResearchTurn, ToolResult } from './BaseAiService';
+import type { ResearchChat, ToolResult } from './BaseAiService';
 import type { ResearchProgress, ResearchStep } from '../models/Task';
-import type { UsageTotals } from '../models/Usage';
+import type { UsageRecord, UsageTotals } from '../models/Usage';
 
 /**
  * Read-only research subagents (issue #34), opencode-style: one stateless
@@ -30,20 +30,18 @@ export const SUBAGENT_LIMITS = {
 export interface SubagentDeps {
   /**
    * Builds a fresh chat (own history, subagent system prompt, cheap model).
-   * Receives a reasoning-delta callback to wire into the chat, so a
-   * reasoning-capable subagent model streams its own live thinking too.
+   * Receives the callbacks to wire into the chat: reasoning deltas, so a
+   * reasoning-capable subagent model streams its own live thinking too, and
+   * each call's usage, which this loop files under the subagent.
    */
-  createChat: (onReasoning: (delta: string) => void) => ResearchChat;
+  createChat: (onReasoning: (delta: string) => void, onUsage: (record: UsageRecord) => void) => ResearchChat;
   fs: IFileSystem;
   signal?: AbortSignal;
   /** This subagent's id, stamped on its progress events and its step ids so a replay can regroup them. */
   subagentId?: string;
   /** The model this subagent runs on, shown with its lifecycle events. */
   model?: string;
-  /**
-   * This subagent's running usage, read when it finishes. The provider emits
-   * usage through the caller's progress wrapper; absent means it reported none.
-   */
+  /** This subagent's running usage, read when it finishes; absent means it reported none. */
   usage?: () => UsageTotals | undefined;
   /** Structured lifecycle/thinking/tool_call/tool_result events for the UI while the subagent works. */
   onProgress?: (progress: ResearchProgress) => void;
@@ -117,15 +115,13 @@ function nonPromptingFs(fs: IFileSystem): IFileSystem {
 async function runLoop(prompt: string, deps: SubagentDeps): Promise<string> {
   if (deps.signal?.aborted) return '[research agent aborted before starting]';
   const fs = nonPromptingFs(deps.fs);
-  const chat = deps.createChat((delta) => deps.onProgress?.({ type: 'thinking', text: delta, subagentId: deps.subagentId }));
-  // A provider that reports usage on the turn (OpenAI-compatible) has no
-  // progress sink of its own here; reporting it through `deps.onProgress` lets
-  // the spawn wrapper stamp every record with this subagent's id (#49).
-  const reportUsage = (turn: ResearchTurn) => {
-    if (turn.usage) deps.onProgress?.({ type: 'usage', record: turn.usage });
-  };
+  const chat = deps.createChat(
+    (delta) => deps.onProgress?.({ type: 'thinking', text: delta, subagentId: deps.subagentId }),
+    // The record says who made the call: unstamped, the ledger would read the
+    // subagent's prompt as the planner's own and measure its context by it.
+    (record) => deps.onProgress?.({ type: 'usage', record: deps.subagentId ? { ...record, subagentId: deps.subagentId } : record }),
+  );
   let turn = await chat.sendMessage(prompt, deps.signal);
-  reportUsage(turn);
 
   for (let step = 0; turn.hasToolCalls && step < SUBAGENT_LIMITS.maxSteps; step++) {
     if (deps.signal?.aborted) return `[research agent aborted] Partial findings:\n${turn.text}`;
@@ -168,7 +164,6 @@ async function runLoop(prompt: string, deps: SubagentDeps): Promise<string> {
       results.push({ name: tc.name, output, truncated: res.truncated || output.length < res.output.length, totalChars: res.output.length, id: tc.id });
     }
     turn = await chat.sendToolResults(results, deps.signal);
-    reportUsage(turn);
   }
 
   // Step budget exhausted while the model still wants tools: answer the
@@ -180,7 +175,6 @@ async function runLoop(prompt: string, deps: SubagentDeps): Promise<string> {
       turn.toolCalls.map((tc) => ({ name: tc.name, output: notice, truncated: false, totalChars: notice.length, id: tc.id })),
       deps.signal,
     );
-    reportUsage(turn);
   }
 
   const digest = turn.text;

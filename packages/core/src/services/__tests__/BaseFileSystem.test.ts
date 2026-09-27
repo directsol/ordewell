@@ -213,6 +213,31 @@ describe('BaseFileSystem — bash tiers', () => {
     expect(request).toHaveBeenCalledWith(expect.objectContaining({ kind: 'external_path', scope: '/etc/*' }));
   });
 
+  // `src/..` walks through a directory that exists, so the shell resolves the
+  // rest against the workspace's parent: the path escapes however it starts.
+  it('confines an auto-tier command whose relative path climbs out part-way through', async () => {
+    const fs = new TestFileSystem();
+    const request = vi.fn().mockResolvedValue(false);
+    fs.setApproval({ request });
+
+    const result = await fs.bash('cat src/../../etc/passwd');
+
+    expect(result.success).toBe(false);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ kind: 'external_path', subject: '/etc/passwd' }));
+    expect(fs.bashCalls).toEqual([]);
+  });
+
+  it('does not ask about a relative path whose `..` stays inside the workspace', async () => {
+    const fs = new TestFileSystem();
+    const request = vi.fn();
+    fs.setApproval({ request });
+
+    const result = await fs.bash('cat src/../README.md');
+
+    expect(result.success).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it('does not ask about a workspace-relative path passed to an auto-tier command', async () => {
     const fs = new TestFileSystem();
     const request = vi.fn();

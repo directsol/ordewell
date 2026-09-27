@@ -39,6 +39,22 @@ export interface UsageTotals {
   reportedCost?: Record<string, number>;
 }
 
+/**
+ * The input side of a call whose provider reports its prompt in parts — the
+ * uncached tail, with cache reads and cache writes beside it rather than inside
+ * it (Anthropic, and OpenCode after it). The prompt the model saw is all three;
+ * only the reads were served from cache, since a write is billed as fresh
+ * input. A part left unreported adds nothing, and with no part reported there
+ * is no measure at all.
+ */
+export function partedPromptUsage(parts: { uncached?: number; cacheRead?: number; cacheWrite?: number }): Pick<UsageRecord, 'inputTokens' | 'cachedInputTokens'> {
+  const reported = [parts.uncached, parts.cacheRead, parts.cacheWrite].filter((n): n is number => n !== undefined);
+  return {
+    ...(reported.length > 0 ? { inputTokens: reported.reduce((a, b) => a + b, 0) } : {}),
+    ...(parts.cacheRead !== undefined ? { cachedInputTokens: parts.cacheRead } : {}),
+  };
+}
+
 const TOKEN_FIELDS = ['inputTokens', 'outputTokens', 'cachedInputTokens'] as const;
 
 export function addUsage(totals: UsageTotals, record: UsageRecord): UsageTotals {
@@ -78,6 +94,28 @@ export function addPlannerUsage(usage: PlannerUsage, record: UsageRecord): Plann
   // fill is omitted rather than shown against a guessed zero.
   if (record.contextWindow !== undefined && record.contextWindow > 0) next.contextWindow = record.contextWindow;
   return next;
+}
+
+/** Whether any measure was reported: a token line of nothing but blanks says nothing. */
+export function isMeasured(totals: UsageTotals): boolean {
+  return totals.inputTokens !== undefined || totals.outputTokens !== undefined || totals.cachedInputTokens !== undefined
+    || Object.keys(totals.reportedCost ?? {}).length > 0;
+}
+
+/** What the token line shows of a ledger — live from its broadcast, or reloaded from the saved one. */
+export interface UsageLine {
+  totals: UsageTotals;
+  bySubagent?: Record<string, UsageTotals>;
+  contextFill?: { usedTokens: number; windowTokens: number };
+}
+
+export function usageLine(usage: PlannerUsage): UsageLine {
+  const contextFill = plannerContextFill(usage);
+  return {
+    totals: usage.totals,
+    ...(usage.bySubagent ? { bySubagent: usage.bySubagent } : {}),
+    ...(contextFill ? { contextFill } : {}),
+  };
 }
 
 /**

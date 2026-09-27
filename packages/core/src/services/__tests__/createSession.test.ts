@@ -888,20 +888,6 @@ describe('session id stability (persist seam)', () => {
       expect(sent).toEqual([{ type: 'planner_usage', totals: { inputTokens: 1000 } }]);
     });
 
-    it('files a subagent-tagged usage event under the subagent, not the planner', async () => {
-      const sent = await broadcastsFor([
-        { type: 'usage', turnId: 't1', subagentId: 'sa1', record: { source: 'openai', model: 'gpt-4o', inputTokens: 400 } },
-      ]);
-
-      expect(sent).toEqual([
-        {
-          type: 'planner_usage', turnId: 't1',
-          totals: { inputTokens: 400 },
-          bySubagent: { sa1: { inputTokens: 400 } },
-        },
-      ]);
-    });
-
     it('treats a reported window of zero as unknown, not as no room', async () => {
       const sent = await broadcastsFor([
         { type: 'usage', record: { source: 'codex', inputTokens: 1000, contextWindow: 0 } },

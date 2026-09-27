@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { addUsage, type UsageTotals } from '../Usage';
+import { addUsage, partedPromptUsage, type UsageTotals } from '../Usage';
 
 describe('addUsage', () => {
   it('sums the tokens of two calls', () => {
@@ -31,5 +31,19 @@ describe('addUsage', () => {
     addUsage(before, { source: 'openai', inputTokens: 5, reportedCost: { amount: 1, currency: 'USD' } });
 
     expect(before).toEqual({ inputTokens: 10, reportedCost: { USD: 1 } });
+  });
+});
+
+describe('partedPromptUsage', () => {
+  it('counts the uncached tail, cache reads and cache writes as one prompt, only the reads as cached', () => {
+    expect(partedPromptUsage({ uncached: 2, cacheRead: 9428, cacheWrite: 9174 })).toEqual({ inputTokens: 18604, cachedInputTokens: 9428 });
+  });
+
+  it('claims no cached share when cache reads went unreported', () => {
+    expect(partedPromptUsage({ uncached: 120, cacheWrite: 30 })).toEqual({ inputTokens: 150 });
+  });
+
+  it('reports no prompt at all when no part of it was reported', () => {
+    expect(partedPromptUsage({})).toEqual({});
   });
 });

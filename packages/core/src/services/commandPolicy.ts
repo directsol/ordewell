@@ -1144,7 +1144,11 @@ function looksLikePath(arg: string): boolean {
     || /^[A-Za-z]:/.test(arg)
     || arg.startsWith('\\')
     || arg.startsWith('..\\')
-    || arg.startsWith('.\\');
+    || arg.startsWith('.\\')
+    // A `..` segment anywhere, not only in front: `src/../../etc/passwd` climbs
+    // out through a directory that exists, and read as a plain relative name
+    // it skipped confinement entirely.
+    || /(^|[\\/])\.\.([\\/]|$)/.test(arg);
 }
 
 /**

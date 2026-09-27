@@ -1,13 +1,35 @@
 import type { ResearchStep, ResearchStepOutcome } from '../models/Task';
-import type { UsageTotals } from '../models/Usage';
-import type { PlanMarkerStatus, ToolBlock, ToolStatus } from './blocks';
+import type { UsageLine } from '../models/Usage';
+import type { MessageBlock, MessageRole, PlanMarkerStatus, SubagentBlock, ToolBlock, ToolStatus, UsageBlock } from './blocks';
 import { outputLines, toolHeadline } from './format';
 
 /*
- * How the session's records — research steps, transcript markers, usage
- * totals — read as blocks. Shared by the live view and the reload, so the two
- * cannot disagree about what a record shows.
+ * How the session's records — messages, research steps, subagents, transcript
+ * markers, usage totals — read as blocks. Shared by the live view and the
+ * reload, so the two cannot disagree about what a record shows.
  */
+
+/** A line that is done: nothing streams into it any more. */
+export function settledMessage(id: string, role: MessageRole, text: string, turnId?: string): MessageBlock {
+  return { type: 'message', id, role, text, streaming: false, ...(turnId ? { turnId } : {}) };
+}
+
+type SubagentFields = Omit<SubagentBlock, 'type' | 'id' | 'toolCallId' | 'model' | 'usage' | 'turnId'>
+  & { toolCallId?: string; model?: string; usage?: SubagentBlock['usage']; turnId?: string };
+
+export function subagentBlock(id: string, { toolCallId, model, usage, turnId, ...fields }: SubagentFields): SubagentBlock {
+  return {
+    type: 'subagent', id, ...fields,
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(model ? { model } : {}),
+    ...(usage ? { usage } : {}),
+    ...(turnId ? { turnId } : {}),
+  };
+}
+
+export function usageBlock(id: string, { totals, bySubagent, contextFill }: UsageLine): UsageBlock {
+  return { type: 'usage', id, totals, ...(bySubagent ? { bySubagent } : {}), ...(contextFill ? { contextFill } : {}) };
+}
 
 const STATUS_OF_OUTCOME: Record<ResearchStepOutcome, ToolStatus> = {
   success: 'ok',
@@ -52,10 +74,4 @@ export function toolFromStep(id: string, step: ResearchStep, turnId?: string): T
 export function planMarker(content: string): { status: Exclude<PlanMarkerStatus, 'building'>; taskCount?: number } {
   const count = /(\d+) tasks?\b/.exec(content);
   return { status: content.startsWith('Plan updated') ? 'updated' : 'generated', ...(count ? { taskCount: Number(count[1]) } : {}) };
-}
-
-/** Whether any measure was reported: a token line of nothing but blanks says nothing. */
-export function isMeasured(totals: UsageTotals): boolean {
-  return totals.inputTokens !== undefined || totals.outputTokens !== undefined || totals.cachedInputTokens !== undefined
-    || Object.keys(totals.reportedCost ?? {}).length > 0;
 }
