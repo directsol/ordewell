@@ -89,11 +89,12 @@ export type SessionMessage =
   | { type: 'planner_text_delta'; turnId: string; segmentId: string; text: string }
   /**
    * Exposed reasoning as it streams, from the planner or — tagged with
-   * `subagentId` — from one of its subagents. Never part of the reply. Sent by
-   * the session for thinking a backend streams in segments of a turn; thinking
-   * without a segment still arrives as `plan_thinking`.
+   * `subagentId` — from one of its subagents. Never part of the reply. The one
+   * thinking message for every backend: `segmentId` is set only where the
+   * backend streams thinking in segments (the API loops; harness planners do
+   * not), and `turnId` is absent for thinking outside a turn (one-shot plans).
    */
-  | { type: 'planner_thinking_delta'; turnId: string; segmentId?: string; subagentId?: string; text: string }
+  | { type: 'planner_thinking_delta'; turnId?: string; segmentId?: string; subagentId?: string; text: string }
   /**
    * Text streamed for an attempt the turn discarded (a corrective retry) is
    * taken back: a surface removes it. With `segmentId`, only that segment;
@@ -149,7 +150,6 @@ export type SessionMessage =
   // that asked: merged, blocked with each repo and why, or stopped part-way
   // with the repos that stay merged.
   | { type: 'isolation_merge'; result: IsolationMergeResult }
-  | { type: 'plan_thinking'; text: string; turnId?: string; subagentId?: string }
   // Carries no content — see `ResearchProgress['liveness']`. Exists only so a
   // surface's idle watchdog sees the harness process working even during a
   // stretch that produces nothing visible.
@@ -158,6 +158,8 @@ export type SessionMessage =
   // always set when `tool` is `agent_tool`, so no surface has to render the
   // catch-all member name at the user.
   | { type: 'research_step'; tool: string; toolLabel?: string; args: string; subagentId?: string; toolCallId?: string; turnId?: string }
+  // The "building plan" display only: a JSON envelope as it streams, never
+  // reply prose. `turnId` is absent for a one-shot plan, which has no turn.
   | { type: 'plan_token'; token: string; turnId?: string }
   | { type: 'research_step_done'; step: ResearchStep; subagentId?: string; turnId?: string }
   // Planner research wants something outside its default envelope and is

@@ -477,8 +477,7 @@ export class Session {
         return;
       case 'thinking':
         if (!progress.text) return;
-        if (turnId && segmentId) this.broadcast({ type: 'planner_thinking_delta', turnId, segmentId, subagentId, text: progress.text });
-        else this.broadcast({ type: 'plan_thinking', text: progress.text, turnId, subagentId });
+        this.broadcast({ type: 'planner_thinking_delta', turnId, segmentId, subagentId, text: progress.text });
         return;
       case 'tool_call':
         if (progress.tool) this.broadcast({ type: 'research_step', tool: progress.tool, toolLabel: progress.toolLabel, args: progress.toolArgs || '', subagentId, toolCallId: progress.toolCallId, turnId });
@@ -496,8 +495,9 @@ export class Session {
         return;
       case 'text_delta':
         if (!progress.text) return;
+        // Only the one-shot plan path streams prose outside a turn, and its only
+        // surface (`plan --no-chat`) draws steps, not reply text.
         if (turnId && segmentId) this.broadcast({ type: 'planner_text_delta', turnId, segmentId, text: progress.text });
-        else this.broadcast({ type: 'plan_token', token: progress.text });
         return;
       case 'text_retracted':
         // Outside a turn there is no streamed text a surface could take back.

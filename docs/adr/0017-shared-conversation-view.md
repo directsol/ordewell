@@ -28,6 +28,14 @@ own presentation; it never re-derives the conversation from raw messages.
   accumulated text a settled `planner_message` replaces; a turn can retract
   streamed text (`planner_text_retracted`) without ending. The stream stays
   provisional and the settled messages authoritative.
+- **One message per meaning (M1).** Thinking is `planner_thinking_delta` from
+  every backend — `segmentId` where the backend streams it in segments (the API
+  loops), none where it does not (harness planners) — and the view folds a run
+  of it into one block either way. `plan_token` means only the "building plan"
+  display (J1); prose streamed outside a turn is not sent at all, since no
+  surface draws it. A second name for the same thing made every consumer
+  handle both, and the one that forgot (`plan --verbose`) dropped a backend's
+  thinking silently.
 - **`planner_message` stays authoritative (A1).** When a turn settles, the
   message replaces its final segment's streamed text. Streamed text is never
   written to the transcript, so a reloaded session cannot resurrect text the

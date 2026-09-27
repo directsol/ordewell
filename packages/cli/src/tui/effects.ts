@@ -624,11 +624,10 @@ async function withExecutionStream(
 }
 
 /** A streamed text piece: one of many that arrive in a burst and read as one. */
-type Delta = Extract<SessionMessage, { type: 'planner_text_delta' | 'planner_thinking_delta' | 'plan_thinking' | 'plan_token' }>;
+type Delta = Extract<SessionMessage, { type: 'planner_text_delta' | 'planner_thinking_delta' | 'plan_token' }>;
 
 function isDelta(message: SessionMessage): message is Delta {
-  return message.type === 'planner_text_delta' || message.type === 'planner_thinking_delta'
-    || message.type === 'plan_thinking' || message.type === 'plan_token';
+  return message.type === 'planner_text_delta' || message.type === 'planner_thinking_delta' || message.type === 'plan_token';
 }
 
 /** Two deltas as one, when the second continues the same stream; otherwise null. */
@@ -639,9 +638,6 @@ function joinDeltas(held: Delta, next: Delta): Delta | null {
   if (held.type === 'planner_thinking_delta' && next.type === 'planner_thinking_delta') {
     const same = held.turnId === next.turnId && held.segmentId === next.segmentId && held.subagentId === next.subagentId;
     return same ? { ...held, text: held.text + next.text } : null;
-  }
-  if (held.type === 'plan_thinking' && next.type === 'plan_thinking') {
-    return held.turnId === next.turnId && held.subagentId === next.subagentId ? { ...held, text: held.text + next.text } : null;
   }
   if (held.type === 'plan_token' && next.type === 'plan_token') {
     return held.turnId === next.turnId ? { ...held, token: held.token + next.token } : null;
@@ -837,7 +833,6 @@ function onExecutionEvent(dispatch: (action: Action) => void, event: WsEvent, se
     // here until someone decides what a run's watcher does with it.
     case 'task_updated':
     case 'task_output':
-    case 'plan_thinking':
     case 'planner_liveness':
     case 'research_step':
     case 'plan_token':

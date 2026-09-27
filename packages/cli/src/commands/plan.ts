@@ -2,7 +2,7 @@ import { createInterface } from 'readline';
 import { allTasksOf, flag, flags, hasFlag, saveLastSession } from '../utils';
 import { ensureDaemon, ApiClient, resolvePort } from '../daemonClient';
 import { createApprovalHandler } from '../approvals';
-import { formatStepLine, isTransient } from './researchLog';
+import { createStepLog, type LogLine } from './researchLog';
 import type { SerializedPlan, SerializedTask, DiscoveredModel } from '@ordewell/core';
 import { mintSessionId, taskOrderLabel } from '@ordewell/core';
 import type { WsEvent } from '../apiClient';
@@ -181,22 +181,31 @@ export async function handlePlan(
   const isTty = !!process.stderr.isTTY;
   let lastLineLength = 0;
 
-  function renderStep(event: WsEvent): void {
-    const line = formatStepLine(event, { verbose });
-    if (line === null) return;
+  const stepLog = createStepLog({ verbose });
+
+  function renderLine({ text, transient }: LogLine): void {
     if (isTty) {
       // The in-flight call owns the status line; everything settled scrolls
       // above it, so completed calls and their outcomes stay on screen.
-      process.stderr.write(`\r\x1b[2K${line}`);
-      if (isTransient(event)) {
-        lastLineLength = line.length;
+      process.stderr.write(`\r\x1b[2K${text}`);
+      if (transient) {
+        lastLineLength = text.length;
       } else {
         process.stderr.write('\n');
         lastLineLength = 0;
       }
     } else {
-      process.stderr.write(`${line}\n`);
+      process.stderr.write(`${text}\n`);
     }
+  }
+
+  function renderStep(event: WsEvent): void {
+    stepLog.push(event).forEach(renderLine);
+  }
+
+  function closeStream(): void {
+    stream.close();
+    stepLog.flush().forEach(renderLine);
   }
 
   // Opened only if the planner actually asks something.
@@ -238,6 +247,7 @@ export async function handlePlan(
       // A clarifying turn lands here: the planner asked something
       // instead of committing, so answer it and hand the reply back.
       while (!hasCommittedPlan(plan)) {
+        stepLog.flush().forEach(renderLine);
         console.log(`\n${lastPlannerMessage(plan)}\n`);
 
         reader = reader || stdinReader();
@@ -265,7 +275,7 @@ export async function handlePlan(
       reader?.close();
     }
 
-    stream.close();
+    closeStream();
     if (isTty && lastLineLength > 0) process.stderr.write('\r\x1b[2K');
     process.stderr.write('\n');
 
@@ -274,7 +284,7 @@ export async function handlePlan(
     console.log(`\n  Run 'ordewell run' to execute, 'ordewell status' to inspect, or 'ordewell tui' for the full UI.`);
   } catch (err) {
     reader?.close();
-    stream.close();
+    closeStream();
     if (isTty && lastLineLength > 0) process.stderr.write('\r\x1b[2K');
     process.stderr.write('\n');
     console.error(`Plan generation failed: ${err instanceof Error ? (err as Error).message : String(err)}`);

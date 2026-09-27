@@ -445,7 +445,6 @@ export function handleSessionMessage(
     case 'planner_message':
     case 'plan_token':
     case 'planner_text_delta':
-    case 'plan_thinking':
     case 'planner_thinking_delta':
     case 'planner_liveness':
     case 'research_step':

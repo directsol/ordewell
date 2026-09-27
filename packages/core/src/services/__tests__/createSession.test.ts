@@ -780,9 +780,9 @@ describe('session id stability (persist seam)', () => {
     await session.startPlanning('add persistence', ['claude-code']);
 
     const types = broadcast.mock.calls.map((c: unknown[]) => (c[0] as { type: string }).type);
-    expect(types).toEqual(['planner_turn_started', 'plan_thinking', 'research_step', 'research_step_done', 'plan_token', 'planner_message', 'planner_turn_ended']);
+    expect(types).toEqual(['planner_turn_started', 'planner_thinking_delta', 'research_step', 'research_step_done', 'plan_token', 'planner_message', 'planner_turn_ended']);
     const { turnId } = broadcast.mock.calls[0][0] as { turnId: string };
-    expect(broadcast).toHaveBeenCalledWith({ type: 'plan_thinking', text: 'exploring', turnId });
+    expect(broadcast).toHaveBeenCalledWith({ type: 'planner_thinking_delta', text: 'exploring', turnId });
     expect(broadcast).toHaveBeenCalledWith({ type: 'research_step', tool: 'read_file', args: '{"path":"x"}', turnId });
     expect(broadcast).toHaveBeenCalledWith({ type: 'research_step_done', step, turnId });
     expect(broadcast).toHaveBeenCalledWith({ type: 'plan_token', token: 'Question: ', turnId });
@@ -822,12 +822,12 @@ describe('session id stability (persist seam)', () => {
       ]);
     });
 
-    // No turn to scope it to yet: the prose still reaches the stream every
-    // surface already draws, rather than vanishing.
-    it('passes prose streamed outside a turn on as plan tokens', async () => {
+    // `plan_token` is the building-plan display only; prose with no turn to
+    // attach to has no surface that draws it.
+    it('drops prose streamed outside a turn', async () => {
       const sent = await broadcastsFor([{ type: 'text_delta', segmentId: 's1', text: 'Which store?' }]);
 
-      expect(sent).toEqual([{ type: 'plan_token', token: 'Which store?' }]);
+      expect(sent).toEqual([]);
     });
 
     it('keeps the turn and the subagent on thinking, steps and plan tokens', async () => {
@@ -841,7 +841,7 @@ describe('session id stability (persist seam)', () => {
       ]);
 
       expect(sent).toEqual([
-        { type: 'plan_thinking', turnId: 't1', subagentId: 'sa1', text: 'look in src' },
+        { type: 'planner_thinking_delta', turnId: 't1', subagentId: 'sa1', text: 'look in src' },
         { type: 'planner_thinking_delta', turnId: 't1', segmentId: 'th1', text: 'streamed' },
         { type: 'research_step', turnId: 't1', subagentId: 'sa1', tool: 'grep', args: '{}', toolCallId: 'c1' },
         { type: 'research_step_done', turnId: 't1', subagentId: 'sa1', step },
@@ -1071,6 +1071,42 @@ describe('session id stability (persist seam)', () => {
       expect(view.blocks.some((b) => b.type === 'plan' && b.status === 'building')).toBe(false);
       expect(view.blocks.some((b) => b.type === 'tool')).toBe(true);
       expect(view.blocks.some((b) => b.type === 'usage')).toBe(true);
+    });
+
+    it('a harness planner\'s thinking arrives as the one thinking message, though it has no segment', async () => {
+      const cli = new CliAgentAiService(
+        fakeConfig({ aiProvider: 'claude-code' }),
+        {
+          createAdapter: scriptedAdapter([[
+            { type: 'thinking_delta', text: 'Grep for ' },
+            { type: 'thinking_delta', text: 'the cache.' },
+            { type: 'thinking', text: 'Grep for the cache.' },
+            { type: 'thinking', text: 'Scan src.', subagentId: 'sa1' },
+            { type: 'assistant_text', text: 'Found it.' },
+            { type: 'turn_end' },
+          ]]),
+          workspaceRoot: () => '/repo',
+        },
+      );
+      const broadcasts: import('../SessionMessage').SessionMessage[] = [];
+      const session = makeSession({
+        broadcast: (msg) => broadcasts.push(msg),
+        aiService: {
+          startConversation: (req: import('../../services/AiService').ConversationRequest) => cli.startConversation(req),
+          hasActiveConversation: () => cli.hasActiveConversation(),
+          reset: () => cli.reset(),
+        },
+      });
+
+      await session.startPlanning('find the cache', ['claude-code']);
+
+      const turnId = (broadcasts[0] as { turnId: string }).turnId;
+      const thinking = broadcasts.filter((m) => m.type.includes('thinking'));
+      expect(thinking).toEqual([
+        { type: 'planner_thinking_delta', turnId, text: 'Grep for ' },
+        { type: 'planner_thinking_delta', turnId, text: 'the cache.' },
+        { type: 'planner_thinking_delta', turnId, subagentId: 'sa1', text: 'Scan src.' },
+      ]);
     });
 
     it('saves each subagent with its tagged child steps, grouped despite interleaving', async () => {

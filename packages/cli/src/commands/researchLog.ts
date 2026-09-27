@@ -52,18 +52,56 @@ export function formatStepLine(event: WsEvent, options: StepLineOptions = {}): s
     return result ? `${indent}${mark} ${summary} → ${result}` : `${indent}${mark} ${summary}`;
   }
 
-  // Reasoning is off by default: it is the noisiest part of the stream and
-  // would bury the tool log it is interleaved with.
-  if (event.type === 'plan_thinking') {
-    if (!options.verbose) return null;
-    const text = oneLine(String(event.text ?? ''), THINKING_CHARS);
-    return text ? `  · ${text}` : null;
-  }
-
   return null;
 }
 
 /** Whether the line replaces the transient status line or scrolls away above it. */
 export function isTransient(event: WsEvent): boolean {
   return event.type === 'research_step';
+}
+
+export interface LogLine {
+  text: string;
+  transient: boolean;
+}
+
+export interface StepLog {
+  /** The lines this event settles, in order. */
+  push(event: WsEvent): LogLine[];
+  /** Whatever is still held, for when the stream ends. */
+  flush(): LogLine[];
+}
+
+/**
+ * The planning stream as log lines. Thinking arrives in fragments — a token at
+ * a time from the API backends — so a run of it from one thinker is held and
+ * printed as one line once something else prints or the stream ends.
+ */
+export function createStepLog(options: StepLineOptions = {}): StepLog {
+  let held: { thinker: string; text: string } | null = null;
+
+  const flush = (): LogLine[] => {
+    const text = held ? oneLine(held.text, THINKING_CHARS) : '';
+    held = null;
+    return text ? [{ text: `  · ${text}`, transient: false }] : [];
+  };
+
+  return {
+    push(event) {
+      if (event.type === 'planner_thinking_delta') {
+        // Reasoning is off by default: it is the noisiest part of the stream
+        // and would bury the tool log it is interleaved with.
+        if (!options.verbose) return [];
+        const thinker = `${event.turnId}|${event.segmentId}|${event.subagentId}`;
+        const done = held && held.thinker !== thinker ? flush() : [];
+        held = { thinker, text: (held?.text ?? '') + event.text };
+        return done;
+      }
+      // Lifecycle events that print nothing (liveness, usage) must not split
+      // a run of thinking into several lines.
+      const line = formatStepLine(event, options);
+      return line === null ? [] : [...flush(), { text: line, transient: isTransient(event) }];
+    },
+    flush,
+  };
 }

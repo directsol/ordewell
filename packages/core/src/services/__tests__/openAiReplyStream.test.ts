@@ -216,8 +216,9 @@ describe('OpenAI planner reply stream', () => {
 
     const sent = streamed();
     expect(sent.flatMap((m) => (m.type === 'planner_text_delta' ? [m.text] : []))).toEqual(['It is in src/cache.ts.']);
-    expect(sent.filter((m) => m.type === 'planner_thinking_delta')).toEqual([]);
-    expect(sent.find((m) => m.type === 'plan_thinking')).toMatchObject({ text: 'grep first', subagentId: expect.any(String) });
+    expect(sent.filter((m) => m.type === 'planner_thinking_delta')).toEqual([
+      expect.objectContaining({ text: 'grep first', subagentId: expect.any(String) }),
+    ]);
   });
 
   it('keeps a read the turn answers inside the same turn', async () => {

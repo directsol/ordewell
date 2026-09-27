@@ -372,8 +372,6 @@ export function reduceConversation(view: ConversationView, input: ConversationIn
       return retractText(view, input);
     case 'planner_thinking_delta':
       return think(view, input.text, input.turnId, input.segmentId, input.subagentId);
-    case 'plan_thinking':
-      return think(view, input.text, input.turnId, undefined, input.subagentId);
     case 'research_step':
       return announceTool(view, input);
     case 'research_step_done':

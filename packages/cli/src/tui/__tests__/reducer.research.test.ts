@@ -84,8 +84,8 @@ describe('research calls during a planner turn', () => {
 describe('planner thinking', () => {
   it('becomes a thinking block in the conversation, not a status-row tail', () => {
     const s = drive(planning(), [
-      { type: 'plan_thinking', text: 'weighing ' },
-      { type: 'plan_thinking', text: 'the options' },
+      { type: 'planner_thinking_delta', text: 'weighing ' },
+      { type: 'planner_thinking_delta', text: 'the options' },
     ]);
 
     expect(s.conversation.blocks).toMatchObject([{ type: 'thinking', text: 'weighing the options', streaming: true }]);

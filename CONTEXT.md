@@ -102,8 +102,11 @@ AI service only holds a disposable copy of it.
 
 **SessionMessage** — the single union every delivery surface consumes: the
 plan-lifecycle events (`plan_generated`, `planner_message`, `status_update`, …)
-plus the four planner streaming variants (`plan_token`, `plan_thinking`,
-`research_step`, `research_step_done`). Produced only behind the Session's
+plus the planner streaming variants (`planner_text_delta`,
+`planner_thinking_delta`, `plan_token`, `research_step`, `research_step_done`,
+…). Each meaning has one message: all planner thinking, whatever the backend,
+is `planner_thinking_delta`, and `plan_token` is only the "building plan"
+display of a streaming JSON envelope, never reply prose. Produced only behind the Session's
 `broadcast` seam; the core-internal `ResearchProgress` union never crosses
 into a surface. Surfaces adapt it to their own presentation protocol (VS Code:
 `PlannerStreamRouter` → webview messages; web: raw JSON over WS) but never
