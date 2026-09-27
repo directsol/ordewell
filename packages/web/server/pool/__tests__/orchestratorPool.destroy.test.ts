@@ -31,3 +31,27 @@ describe('closing a session', () => {
     }
   });
 });
+
+describe('subscribing to a session', () => {
+  it('sends a new socket nothing of the transcript: every client reads the conversation over REST, and a turn opens a socket each time', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'ordewell-subscribe-'));
+    mkdirSync(join(workspace, '.git'));
+    const pool = new OrchestratorPool();
+    const history = [{ role: 'user' as const, content: 'ship it', timestamp: '2026-01-01T00:00:00Z' }];
+    const planSpy = vi.spyOn(Session.prototype, 'planState', 'get').mockReturnValue({ conversationHistory: history } as unknown as LegacyPlanState);
+    const startSpy = vi.spyOn(Session.prototype, 'startPlanning').mockResolvedValue({} as LegacyPlanState);
+
+    try {
+      await pool.startPlanning('s1', 'ship it', ['claude-code'], workspace);
+      const ws = { OPEN: 1, readyState: 1, send: vi.fn() };
+      pool.subscribe('s1', ws as unknown as Parameters<OrchestratorPool['subscribe']>[1]);
+
+      expect(ws.send).not.toHaveBeenCalled();
+    } finally {
+      planSpy.mockRestore();
+      startSpy.mockRestore();
+      pool.destroyAll();
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+});

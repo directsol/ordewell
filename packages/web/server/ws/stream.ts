@@ -26,7 +26,6 @@ export function createWsHandler(pool: OrchestratorPool) {
     });
 
     ws.send(JSON.stringify({ type: 'connected', sessionId }));
-    // Subscribe after 'connected' so the chat-backlog replay arrives in order.
     pool.subscribe(sessionId, ws);
   });
 
