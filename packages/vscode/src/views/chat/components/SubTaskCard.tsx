@@ -5,6 +5,7 @@ import type { Task, DiscoveredModel, TaskModelAssignment } from '@ordewell/core'
 import { TaskCheck } from './TaskCard';
 import { runnerOptionsFor } from './TaskCard';
 import type { RunnerMode, RunnerOption } from './TaskCard';
+import { checkLabel } from '../checkLabel';
 
 interface SubTaskCardProps {
   task: Task;
@@ -191,7 +192,7 @@ export default function SubTaskCard({ task, parentTask, models, modes, runners, 
                   {task.verdict.checks.map((check) => (
                     <div key={check.name} className={`check-item ${check.skipped ? 'check-skipped' : check.passed ? 'check-passed' : 'check-failed'}`}>
                       <span className="check-icon">{check.skipped ? '\u00D7' : check.passed ? '\u2713' : '\u2717'}</span>
-                      <span className="check-name">{check.name === 'completion_marker' ? 'Completion Marker' : check.name === 'exit_code' ? 'Exit Code' : check.name === 'workspace_changes' ? 'Changes' : check.name === 'verify_command' ? 'Verify Command' : 'Model Review'}</span>
+                      <span className="check-name">{checkLabel(check.name)}</span>
                       <span className="check-status">{check.skipped ? 'skipped' : check.passed ? 'passed' : 'failed'}</span>
                       {check.detail && <span className="check-detail">{check.detail}</span>}
                     </div>

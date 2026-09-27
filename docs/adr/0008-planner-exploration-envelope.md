@@ -102,3 +102,25 @@ Three defects were structural rather than incidental, so they are recorded here:
 - **TypeScript compiler API only (M4).** Rejected despite `typescript` already being a devDependency and giving genuinely precise results: it covers TS/JS only. A planner that is sharp on TS repos and blunt everywhere else is worse than one that is consistent.
 - **Answer approvals over the WebSocket (M5).** Rejected: the CLI and TUI already speak HTTP to the daemon, a prompt can outlive the socket that announced it, and a plain POST is answerable from any surface — including `curl` when debugging.
 - **Prompt per exact command rather than per scope (M6).** Rejected as the default (T1). opencode parses commands with tree-sitter and asks per command pattern; that precision costs a grammar dependency, and for a read-mostly planner whose destructive verbs are already hard-refused, binary-plus-leading-arguments is the useful granularity.
+
+## Amendment (2026-09-27) — words the shell computes
+
+A review of `commandPolicy.ts` found five more places where the classifier read
+a different command from the one the shell runs. Each is closed by narrowing,
+under the rule the file already applied to `eval` and assignments: what the
+classifier cannot read is refused, and an argument it cannot see into prompts.
+
+- **A computed command name is refused.** `$(printf rm) -rf build` lexed to an
+  empty first word, and a segment without a binary was dropped before
+  classification, so only the inner `printf` was judged — `rm` ran as `auto`.
+  Substitutions now stay in their word as written, and a command name holding a
+  substitution, a `$` expansion or a brace list is refused.
+- **A computed argument prompts.** `cat $(printf /etc/passwd)`, bash's
+  `$'…'`/`$"…"` quoting, special parameters (`$0`, `$@`) and brace lists
+  (`cat {,/etc/passwd}`) hid a path from confinement the way `cat $x` did, and
+  now take the same prompt path. Brace expansion is read even though Linux's
+  `/bin/sh` is dash: on macOS, Fedora and Git for Windows it is bash.
+- **`|&` is a pipe.** Read as `|` and a separate `&`, it dropped the next
+  stage's pipe, so piping into an interpreter was only asked about.
+- **A value glued onto a short flag is confined.** `grep -f/etc/passwd` skipped
+  the path check that `grep -f /etc/passwd` gets.

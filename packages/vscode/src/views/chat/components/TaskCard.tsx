@@ -3,6 +3,7 @@ import SubTaskCard from './SubTaskCard';
 import ModelSelector, { getModelClass, providerLabel } from './ModelSelector';
 import DependencyPicker from './DependencyPicker';
 import { lastLine } from '../taskOutput';
+import { checkLabel } from '../checkLabel';
 import { dependencyCandidates, capConflictFiles } from '@ordewell/core/plan-utils';
 import { Task, DiscoveredModel, TaskModelAssignment, TaskIsolation } from '@ordewell/core';
 
@@ -380,7 +381,7 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
                   {task.verdict.checks.map((check) => (
                     <div key={check.name} className={`check-item ${check.skipped ? 'check-skipped' : check.passed ? 'check-passed' : 'check-failed'}`}>
                       <span className="check-icon">{check.skipped ? '×' : check.passed ? '✓' : '✗'}</span>
-                      <span className="check-name">{check.name === 'completion_marker' ? 'Completion Marker' : check.name === 'exit_code' ? 'Exit Code' : check.name === 'workspace_changes' ? 'Changes' : check.name === 'verify_command' ? 'Verify Command' : 'Model Review'}</span>
+                      <span className="check-name">{checkLabel(check.name)}</span>
                       <span className="check-status">{check.skipped ? 'skipped' : check.passed ? 'passed' : 'failed'}</span>
                       {check.detail && <span className="check-detail">{check.detail}</span>}
                     </div>
