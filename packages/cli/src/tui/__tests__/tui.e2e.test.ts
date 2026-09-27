@@ -290,6 +290,44 @@ describe('TUI end to end', () => {
     expect(chat[input - 2]).toBe('12.4k in · 3.1k out · 18% ctx');
   });
 
+  it('ctrl+o raw bytes toggle full detail on the command rows, with the footer hint following', async () => {
+    const h = harness();
+    h.daemon.mocks.startConversation.mockImplementationOnce(async () => {
+      const emit = h.daemon.emitPlanning;
+      emit({ type: 'planner_turn_started', turnId: 't1', prompt: 'Build the login flow' });
+      emit({ type: 'research_step', tool: 'bash', args: '{"command":"ls src"}', toolCallId: 'c1', turnId: 't1' });
+      emit({
+        type: 'research_step_done', turnId: 't1',
+        step: { id: 'r1', tool: 'bash', args: '{"command":"ls src"}', result: 'LoginRoute.ts\nSession.ts\nauth.ts\nmiddleware.ts\nroutes.ts', success: true, outcome: 'success', toolCallId: 'c1', timestamp: '' },
+      });
+      emit({ type: 'planner_turn_ended', turnId: 't1', outcome: 'plan' });
+      await Promise.resolve();
+      return planPayload();
+    });
+
+    h.type('Build the login flow');
+    h.type('\r');
+    await vi.waitFor(() => {
+      expect(h.screen()).toContain('… +2 lines (ctrl+o to expand)');
+      expect(h.screen()).toContain('ctrl-o expand all');
+    });
+
+    h.type('\x0f');
+    await vi.waitFor(() => {
+      expect(h.app.getState().detailAll).toBe(true);
+      expect(h.screen()).toContain('ctrl-o collapse all');
+      expect(h.screen()).toContain('middleware.ts');
+      expect(h.screen()).toContain('… (ctrl+o to collapse)');
+    });
+
+    h.type('\x0f');
+    await vi.waitFor(() => {
+      expect(h.app.getState().detailAll).toBe(false);
+      expect(h.screen()).toContain('ctrl-o expand all');
+      expect(h.screen()).toContain('… +2 lines (ctrl+o to expand)');
+    });
+  });
+
   it('a bracketed paste with a newline lands in the editor without submitting', async () => {
     const h = harness();
     h.type('\x1b[200~first line\nsecond line\x1b[201~');

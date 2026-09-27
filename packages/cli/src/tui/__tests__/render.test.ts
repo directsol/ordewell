@@ -627,6 +627,11 @@ describe('overlays', () => {
     for (const command of ['/fork', '/rewind', '/compact']) expect(sheet).toContain(command);
   });
 
+  it('names the detail-all toggle in the help sheet', () => {
+    const sheet = helpLayout(200, 120).lines.map(stripAnsi).join('\n');
+    expect(sheet).toContain('ctrl-o expand/collapse all');
+  });
+
   it('keeps each help entry on a single line so the table stays aligned', () => {
     const lines = screen({ overlay: { kind: 'help', scroll: 6 }, rows: 30, cols: 80 });
     const orphan = lines.find((l) => /^\s*(dependencies|plans|catalogs)\s*$/.test(stripAnsi(l)));
@@ -678,6 +683,10 @@ describe('footer', () => {
 });
 
 describe('input cursor', () => {
+  // Located by the prompt glyph rather than a fixed offset from the end: the
+  // footer wraps when its hints overflow, and the input row moves with it.
+  const inputRow = (out: string[]): string => out.reduce((found, row) => (row.includes('❯') ? row : found), '');
+
   // The driver hides the hardware cursor, so the frame itself must mark the
   // caret or mid-line edits (left arrow, ctrl-a) would be blind.
   const withColour = (fn: () => void) => {
@@ -689,7 +698,7 @@ describe('input cursor', () => {
     withColour(() => {
       const s = initialState({ rows: 24, cols: 80 });
       const out = render({ ...s, editor: { ...s.editor, text: 'abcdef', cursor: 2 } });
-      const input = out[out.length - 2];
+      const input = inputRow(out);
       expect(input).toContain(`ab${style.inverse('c')}def`);
     });
   });
@@ -698,7 +707,7 @@ describe('input cursor', () => {
     withColour(() => {
       const s = initialState({ rows: 24, cols: 80 });
       const out = render({ ...s, editor: { ...s.editor, text: 'abc', cursor: 3 } });
-      expect(out[out.length - 2]).toContain(`abc${style.inverse(' ')}`);
+      expect(inputRow(out)).toContain(`abc${style.inverse(' ')}`);
     });
   });
 
@@ -706,7 +715,7 @@ describe('input cursor', () => {
     withColour(() => {
       const s = initialState({ rows: 24, cols: 80, focus: 'plan' as const, tasks });
       const out = render({ ...s, editor: { ...s.editor, text: 'abc', cursor: 1 } });
-      expect(out[out.length - 2]).not.toContain('\x1b[7m');
+      expect(inputRow(out)).not.toContain('\x1b[7m');
     });
   });
 
@@ -714,7 +723,7 @@ describe('input cursor', () => {
     withColour(() => {
       const s = initialState({ rows: 24, cols: 80, overlay: { kind: 'help' as const, scroll: 0 } });
       const out = render({ ...s, editor: { ...s.editor, text: 'abc', cursor: 1 } });
-      expect(out[out.length - 2]).not.toContain('\x1b[7m');
+      expect(inputRow(out)).not.toContain('\x1b[7m');
     });
   });
 
@@ -726,7 +735,7 @@ describe('input cursor', () => {
         registerSkillCommands([{ name: 'grilling', description: 'Grill the plan' }]);
         const s = initialState({ rows: 24, cols: 80 });
         const out = render({ ...s, editor: { ...s.editor, text: '/grilling ', cursor: 10 } });
-        expect(out[out.length - 2]).toContain(style.cyan('/grilling'));
+        expect(inputRow(out)).toContain(style.cyan('/grilling'));
       });
     });
 
@@ -734,7 +743,7 @@ describe('input cursor', () => {
       withColour(() => {
         const s = initialState({ rows: 24, cols: 80 });
         const out = render({ ...s, editor: { ...s.editor, text: '/foo', cursor: 0 } });
-        expect(out[out.length - 2]).not.toContain(style.cyan('/foo'));
+        expect(inputRow(out)).not.toContain(style.cyan('/foo'));
       });
     });
 
@@ -742,7 +751,7 @@ describe('input cursor', () => {
       withColour(() => {
         const s = initialState({ rows: 24, cols: 80 });
         const out = render({ ...s, editor: { ...s.editor, text: '/help', cursor: 0 } });
-        expect(out[out.length - 2]).not.toContain(style.cyan('/help'));
+        expect(inputRow(out)).not.toContain(style.cyan('/help'));
       });
     });
 
@@ -751,7 +760,7 @@ describe('input cursor', () => {
         registerSkillCommands([{ name: 'grilling', description: 'Grill the plan' }]);
         const s = initialState({ rows: 24, cols: 80 });
         const out = render({ ...s, editor: { ...s.editor, text: '/gri', cursor: 4 } });
-        expect(out[out.length - 2]).toContain(style.cyan('/gri'));
+        expect(inputRow(out)).toContain(style.cyan('/gri'));
       });
     });
 
@@ -760,7 +769,7 @@ describe('input cursor', () => {
         registerSkillCommands([{ name: 'grilling', description: 'Grill the plan' }]);
         const s = initialState({ rows: 24, cols: 80 });
         const out = render({ ...s, editor: { ...s.editor, text: '/grix', cursor: 5 } });
-        expect(out[out.length - 2]).not.toContain(style.cyan('/grix'));
+        expect(inputRow(out)).not.toContain(style.cyan('/grix'));
       });
     });
 
@@ -770,7 +779,7 @@ describe('input cursor', () => {
         const s = initialState({ rows: 24, cols: 80 });
         const text = 'explain this bug /grilling please';
         const out = render({ ...s, editor: { ...s.editor, text, cursor: text.length } });
-        expect(out[out.length - 2]).toContain(style.cyan('/grilling'));
+        expect(inputRow(out)).toContain(style.cyan('/grilling'));
       });
     });
 
@@ -1145,6 +1154,7 @@ describe('command rows in full detail', () => {
       '     conversation that wraps',
       '     line 3',
       '     line 4',
+      '     … (ctrl+o to collapse)',
     ]);
   });
 
@@ -1160,12 +1170,19 @@ describe('command rows in full detail', () => {
     ]);
   });
 
-  it('shows every line of a long output, with nothing left to expand', () => {
+  it('shows every line of a long output, with the expand note flipped to its collapse hint', () => {
     const tall = { ...heard(80, bash('gh issue view 47'), ran('gh issue view 47', ISSUES)), rows: 260 };
     const rows = blockRows(detailed(tall), '●');
 
-    expect(rows).toHaveLength(1 + 1 + 215);
-    expect(rows.at(-1)).toBe('     line 215');
+    expect(rows).toHaveLength(1 + 1 + 215 + 1);
+    expect(rows.at(-1)).toBe('     … (ctrl+o to collapse)');
+  });
+
+  it('appends no collapse note to an output the preview would have shown whole', () => {
+    const short = heard(80, bash('ls'), ran('ls', 'src\n'));
+    const rows = blockRows(detailed(short), '●');
+
+    expect(rows).toEqual(['● Bash(ls)', '     command: ls', '  ⎿  src']);
     expect(rows.join('\n')).not.toContain('ctrl+o');
   });
 
