@@ -573,6 +573,9 @@ function setupChatListener(context: vscode.ExtensionContext): void {
         // streaming has not been saved yet, so its live view is sent instead.
         if (isGeneratingPlan) chatProvider.conversation.resync();
         else chatProvider.restoreChat(currentPlan);
+        // The queue outlives a webview reload: a message parked at a batch
+        // boundary must still be listed, and withdrawable, when the view returns.
+        chatProvider.showQueueStatus(session.getQueuedMessages());
         if (currentPlan.tasks.length > 0) {
           chatProvider.showPlan(currentPlan);
           if (currentGoal) chatProvider.setGoal(currentGoal);
@@ -799,6 +802,26 @@ function setupChatListener(context: vscode.ExtensionContext): void {
 
       case 'addNote':
         chatProvider.conversation.note('system', msg.text);
+        break;
+
+      // The user withdrew a prompt that was waiting at a batch boundary. The
+      // echo is authoritative: the webview removed it optimistically, and this
+      // settles which messages really remain.
+      case 'removeQueuedMessage':
+        session.removeQueuedMessage(msg.id);
+        chatProvider.showQueueStatus(session.getQueuedMessages());
+        persistState(persistDeps());
+        break;
+
+      // An in-chat approval card was answered. The same `resolveApproval` every
+      // surface funnels through: the session broadcasts `approval_settled`,
+      // which redraws the card with its outcome.
+      case 'resolveApproval':
+        try {
+          session.resolveApproval(msg.id, msg.granted);
+        } catch (err) {
+          log(`Approval ${msg.id} could not be resolved: ${err instanceof Error ? err.message : String(err)}`);
+        }
         break;
 
       case 'toggleSkill':

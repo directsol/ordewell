@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import type { AiProvider } from '@ordewell/core';
+import type { QueuedPrompt } from '../../../shared/protocol';
 
 // Core owns the union; a hand-copied duplicate diverged the moment ADR-0009
 // added the three harness planners.
@@ -38,7 +39,9 @@ interface ChatInputProps {
   isProcessing?: boolean;
   onStop?: () => void;
   disabledReason?: string;
-  queueCount?: number;
+  /** Prompts the host is holding until the next task batch. */
+  queued?: QueuedPrompt[];
+  onRemoveQueued?: (id: string) => void;
   prefill?: string;
   /** Discovered skills (global ~/.ordewell/skills/ + workspace .ordewell/skills/) merged into the / suggestion dropdown. */
   skills?: SkillEntry[];
@@ -263,7 +266,8 @@ export default function ChatInput({
   isProcessing = false,
   onStop,
   disabledReason,
-  queueCount = 0,
+  queued = [],
+  onRemoveQueued,
   prefill,
   skills = [],
 }: ChatInputProps) {
@@ -646,9 +650,27 @@ export default function ChatInput({
 
   return (
     <div className={`chat-input ${disabled ? 'disabled' : ''}`}>
-      {queueCount > 0 && (
-        <div className="queue-badge chat-input-queue-badge">
-          <span className="queue-dot" /> {queueCount} message{queueCount > 1 ? 's' : ''} queued
+      {queued.length > 0 && (
+        <div className="queued-prompts" aria-label="Queued messages">
+          {queued.map((m) => (
+            <div key={m.id} className="queued-prompt">
+              <span className="chat-msg-queued-badge">queued</span>
+              <span className="queued-prompt-text" title={m.text}>{m.text}</span>
+              <button
+                type="button"
+                className="queued-prompt-remove"
+                title="Remove from the queue and put it back in the input"
+                aria-label={`Remove queued message: ${m.text}`}
+                onClick={() => {
+                  setText(m.text);
+                  textareaRef.current?.focus();
+                  onRemoveQueued?.(m.id);
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
         </div>
       )}
       {showSuggestions && (

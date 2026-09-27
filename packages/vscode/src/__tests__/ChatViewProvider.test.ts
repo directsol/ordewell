@@ -10,12 +10,16 @@ vi.mock('vscode', () => ({
     fire(e: unknown) { for (const fn of this.listeners) fn(e); }
   },
   Uri: { joinPath: (...parts: unknown[]) => ({ toString: () => parts.join('/') }) },
+  commands: { executeCommand: vi.fn() },
 }));
 
-function providerWithCapture(): { provider: ChatViewProvider; posted: { type: string }[] } {
+const executeCommand = vscode.commands.executeCommand as unknown as ReturnType<typeof vi.fn>;
+
+function providerWithCapture(): { provider: ChatViewProvider; posted: { type: string }[]; view: { show: ReturnType<typeof vi.fn> } } {
   const provider = new ChatViewProvider({ toString: () => 'file:///ext' } as unknown as vscode.Uri);
   const posted: { type: string }[] = [];
   const fakeView = {
+    show: vi.fn(),
     webview: {
       options: {},
       html: '',
@@ -27,8 +31,28 @@ function providerWithCapture(): { provider: ChatViewProvider; posted: { type: st
   } as unknown as vscode.WebviewView;
   provider.resolveWebviewView(fakeView, {} as never, {} as never);
   posted.length = 0;
-  return { provider, posted };
+  return { provider, posted, view: fakeView as unknown as { show: ReturnType<typeof vi.fn> } };
 }
+
+describe('ChatViewProvider.reveal', () => {
+  it('shows a hidden chat without stealing focus, so the user sees the request', () => {
+    const { provider, view } = providerWithCapture();
+
+    provider.reveal();
+
+    expect(view.show).toHaveBeenCalledWith(true);
+    expect(executeCommand).not.toHaveBeenCalled();
+  });
+
+  it('focuses the view when it was never opened, so the request still has somewhere to land', () => {
+    const provider = new ChatViewProvider({ toString: () => 'file:///ext' } as unknown as vscode.Uri);
+    executeCommand.mockClear();
+
+    provider.reveal();
+
+    expect(executeCommand).toHaveBeenCalledWith('ordewellChatView.focus');
+  });
+});
 
 describe('ChatViewProvider.setGoal', () => {
   it('never sends a state transition — an empty goal must not wipe the webview timeline', () => {
@@ -57,6 +81,16 @@ describe('ChatViewProvider.setModels', () => {
     expect(msg.models[0]).toMatchObject(models[0]);
     expect(msg.models[1].runnerProvider).toBe('opencode-go');
     expect(msg.models[2].runnerProvider).toBe('openrouter');
+  });
+});
+
+describe('ChatViewProvider.showQueueStatus', () => {
+  it('sends every waiting prompt with its id, so the chat can list and withdraw each one', () => {
+    const { provider, posted } = providerWithCapture();
+
+    provider.showQueueStatus([{ id: 'q-1', text: 'also add tests' }]);
+
+    expect(posted).toEqual([{ type: 'queueStatus', messages: [{ id: 'q-1', text: 'also add tests' }] }]);
   });
 });
 

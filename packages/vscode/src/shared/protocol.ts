@@ -61,6 +61,12 @@ export interface ConversationPatch {
   changed: readonly DisplayBlock[];
 }
 
+/** One prompt the user sent while a run was live; it waits for the next batch boundary unless withdrawn. */
+export interface QueuedPrompt {
+  id: string;
+  text: string;
+}
+
 export type WebviewToHost =
   | {
       type: 'sendMessage';
@@ -74,6 +80,13 @@ export type WebviewToHost =
       typed?: boolean;
     }
   | { type: 'sendSystemCommand'; command: SystemCommand; taskId?: string }
+  /**
+   * The user answered an in-chat approval card. The id is the request's, so the
+   * host resolves the same prompt any other surface would.
+   */
+  | { type: 'resolveApproval'; id: string; granted: boolean }
+  /** Take one unsent queued prompt back out, so its words return to the input. */
+  | { type: 'removeQueuedMessage'; id: string }
   | { type: 'ready' }
   /** A per-task model dropdown opened — re-discover so a stale/degraded catalog self-heals. */
   | { type: 'refreshModels' }
@@ -104,7 +117,8 @@ export type HostToWebview =
   | { type: 'executionStatus'; taskId: string; status: TaskStatus }
   | { type: 'taskOutput'; taskId: string; text: string }
   | { type: 'taskIdle'; taskId: string; idleSince: string | null }
-  | { type: 'queueStatus'; count: number }
+  /** Every prompt still waiting at a batch boundary, in the order it was sent. */
+  | { type: 'queueStatus'; messages: QueuedPrompt[] }
   | { type: 'showError'; error: string }
   | { type: 'focusTask'; taskId: string }
   | { type: 'setModels'; models: DiscoveredModel[] }

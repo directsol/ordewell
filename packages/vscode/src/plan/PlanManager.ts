@@ -8,26 +8,7 @@ import type { ChatViewProvider } from '../providers/ChatViewProvider';
 import { VsCodeConfig } from '../adapters/VsCodeConfig';
 import { VsCodeFileSystem } from '../adapters/VsCodeFileSystem';
 import { VsCodeTerminalRunner } from '../adapters/VsCodeTerminalRunner';
-import { handleApprovalMessage, handleApprovalDecidedMessage } from '../approvals';
 import { handleIsolationBlocked, handleIsolationHandoff } from './isolation';
-
-/**
- * Open approval prompts keyed by approval id, so an `approval_settled`
- * broadcast (timeout, or a decision reached from another surface) can cancel
- * the pending prompt rather than leave it on screen after the planner has
- * already moved on. Owned by the VS Code surface: core's `INotification` stays
- * free of cancellation mechanics, and `approvals.ts` already treats a
- * dismissed prompt as a T5 denial — cancelling the token just makes the
- * dismissal happen. `showQuickPick` (not `showWarningMessage`) is used because
- * only the QuickPick/inputBox overloads accept a `CancellationToken` in the
- * installed `@types/vscode`.
- */
-const openApprovalPrompts = new Map<string, vscode.CancellationTokenSource>();
-
-/** Blank-line-separated blocks, each collapsed to one line. */
-function splitParagraphs(text: string): string[] {
-  return text.split(/\n{2,}/).map((p) => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
-}
 
 export interface PlanManagerDeps {
   session: Session;
@@ -346,8 +327,8 @@ export async function handleSendMessage(
     ensureSessionPlan(deps);
     await handleContinueConversation(text, deps);
     // Only a live runner can queue an edit — an armed-but-idle scheduler applies
-    // it, so the badge would announce a queue that never forms.
-    if (deps.session.hasLiveWork) deps.chatProvider.showQueueStatus(deps.session.queuedCount);
+    // it, so the strip would announce a queue that never forms.
+    if (deps.session.hasLiveWork) deps.chatProvider.showQueueStatus(deps.session.getQueuedMessages());
   } else {
     await handleStartPlanning(text, deps, pendingRunners);
   }
@@ -396,56 +377,10 @@ export function handleSessionMessage(
 ): void {
   deps.chatProvider.conversation.receive(msg);
   if (msg.type === 'approval_request') {
-    // Fire and forget: the Session's research loop is already awaiting the
-    // answer, and blocking the broadcast seam would stall every other message.
-    // A CancellationToken lets a later `approval_settled` cancel this prompt
-    // instead of leaving it on screen after the planner has already moved on.
-    const cts = new vscode.CancellationTokenSource();
-    openApprovalPrompts.set(msg.id, cts);
-    void handleApprovalMessage(msg, {
-      confirm: async (message, options) => {
-        // A QuickPick placeHolder is one line. Handing it the whole multi-line
-        // prompt buried the part that matters most — that the grant outlives
-        // this one call — past the truncation, so the paragraphs after the
-        // question ride on the choices instead.
-        const [question, ...rest] = splitParagraphs(message);
-        const detail = rest.join(' ');
-        try {
-          // showQuickPick (unlike showWarningMessage) accepts a CancellationToken
-          // in the installed types, so a settling broadcast can dismiss it.
-          // ignoreFocusOut, because losing focus to the editor is not an answer:
-          // without it, clicking away silently denies.
-          const picked = await vscode.window.showQuickPick(
-            options,
-            { placeHolder: question, ignoreFocusOut: true, title: detail },
-            cts.token,
-          );
-          return picked ?? undefined;
-        } finally {
-          // The pick or the cancellation has resolved the prompt either way;
-          // drop the entry so a late `approval_settled` no-ops on a gone id.
-          if (openApprovalPrompts.get(msg.id) === cts) openApprovalPrompts.delete(msg.id);
-        }
-      },
-      resolve: (approvalId, granted) => deps.session.resolveApproval(approvalId, granted),
-      notifyWebview: (text) => deps.chatProvider.conversation.note('system', text),
-    });
-    return;
-  }
-  if (msg.type === 'approval_settled') {
-    // Retire the prompt this surface opened for the same id — timeout, or an
-    // answer from another surface. `approvals.ts` then resolves deny and
-    // reports "no longer actionable", so the end state is always correct.
-    const cts = openApprovalPrompts.get(msg.id);
-    if (cts) {
-      cts.cancel();
-      cts.dispose();
-      openApprovalPrompts.delete(msg.id);
-    }
-    return;
-  }
-  if (msg.type === 'approval_decided') {
-    handleApprovalDecidedMessage(msg, (text) => deps.chatProvider.conversation.note('system', text));
+    // The chat card is the question now, so make sure the user is looking at
+    // it. Nothing blocks here: the session's research loop awaits the answer on
+    // the broadcast seam, and the webview answers through `resolveApproval`.
+    deps.chatProvider.reveal();
     return;
   }
   switch (msg.type) {
@@ -525,6 +460,8 @@ export function handleSessionMessage(
     case 'planner_usage':
     case 'subagent_started':
     case 'subagent_finished':
+    case 'approval_settled':
+    case 'approval_decided':
       break;
     // What Merge all did, whether this host asked for it or another surface did.
     // The webview shows a blocked or part-landed group per repo; core's notices
@@ -543,6 +480,9 @@ export function handleSessionMessage(
 
 export async function processQueuedBatched(deps: PlanManagerDeps): Promise<void> {
   await deps.session.processQueuedMessages();
+  // The batch consumed the queue, so the webview's strip must empty with it —
+  // otherwise a withdrawn or applied prompt lingers as if still waiting.
+  deps.chatProvider.showQueueStatus([]);
   deps.chatProvider.showPlan(deps.getCurrentPlan());
   deps.persistState();
 }

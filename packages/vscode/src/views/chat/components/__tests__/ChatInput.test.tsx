@@ -394,14 +394,26 @@ describe('slash token highlight', () => {
   });
 });
 
-describe('queue badge', () => {
-  it('shows queue badge when queueCount > 0', () => {
-    renderInput({ queueCount: 3 });
-    expect(document.querySelector('.chat-input-queue-badge')).toBeTruthy();
+describe('queued prompts', () => {
+  it('lists what is waiting, each marked queued', () => {
+    renderInput({ queued: [{ id: 'q-1', text: 'also add tests' }] });
+    const item = document.querySelector('.queued-prompt')!;
+    expect(item.textContent).toContain('also add tests');
+    expect(item.querySelector('.chat-msg-queued-badge')!.textContent).toBe('queued');
   });
 
-  it('does not show queue badge when queueCount is 0', () => {
-    const { container } = renderInput({ queueCount: 0 });
-    expect(container.querySelector('.chat-input-queue-badge')).toBeNull();
+  it('shows nothing when the queue is empty', () => {
+    const { container } = renderInput({ queued: [] });
+    expect(container.querySelector('.queued-prompt')).toBeNull();
+  });
+
+  it('withdrawing reports the id and puts the words back in the input', () => {
+    const onRemoveQueued = vi.fn();
+    const { container } = renderInput({ queued: [{ id: 'q-1', text: 'also add tests' }], onRemoveQueued });
+
+    fireEvent.click(container.querySelector('.queued-prompt-remove')!);
+
+    expect(onRemoveQueued).toHaveBeenCalledWith('q-1');
+    expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('also add tests');
   });
 });

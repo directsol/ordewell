@@ -1,5 +1,8 @@
 import React from 'react';
-import type { DisplayBlock, MessageBlock, PlanBlock, SubagentBlock, SubagentStatus, ThinkingDisplayBlock, ToolBlock, ToolStatus } from '@ordewell/core';
+import type {
+  ApprovalBlock, ApprovalKind, ApprovalSource, DisplayBlock, MessageBlock, PlanBlock, SubagentBlock, SubagentStatus,
+  ThinkingDisplayBlock, ToolBlock, ToolStatus,
+} from '@ordewell/core';
 import { outputLines, outputPreview } from '@ordewell/core/plan-utils';
 
 /*
@@ -156,7 +159,62 @@ function PlanMarker({ block, onShowPlan }: { block: PlanBlock; onShowPlan: () =>
 
 function noop(): void {}
 
-function Block({ block, expanded, onShowPlan }: { block: DisplayBlock; expanded: boolean; onShowPlan: () => void }) {
+const APPROVAL_KIND: Record<ApprovalKind, string> = {
+  shell_command: 'Run a command',
+  url_fetch: 'Fetch a URL',
+  external_path: 'Read outside the workspace',
+};
+
+// The source the policy decided under. `asked` is omitted: a card a user
+// answered reads "Approved", not "Approved (asked)".
+function approvalSourceLabel(source: ApprovalSource | undefined): string {
+  switch (source) {
+    case 'pre-approved': return 'pre-approved';
+    case 'remembered': return 'remembered';
+    case 'mode': return 'policy';
+    case 'no-channel': return 'no approval channel';
+    default: return '';
+  }
+}
+
+export function ApprovalCard({ block, onResolve }: { block: ApprovalBlock; onResolve: (id: string, granted: boolean) => void }) {
+  const silent = block.decidedBy !== undefined && block.decidedBy !== 'asked';
+  const status = block.status === 'pending'
+    ? 'Waiting for you'
+    : block.status === 'granted'
+      ? (silent ? `Auto-approved (${approvalSourceLabel(block.decidedBy)})` : 'Approved')
+      : (silent ? `Auto-denied (${approvalSourceLabel(block.decidedBy)})` : 'Denied');
+  return (
+    <div className={`approval-card ${block.status}`} data-status={block.status}>
+      <div className="approval-card-head">
+        <span className="approval-card-kind">{APPROVAL_KIND[block.kind]}</span>
+        <span className="approval-card-status">{status}</span>
+      </div>
+      <code className="approval-card-subject">{block.subject}</code>
+      {block.detail && <div className="approval-card-detail">{block.detail}</div>}
+      <div className="approval-card-scope">
+        {block.status === 'pending'
+          ? `Approving also allows ${block.scope} for the rest of this session.`
+          : `Scope: ${block.scope}`}
+      </div>
+      {block.status === 'pending' && block.approvalId && (
+        <div className="approval-card-actions">
+          <button type="button" className="approval-card-allow" onClick={() => onResolve(block.approvalId!, true)}>Allow</button>
+          <button type="button" className="approval-card-deny" onClick={() => onResolve(block.approvalId!, false)}>Deny</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Block({
+  block, expanded, onShowPlan, onResolveApproval,
+}: {
+  block: DisplayBlock;
+  expanded: boolean;
+  onShowPlan: () => void;
+  onResolveApproval: (id: string, granted: boolean) => void;
+}) {
   switch (block.type) {
     case 'message':
       return <ChatMessage block={block} />;
@@ -168,9 +226,9 @@ function Block({ block, expanded, onShowPlan }: { block: DisplayBlock; expanded:
       return <SubagentCard block={block} expanded={expanded} />;
     case 'plan':
       return <PlanMarker block={block} onShowPlan={onShowPlan} />;
-    // The approval card and the token line are drawn by the next change (#53);
-    // until then the host still notes each approval decision as a system line.
     case 'approval':
+      return <ApprovalCard block={block} onResolve={onResolveApproval} />;
+    // The token line is pinned below the conversation, not drawn in it.
     case 'usage':
       return null;
   }
@@ -178,10 +236,19 @@ function Block({ block, expanded, onShowPlan }: { block: DisplayBlock; expanded:
 
 const MemoBlock = React.memo(Block);
 
-export function ConversationBlocks({ blocks, detailAll, onShowPlan }: { blocks: readonly DisplayBlock[]; detailAll: boolean; onShowPlan: () => void }) {
+export function ConversationBlocks({
+  blocks, detailAll, onShowPlan, onResolveApproval = noop,
+}: {
+  blocks: readonly DisplayBlock[];
+  detailAll: boolean;
+  onShowPlan: () => void;
+  onResolveApproval?: (id: string, granted: boolean) => void;
+}) {
   return (
     <div className="conversation">
-      {blocks.map((block) => <MemoBlock key={block.id} block={block} expanded={detailAll} onShowPlan={onShowPlan} />)}
+      {blocks.map((block) => (
+        <MemoBlock key={block.id} block={block} expanded={detailAll} onShowPlan={onShowPlan} onResolveApproval={onResolveApproval} />
+      ))}
     </div>
   );
 }
