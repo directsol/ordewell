@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { AiProvider, LegacyPlanState, Task, DiscoveredModel, RunnerId, TaskStatus, TaskIsolation, IsolationHandoff, IsolationMergeResult } from '@ordewell/core';
+import type { AiProvider, LegacyPlanState, DiscoveredModel, RunnerId, TaskIsolation, IsolationHandoff, IsolationMergeResult } from '@ordewell/core';
 import { ConversationViewHost, type SavedConversation } from '../ConversationViewHost';
 import type { ChatState, HostToWebview, ModelOption, PendingPlanEdit, PlannerBackend, RunnerMeta, RunnerModeMeta, WebviewToHost } from '../shared/protocol';
 
@@ -20,7 +20,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
   private _onMessage = new vscode.EventEmitter<WebviewToHost>();
   readonly onMessage = this._onMessage.event;
-  private _pendingTasks: Task[] | null = null;
   /** The planner conversation as the webview draws it; every planner event and local notice goes through here. */
   readonly conversation = new ConversationViewHost((msg) => this.postMessage(msg));
 
@@ -50,8 +49,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   sendPlanUpdated(plan: LegacyPlanState): void { this._cachedPlan = plan; this.postMessage({ type: 'planUpdated', plan }); }
   /** Every plan edit waiting at the next batch boundary, so the chat can list (and withdraw) each one. */
   showPendingPlanEdits(edits: PendingPlanEdit[]): void { this.postMessage({ type: 'pendingPlanEdits', edits }); }
-  focusTask(taskId: string): void { this.postMessage({ type: 'focusTask', taskId }); }
-  sendExecutionStatus(taskId: string, status: TaskStatus): void { this.postMessage({ type: 'executionStatus', taskId, status }); }
   /** Live runner output for one task; the webview keeps the tail and renders it in that task's card. */
   sendTaskOutput(taskId: string, text: string): void { this.postMessage({ type: 'taskOutput', taskId, text }); }
   /** Advisory silence timestamp for one task; null clears the stalled indicator. */
@@ -90,15 +87,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   showPlan(plan: LegacyPlanState): void { this.sendPlanUpdated(plan); }
-  showWarnings(message: string, pendingTasks: Task[]): void {
-    this._pendingTasks = pendingTasks;
-    this.conversation.note('system', `Plan modification warnings:\n${message}`);
-    this.postMessage({ type: 'showWarnings', warnings: message, pendingTasks });
-  }
 
   // Legacy pass-throughs forwarding to new protocol types
   planGenerated(plan: LegacyPlanState): void { this.sendPlanUpdated(plan); }
-  planApproved(): void { this.setState('approved'); this.postMessage({ type: 'planApproved' }); }
+  planApproved(): void { this.setState('approved'); }
   /**
    * Only updates the goal label. Deliberately NOT coupled to setState: a
    * falsy goal used to send setState('empty'), which wipes the whole webview
@@ -246,9 +238,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (runners.length > 0) this.setRunners(runners);
   }
 
-  getPendingTasks(): Task[] | null {
-    return this._pendingTasks;
-  }
 
   private renderHtml(webviewView: vscode.WebviewView): void {
     const nonce = getNonce();

@@ -620,8 +620,17 @@ export class ApiClient {
    * and forget, since the awaited plan-generation REST call is the actual
    * completion signal, not a terminal WS message like execution has.
    */
-  streamPlanning(sessionId: string, onEvent: (event: WsEvent) => void): { close: () => void } {
+  streamPlanning(sessionId: string, onEvent: (event: WsEvent) => void): { ready: Promise<void>; close: () => void } {
     const socket = this.openSessionSocket(sessionId);
+    // The daemon broadcasts a turn's start the moment the REST call reaches
+    // it, so the caller waits for the subscription first. It settles on a
+    // failure too, never rejects: a broken socket costs the progress display,
+    // not the turn.
+    const ready = new Promise<void>((resolve) => {
+      socket.once('open', () => resolve());
+      socket.once('error', () => resolve());
+      socket.once('close', () => resolve());
+    });
     socket.on('message', (data: Buffer) => {
       try {
         onEvent(JSON.parse(data.toString()));
@@ -632,7 +641,7 @@ export class ApiClient {
     socket.on('error', () => {
       // Best-effort progress display — a broken WS never blocks plan generation.
     });
-    return { close: () => socket.close() };
+    return { ready, close: () => socket.close() };
   }
 
   async getCommands(): Promise<{ commands: { name: string; description: string }[] }> {

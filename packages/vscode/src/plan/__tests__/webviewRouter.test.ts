@@ -1,0 +1,254 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import * as vscode from 'vscode';
+import { Session, RunnerRegistry, BufferedTaskOutputSource, createTask } from '@ordewell/core';
+import type { IAiService, ITerminalRunner, LegacyPlanState, ModelResolver, SessionMessage } from '@ordewell/core';
+import { fakeConfig, fakeFileSystem } from '@ordewell/core/testing';
+import { ChatViewProvider } from '../../providers/ChatViewProvider';
+import type { HostToWebview, WebviewToHost } from '../../shared/protocol';
+import { routeWebviewMessage, type WebviewRouterDeps } from '../webviewRouter';
+
+const showWarningMessage = vscode.window.showWarningMessage as unknown as ReturnType<typeof vi.fn>;
+
+function plan(): LegacyPlanState {
+  const at = '2026-01-01T00:00:00Z';
+  return {
+    tasks: [
+      createTask({ id: 't1', order: 1, title: 'Parse JSON', prompt: 'do it', assignedRunner: 'claude-code', taskMode: 'default' }),
+      createTask({ id: 't2', order: 2, title: 'Stream it', prompt: 'then this', assignedRunner: 'claude-code', dependencies: ['t1'] }),
+    ],
+    generatedAt: at,
+    status: 'draft',
+    runners: ['claude-code'],
+    lastUpdated: at,
+    conversationHistory: [
+      { role: 'user', content: 'build me a parser', timestamp: at },
+      { role: 'assistant', content: 'Plan generated with 2 tasks.', timestamp: at, kind: 'plan_generated' },
+    ],
+  };
+}
+
+function harness() {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ordewell-router-'));
+  const broadcasts: SessionMessage[] = [];
+  const posts: HostToWebview[] = [];
+  const chatProvider = new ChatViewProvider({ toString: () => 'file:///ext' } as unknown as vscode.Uri);
+  chatProvider.postMessage = (msg) => { posts.push(msg); };
+  const runner = { spawn: vi.fn(), stop: vi.fn(), stopAll: vi.fn(), activeCount: 0 } as unknown as ITerminalRunner;
+  const session = new Session({
+    config: fakeConfig(),
+    notifications: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), confirm: vi.fn().mockResolvedValue(undefined) },
+    runner,
+    registry: new RunnerRegistry(),
+    workspaceRoot: () => workspace,
+    fsAdapter: fakeFileSystem(),
+    broadcast: (msg) => { broadcasts.push(msg); chatProvider.conversation.receive(msg); },
+    modelResolver: { getCachedRunnerModels: () => [], modelsForRunners: vi.fn().mockResolvedValue({}) } as unknown as ModelResolver,
+    settings: () => ({ tddEnabled: false }),
+    aiService: { hasActiveConversation: () => false, reset: () => {} } as unknown as IAiService,
+    taskOutput: new BufferedTaskOutputSource({ transcripts: { finalAssistantText: async () => null } }),
+  });
+  session.loadPlan(plan(), 'build me a parser', workspace, { persist: false });
+
+  let current = session.planState!;
+  let goal = 'build me a parser';
+  let generating = false;
+  let abort: AbortController | null = null;
+  let pending: string[] | undefined;
+  const deps: WebviewRouterDeps = {
+    session,
+    chatProvider,
+    modelResolver: {} as unknown as WebviewRouterDeps['modelResolver'],
+    pluginRegistry: new RunnerRegistry(),
+    config: { aiProvider: 'openrouter', apiKey: 'sk-test', planningModel: 'some/model', enabledRunners: ['claude-code'] } as unknown as WebviewRouterDeps['config'],
+    fsAdapter: { getWorkspaceRoot: () => workspace } as unknown as WebviewRouterDeps['fsAdapter'],
+    terminalRunner: { stopAll: vi.fn() } as unknown as WebviewRouterDeps['terminalRunner'],
+    notifications: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), confirm: vi.fn() },
+    settingsService: { getTdd: () => false },
+    getCurrentPlan: () => current,
+    setCurrentPlan: (p) => { current = p; },
+    getCurrentGoal: () => goal,
+    setCurrentGoal: (g) => { goal = g; },
+    isGeneratingPlan: () => generating,
+    setGeneratingPlan: (v) => { generating = v; },
+    getResearchAbort: () => abort,
+    setResearchAbort: (c) => { abort = c; },
+    persistState: vi.fn(),
+    saveCurrentSession: vi.fn(),
+    log: () => {},
+    extension: {
+      ready: vi.fn(),
+      refreshModels: vi.fn(),
+      runSlashCommand: vi.fn(async () => {}),
+      setPlanner: vi.fn(async () => {}),
+      setPlannerModel: vi.fn(async () => {}),
+      toggleSkill: vi.fn(),
+    },
+    getPendingRunners: () => pending,
+    setPendingRunners: (r) => { pending = r; },
+  };
+  const route = (msg: WebviewToHost) => routeWebviewMessage(msg, deps);
+  const lastPlan = () => posts.filter((m): m is Extract<HostToWebview, { type: 'planUpdated' }> => m.type === 'planUpdated').at(-1)?.plan;
+  return { session, deps, route, broadcasts, posts, lastPlan, workspace };
+}
+
+describe('webview messages reach the session through one entry point each', () => {
+  let h: ReturnType<typeof harness>;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    showWarningMessage.mockReset();
+    h = harness();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    fs.rmSync(h.workspace, { recursive: true, force: true });
+  });
+
+  describe('task edits', () => {
+    it('a model picked on a card is a session edit, broadcast to every surface', async () => {
+      const assignment = { modelId: 'claude-opus-4-1', modelLabel: 'Claude Opus 4.1' };
+      await h.route({ type: 'editTask', taskId: 't1', edit: { kind: 'model', assignment } });
+
+      expect(h.session.getTask('t1')?.assignedModel).toEqual(assignment);
+      expect(h.broadcasts).toContainEqual(expect.objectContaining({ type: 'task_updated', taskId: 't1' }));
+      expect(h.deps.persistState).toHaveBeenCalled();
+    });
+
+    it('a mode the runner does not offer is refused, and the card is re-shown with what was kept', async () => {
+      await h.route({ type: 'editTask', taskId: 't1', edit: { kind: 'mode', mode: 'no-such-mode' } });
+
+      expect(h.session.getTask('t1')?.taskMode).toBe('default');
+      expect(showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('no-such-mode'));
+      expect(h.lastPlan()?.tasks.find((t) => t.id === 't1')?.taskMode).toBe('default');
+    });
+
+    it('a mode the runner offers lands in the session', async () => {
+      await h.route({ type: 'editTask', taskId: 't1', edit: { kind: 'mode', mode: 'plan' } });
+
+      expect(h.session.getTask('t1')?.taskMode).toBe('plan');
+    });
+
+    it('a prompt edit lands in the session and is shown', async () => {
+      await h.route({ type: 'editTask', taskId: 't2', edit: { kind: 'prompt', prompt: 'stream it in chunks' } });
+
+      expect(h.session.getTask('t2')?.prompt).toBe('stream it in chunks');
+      expect(h.lastPlan()?.tasks.find((t) => t.id === 't2')?.prompt).toBe('stream it in chunks');
+    });
+
+    it('clearing every dependency is an edit, not a removal', async () => {
+      await h.route({ type: 'editTask', taskId: 't2', edit: { kind: 'dependencies', dependencies: [] } });
+
+      expect(h.session.getTask('t2')?.dependencies).toEqual([]);
+      expect(h.session.planTasks).toHaveLength(2);
+    });
+  });
+
+  describe('task actions', () => {
+    it('skip completes the task through the scheduler, so its dependents can start', async () => {
+      await h.route({ type: 'sendSystemCommand', command: 'skip', taskId: 't1' });
+
+      expect(h.session.getTask('t1')?.status).toBe('completed');
+    });
+
+    it('retry reaches the session', async () => {
+      const retry = vi.spyOn(h.session, 'retryTask').mockResolvedValue();
+      await h.route({ type: 'sendSystemCommand', command: 'retry', taskId: 't2' });
+
+      expect(retry).toHaveBeenCalledWith('t2');
+    });
+
+    it('removes a task only once the user confirms, naming what depends on it', async () => {
+      showWarningMessage.mockResolvedValueOnce(undefined);
+      await h.route({ type: 'removeTask', taskId: 't1' });
+      expect(h.session.planTasks).toHaveLength(2);
+      expect(showWarningMessage.mock.calls[0][0]).toContain('#2 Stream it');
+
+      showWarningMessage.mockResolvedValueOnce('Remove');
+      await h.route({ type: 'removeTask', taskId: 't1' });
+      expect(h.session.planTasks.map((t) => t.id)).toEqual(['t2']);
+    });
+
+    it('adds a drafted task, and ignores a draft with no title', async () => {
+      await h.route({ type: 'addTask', draft: { title: '   ', dependencies: [] } });
+      expect(h.session.planTasks).toHaveLength(2);
+
+      await h.route({ type: 'addTask', draft: { title: 'Docs', dependencies: ['t2'] } });
+      expect(h.session.planTasks.at(-1)).toMatchObject({ title: 'Docs', prompt: 'Docs', dependencies: ['t2'] });
+    });
+
+    it('answers a checkpoint either way, a rejection carrying its reason', async () => {
+      const approve = vi.spyOn(h.session, 'approveCheckpoint').mockImplementation(() => {});
+      const reject = vi.spyOn(h.session, 'rejectCheckpoint').mockImplementation(() => {});
+
+      await h.route({ type: 'answerCheckpoint', taskId: 't1', approved: true });
+      await h.route({ type: 'answerCheckpoint', taskId: 't2', approved: false, reason: 'wrong approach' });
+
+      expect(approve).toHaveBeenCalledWith('t1');
+      expect(reject).toHaveBeenCalledWith('t2', 'wrong approach');
+    });
+  });
+
+  describe('chat', () => {
+    it('sends a known slash command to the extension, and anything else to the planner', async () => {
+      const converse = vi.spyOn(h.session, 'continueConversation').mockResolvedValue(h.session.planState!);
+
+      await h.route({ type: 'sendMessage', text: '/refresh', typed: true });
+      await h.route({ type: 'sendMessage', text: '/my-skill do it', typed: true });
+
+      expect(h.deps.extension.runSlashCommand).toHaveBeenCalledWith('/refresh');
+      expect(converse).toHaveBeenCalledWith('/my-skill do it', expect.anything());
+    });
+
+    it('holds a prompt sent right after a stop until the stopped turn has unwound, then sends it', async () => {
+      let finishStopped: () => void = () => {};
+      const converse = vi.spyOn(h.session, 'continueConversation')
+        .mockImplementationOnce(() => new Promise((resolve) => { finishStopped = () => resolve(h.session.planState!); }))
+        .mockResolvedValue(h.session.planState!);
+
+      const first = h.route({ type: 'sendMessage', text: 'add streaming', typed: true });
+      await h.route({ type: 'stopResearch' });
+      await h.route({ type: 'sendMessage', text: 'actually, do this instead', typed: true });
+
+      expect(converse).toHaveBeenCalledTimes(1);
+
+      finishStopped();
+      await first;
+      await vi.waitFor(() => expect(converse).toHaveBeenCalledTimes(2));
+      expect(converse.mock.calls[1][0]).toBe('actually, do this instead');
+    });
+
+    it('a stopped turn unwinding late does not clear the state of the turn after it', async () => {
+      let finishStopped: () => void = () => {};
+      let secondSignal: AbortSignal | undefined;
+      vi.spyOn(h.session, 'continueConversation')
+        .mockImplementationOnce(() => new Promise((resolve) => { finishStopped = () => resolve(h.session.planState!); }))
+        .mockImplementationOnce((_text, opts) => { secondSignal = opts?.signal; return new Promise(() => {}); });
+
+      const first = h.route({ type: 'sendMessage', text: 'add streaming', typed: true });
+      await h.route({ type: 'stopResearch' });
+      await h.route({ type: 'sendMessage', text: 'next', typed: true });
+      finishStopped();
+      await first;
+      await vi.waitFor(() => expect(secondSignal).toBeDefined());
+
+      expect(h.deps.isGeneratingPlan()).toBe(true);
+      await h.route({ type: 'stopResearch' });
+      expect(secondSignal?.aborted).toBe(true);
+    });
+  });
+
+  it.each([
+    [{ type: 'ready' }, 'ready', []],
+    [{ type: 'refreshModels' }, 'refreshModels', []],
+    [{ type: 'setPlanner', provider: 'codex' }, 'setPlanner', ['codex']],
+    [{ type: 'setPlannerModel', modelId: 'gpt-5', effort: 'high' }, 'setPlannerModel', ['gpt-5', 'high']],
+    [{ type: 'toggleSkill', skillId: 'tdd', enabled: true }, 'toggleSkill', ['tdd', true]],
+  ] as const)('hands %o to the extension', async (msg, handler, args) => {
+    await h.route(msg as WebviewToHost);
+
+    expect(h.deps.extension[handler]).toHaveBeenCalledWith(...args);
+  });
+});

@@ -1,0 +1,23 @@
+import { describe, it, expect } from 'vitest';
+import { hasHiddenDetail } from '../detail';
+import { play } from './helpers';
+
+describe('hidden detail', () => {
+  it('is nothing while the conversation holds only messages and its token line', () => {
+    const view = play([
+      { type: 'local_entry', role: 'user', text: 'add a parser' },
+      { type: 'planner_message', content: 'Which format?', timestamp: '' },
+      { type: 'planner_usage', totals: { inputTokens: 10, outputTokens: 2 } },
+    ]);
+
+    expect(hasHiddenDetail(view.blocks)).toBe(false);
+  });
+
+  it.each([
+    ['a command row', { type: 'research_step', tool: 'read_file', args: '{"path":"a.ts"}' }],
+    ['thinking', { type: 'planner_thinking_delta', text: 'hmm' }],
+    ['a subagent', { type: 'subagent_started', subagentId: 'sa-1', brief: 'look around' }],
+  ] as const)('is there once the conversation holds %s', (_name, input) => {
+    expect(hasHiddenDetail(play([input]).blocks)).toBe(true);
+  });
+});

@@ -1,4 +1,4 @@
-import { EMPTY_HOLD, fromTranscript, holdPrompt } from '@ordewell/core';
+import { EMPTY_HOLD, fromTranscript, holdPrompt, taskStartedNotice } from '@ordewell/core';
 import { isolationOfPlan } from '../isolation';
 import { chatEditorRoom } from './geometry';
 import { chatScrollMax } from './layout';
@@ -102,8 +102,7 @@ export function reduce(state: TuiState, action: Action): Step {
     case 'taskStarted': {
       if (stale(state, action.sessionId)) return step(state);
       const tasks = state.tasks.map((t) => (t.id === action.taskId && !isTaskRunning(t) ? { ...t, status: 'in_progress' } : t));
-      const who = action.runner ? ` · ${action.runner}` : '';
-      const spoken = say(state, 'system', `Started "${action.title}"${who}`);
+      const spoken = say(state, 'system', taskStartedNotice(action.title, action.runner));
       return step({ ...spoken, tasks, status: 'executing', busyLabel: runLabel(tasks) });
     }
 
@@ -250,7 +249,8 @@ export function reduce(state: TuiState, action: Action): Step {
       }, ['set-planner', 'set-task-runner']));
 
     case 'failed': {
-      const reported = { ...say(state, 'error', action.message), status: 'idle' as const, busyLabel: '' };
+      const quiet = plannerInFlight(state) && state.stopRequested;
+      const reported = { ...(quiet ? state : say(state, 'error', action.message)), status: 'idle' as const, busyLabel: '' };
       // A planner turn dying IS a turn ending — the queue would otherwise wait
       // on a next one that never comes. An execution failure (or any failure
       // with no turn running) drains nothing.
@@ -396,5 +396,5 @@ function submit(state: TuiState): Step {
     ? { type: 'sendMessage', sessionId: state.sessionId, message: text }
     : { type: 'startConversation', goal: text };
 
-  return step({ ...spoken, status: 'planning' }, [effect]);
+  return step({ ...spoken, status: 'planning', stopRequested: false }, [effect]);
 }

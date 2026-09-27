@@ -109,7 +109,8 @@ is `planner_thinking_delta`, and `plan_token` is only the "building plan"
 display of a streaming JSON envelope, never reply prose. Produced only behind the Session's
 `broadcast` seam; the core-internal `ResearchProgress` union never crosses
 into a surface. Surfaces adapt it to their own presentation protocol (VS Code:
-`PlannerStreamRouter` → webview messages; web: raw JSON over WS) but never
+`ConversationViewHost` folds it into core's conversation view and sends the
+webview block patches; web: raw JSON over WS) but never
 re-map `ResearchProgress` themselves.
 Isolated execution (ADR-0013) travels on it too: each `status_update` task
 carries `isolation` (`state: none | active | integrated | conflict | kept`, plus
@@ -1007,6 +1008,16 @@ accounts for (`transcriptAt`) is what tells a reconnecting surface what is new.
 *Avoid:* calling it a chat log or a message list — it is a reducer over
 messages to a drawing, and streamed semi-states live in it;
 *Avoid:* a surface holding its own parallel mirror of the view.
+
+**Turn gate** (`TurnGate`, `followTurn`, `stopTurn`) — the stop rule, beside
+the conversation view: which planner turn a surface has open and which one
+its user stopped. A stop ends the turn on screen at once, and whatever the
+stopped turn still streams until the backend notices the abort is dropped;
+usage, approvals and transcript markers are facts and still land. Both
+surfaces fold session messages through `followTurn`, so a stopped reply looks
+the same in the TUI and VS Code.
+*Avoid:* keeping a stopped turn's late deltas "until the daemon answers" —
+that was one surface's rule and the two drifted.
 
 **Detail view (detail-all)** — the single expand-all toggle per surface: the
 TUI's ctrl+o and VS Code's header button flip one `detailAll` flag that decides

@@ -2,7 +2,7 @@ import { flag, hasFlag, readLastSession } from '../utils';
 import { handoffBranch, isRepoGroup, repoResultLines } from '../isolation';
 import { iconFor } from '../utils/output';
 import type { ApiClient, TaskStatus } from '../daemonClient';
-import { truncateCheckpointSummary } from '@ordewell/core';
+import { taskStartedNotice, truncateCheckpointSummary } from '@ordewell/core';
 import { connect } from './shared';
 
 /**
@@ -74,7 +74,7 @@ export async function followExecution(
   });
   const stream = api.streamExecution(sessionId, (event) => {
     if (event.type === 'task_started') {
-      process.stderr.write(`[${event.order}/${event.title}] Started: ${event.runner} / ${event.modelId}\n`);
+      process.stderr.write(`· ${taskStartedNotice(event.title, event.runner)}\n`);
     }
     if (event.type === 'checkpoint') {
       process.stderr.write(`· Checkpoint — ${event.taskTitle}: ${truncateCheckpointSummary(event.summary)}\n`);

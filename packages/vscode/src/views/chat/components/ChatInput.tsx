@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import type { AiProvider } from '@ordewell/core';
 import { aheadOfDraft } from '@ordewell/core/plan-utils';
 import type { PendingPlanEdit } from '../../../shared/protocol';
+import { SLASH_COMMANDS } from '../../../commands/slashCommands';
 
 // Core owns the union; a hand-copied duplicate diverged the moment ADR-0009
 // added the three harness planners.
@@ -93,23 +94,7 @@ function groupByProvider(items: SlashSuggestion[]): Map<string, SlashSuggestion[
   return grouped;
 }
 
-const COMMAND_SUGGESTIONS: SlashSuggestion[] = [
-  { label: '/planner', detail: 'Choose who plans — an API provider or a coding agent (no API key)', insertText: '/planner' },
-  { label: '/model', detail: 'Show model configuration', insertText: '/model' },
-  { label: '/model set ', detail: 'Pick orchestrator model', insertText: '/model set ' },
-  { label: '/planner-effort', detail: "Thinking effort for a coding-agent planner", insertText: '/planner-effort' },
-  { label: '/key set ', detail: 'Set an API key (OpenRouter or Google)', insertText: '/key set ' },
-  { label: '/sessions', detail: 'Browse and load saved sessions', insertText: '/sessions' },
-  { label: '/new', detail: 'Start a new session (clears current plan)', insertText: '/new' },
-  { label: '/fork', detail: 'Continue in a copy of this conversation and its tasks; the original stays as it is', insertText: '/fork' },
-  { label: '/rewind', detail: 'Fork the conversation from just before one of your messages (the original is kept)', insertText: '/rewind' },
-  { label: '/compact', detail: 'Condense this conversation into a summary; the last two exchanges and all tasks are kept', insertText: '/compact' },
-  { label: '/allowlist', detail: 'Restrict which models the planner may auto-assign per runner', insertText: '/allowlist' },
-  { label: '/refresh', detail: 'Re-discover runner models (e.g. after enabling an opencode backend)', insertText: '/refresh' },
-  { label: '/auto', detail: 'Toggle autonomous mode for new plans', insertText: '/auto' },
-  { label: '/parallel', detail: 'How many AI tasks run at once — applies to a run already going', insertText: '/parallel ' },
-  { label: '/help', detail: 'Show all available commands', insertText: '/help' },
-];
+const COMMAND_SUGGESTIONS: readonly SlashSuggestion[] = SLASH_COMMANDS;
 
 function toModelSuggestion(opt: ModelOption): SlashSuggestion {
   // Always surface the serving API so collisions (same model on both APIs) are

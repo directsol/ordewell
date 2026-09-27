@@ -6,15 +6,10 @@ import type { RunnerMode, RunnerOption } from './TaskCard';
 import { dependencyCandidates } from '@ordewell/core/plan-utils';
 import type { DiscoveredModel, Task, TaskModelAssignment } from '@ordewell/core';
 
-/** What the user filled in. Anything left unset is derived host-side by `Session.addTask`. */
-export interface TaskDraft {
-  title: string;
-  prompt?: string;
-  assignedRunner?: string;
-  assignedModel?: TaskModelAssignment;
-  taskMode?: string;
-  dependencies: string[];
-}
+import type { TaskDraft } from '../../../shared/protocol';
+
+// Anything the draft leaves unset is derived host-side by `Session.addTask`.
+export type { TaskDraft };
 
 interface NewTaskCardProps {
   tasks: Task[];

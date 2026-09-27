@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce } from '../reducer';
+import type { SessionMessage } from '@ordewell/core';
 import type { TuiState } from '../state';
+import { lastMessage, messagesOf } from './chat';
 
 /**
  * ESC during an in-flight planner turn: the first press arms a stop (or takes
@@ -92,5 +94,60 @@ describe('ESC while planning', () => {
 
     expect(effects).toEqual([]);
     expect(next.editor.text).toBe('');
+  });
+});
+
+describe('a stopped turn on screen', () => {
+  const turn = 't-1';
+  const hear = (state: TuiState, message: SessionMessage) => reduce(state, { type: 'sessionMessage', message, sessionId: 'session-1' }).state;
+  const escape = (state: TuiState) => reduce(state, { type: 'key', key: { name: 'escape' } }).state;
+
+  function stoppedMidReply(): TuiState {
+    let state = initialState({ status: 'planning', sessionId: 'session-1' });
+    state = hear(state, { type: 'planner_turn_started', turnId: turn, prompt: 'add a parser' });
+    state = hear(state, { type: 'planner_text_delta', turnId: turn, segmentId: 's1', text: 'Half a thou' });
+    return escape(escape(state));
+  }
+
+  it('ends at the stop, the way VS Code ends it, rather than when the daemon answers', () => {
+    expect(lastMessage(stoppedMidReply())).toMatchObject({ text: 'Half a thou', streaming: false });
+  });
+
+  it('drops what the stopped turn still streams while the daemon notices the abort', () => {
+    let state = stoppedMidReply();
+    state = hear(state, { type: 'planner_text_delta', turnId: turn, segmentId: 's1', text: 'ght, arriving late' });
+    state = hear(state, { type: 'planner_message', content: 'Half a thought, arriving late', timestamp: '', turnId: turn });
+
+    expect(messagesOf(state).map((m) => m.text)).toEqual(['add a parser', 'Half a thou']);
+  });
+});
+
+describe('the stopped turn\'s own failure', () => {
+  const escape = (state: TuiState) => reduce(state, { type: 'key', key: { name: 'escape' } }).state;
+  const fail = (state: TuiState, message: string) => reduce(state, { type: 'failed', message }).state;
+
+  it('is not reported as an error: the user asked for it, and the stop says so itself', () => {
+    const stopped = escape(escape(initialState({ status: 'planning', sessionId: 'session-1' })));
+
+    const after = fail(stopped, 'Request was aborted.');
+
+    expect(after.status).toBe('idle');
+    expect(messagesOf(after).filter((m) => m.role === 'error')).toEqual([]);
+  });
+
+  it('is only the stopped turn\'s: a later turn failing is still an error', () => {
+    const stopped = escape(escape(initialState({ status: 'planning', sessionId: 'session-1' })));
+    const settled = fail(stopped, 'Request was aborted.');
+
+    const next = fail({ ...settled, status: 'planning' }, 'rate limited');
+
+    expect(lastMessage(next)).toMatchObject({ role: 'error', text: 'rate limited' });
+  });
+  it('does not outlive its turn when nothing ended it on screen, such as a new session', () => {
+    const base = initialState({ status: 'idle', sessionId: 'session-1', stopRequested: true });
+    const typed = { ...base, editor: { ...base.editor, text: 'try again', cursor: 9 } };
+    const sent = reduce(typed, { type: 'key', key: { name: 'enter' } }).state;
+
+    expect(lastMessage(fail(sent, 'rate limited'))).toMatchObject({ role: 'error', text: 'rate limited' });
   });
 });

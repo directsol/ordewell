@@ -155,3 +155,21 @@ describe('ordewell run over a repo group', () => {
     expect(stdout).toContain('api: 3 tasks landed');
   });
 });
+
+describe('ordewell run announcing a task', () => {
+  it('names the task and its runner as every surface does, and no model it was not told', async () => {
+    const started: Event = { type: 'task_started', taskId: 't1', order: 1, title: 'One', runner: 'claude-code' };
+    const { client } = liveDaemon({ execute: [started, complete] });
+    const written: string[] = [];
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: string) => { written.push(chunk); return true; }) as never);
+
+    try {
+      await capture(() => handleRun(['--session-id', 's1'], client));
+    } finally {
+      write.mockRestore();
+    }
+
+    const line = written.find((w) => w.includes('One'));
+    expect(line).toBe('· Started "One" · claude-code\n');
+  });
+});

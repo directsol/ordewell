@@ -381,8 +381,8 @@ function dispatchLifecycle(dispatch: Dispatch, event: LifecycleMessage, sessionI
       return;
 
     default: {
-      // Compile-time only. The socket also greets with `connected` and
-      // `chat_backlog`, which are not SessionMessages and must stay ignorable.
+      // Compile-time only. The socket also greets with `connected`, which is
+      // not a SessionMessage and must stay ignorable.
       const unhandled: never = event;
       void unhandled;
       return;

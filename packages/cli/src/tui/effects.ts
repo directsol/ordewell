@@ -49,7 +49,7 @@ export interface OrdewellApi {
   getRunners(): Promise<{ runners: { id: string; name: string; enabled: boolean }[]; orchestratorModel: string }>;
   setRunnerEnabled(runner: string, enabled: boolean): Promise<{ ok: boolean }>;
   getModels(): Promise<RawCatalog>;
-  streamPlanning(sessionId: string, onEvent: (event: WsEvent) => void): { close: () => void };
+  streamPlanning(sessionId: string, onEvent: (event: WsEvent) => void): { ready: Promise<void>; close: () => void };
   respondToApproval(sessionId: string, approvalId: string, granted: boolean): Promise<{ ok: boolean }>;
   /** Opens the execution stream. `onReady` runs only once the subscription is live. */
   streamExecution(sessionId: string, onEvent: (event: WsEvent) => void, onReady?: (error?: Error) => void): Promise<void>;
@@ -628,6 +628,7 @@ async function converse(deps: EffectDeps, sessionId: string, call: () => Promise
   const stream = deps.api.streamPlanning(sessionId, inbound.planning);
 
   try {
+    await stream.ready;
     const plan = await call();
     inbound.flush();
     // Speak the turn before `planUpdated` settles it: the settle is also what

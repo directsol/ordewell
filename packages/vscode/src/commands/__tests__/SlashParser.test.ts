@@ -190,4 +190,15 @@ describe('conversation-editing slash commands', () => {
     expect(text).toContain('/rewind');
     expect(text).toContain('/compact');
   });
+
+  it('/help lists every command it answers', async () => {
+    const info = window.showInformationMessage as unknown as ReturnType<typeof vi.fn>;
+    info.mockClear();
+    await handleSlashCommand('/help', makeDeps());
+    const text = info.mock.calls[0][0] as string;
+    for (const command of ['/refresh', '/model', '/planner', '/planner-effort', '/key', '/sessions', '/allowlist', '/help', '/new', '/auto', '/fork', '/rewind', '/compact', '/parallel']) {
+      expect(isKnownSlashCommand(command)).toBe(true);
+      expect(text).toContain(command);
+    }
+  });
 });

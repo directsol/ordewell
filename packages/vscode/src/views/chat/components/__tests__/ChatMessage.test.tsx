@@ -2,7 +2,7 @@ import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, fireEvent } from '@testing-library/react';
 import type { DisplayBlock, MessageBlock, SubagentBlock, ThinkingDisplayBlock, ToolBlock } from '@ordewell/core';
-import ChatMessage, { CommandRow, ConversationBlocks, SubagentCard, ThinkingBlock } from '../ChatMessage';
+import ChatMessage, { CommandRow, ConversationBlocks, SubagentCard, ThinkingBlock, renderMarkdown } from '../ChatMessage';
 
 const message = (over: Partial<MessageBlock>): MessageBlock => ({ type: 'message', id: 'm', role: 'planner', text: '', streaming: false, ...over });
 const thinking = (over: Partial<ThinkingDisplayBlock> = {}): ThinkingDisplayBlock => ({
@@ -187,5 +187,26 @@ describe('ConversationBlocks', () => {
       <ConversationBlocks blocks={[{ type: 'plan', id: 'pl', status: 'updated', taskCount: 2, text: '' }]} detailAll={false} onShowPlan={() => {}} />,
     );
     expect(getByText('Plan updated · 2 tasks')).toBeTruthy();
+  });
+});
+
+describe('renderMarkdown on planner text', () => {
+  const parsed = (html: string) => {
+    const host = document.createElement('div');
+    host.innerHTML = html;
+    return host;
+  };
+  const linkOf = (html: string) => parsed(html).querySelector('a');
+
+  it('lets no quote in a link carry an attribute out of its href', () => {
+    const html = parsed(renderMarkdown('[docs](https://x.test/" style="position:fixed;inset:0" data-x=")'));
+
+    expect(html.querySelector('[style]')).toBeNull();
+    expect(html.querySelector('[data-x]')).toBeNull();
+  });
+
+  it('links only web URLs; anything else stays text', () => {
+    expect(linkOf(renderMarkdown('[run](javascript:alert(1))'))).toBeNull();
+    expect(linkOf(renderMarkdown('[docs](https://example.com/a)'))?.getAttribute('href')).toBe('https://example.com/a');
   });
 });

@@ -1,8 +1,9 @@
 import type { LegacyPlanState, SessionMessage } from '@ordewell/core';
 // The browser-safe entry, so the webview's tests can run the host's view too.
 import {
-  drainNext, EMPTY_CONVERSATION, EMPTY_HOLD, fromTranscript, holdPrompt, reduceConversation, unsendAll, unsendLatest,
-  type ConversationInput, type ConversationView, type DisplayBlock, type LocalEntry, type PromptHold,
+  drainNext, EMPTY_CONVERSATION, EMPTY_HOLD, followTurn, fromTranscript, holdPrompt, NO_TURN, stopTurn, unsendAll, unsendLatest,
+  type ConversationInput, type ConversationView, type DisplayBlock, type GatedConversation, type LocalEntry, type PromptHold,
+  type TurnGate,
 } from '@ordewell/core/plan-utils';
 import { diffConversation } from './shared/conversationPatch';
 import type { HostToWebview } from './shared/protocol';
@@ -10,12 +11,6 @@ import type { HostToWebview } from './shared/protocol';
 const FLUSH_MS = 30;
 
 export type SavedConversation = Pick<LegacyPlanState, 'conversationHistory' | 'researchLog' | 'plannerUsage'>;
-
-/** What a turn streams — everything a stop cuts off. Usage, approvals and transcript markers are facts and still land. */
-const TURN_STREAM = new Set<SessionMessage['type']>([
-  'planner_text_delta', 'planner_thinking_delta', 'planner_text_retracted', 'planner_message', 'plan_token',
-  'research_step', 'research_step_done', 'subagent_started', 'subagent_finished', 'planner_turn_ended',
-]);
 
 /**
  * The planner conversation the chat webview draws (#53), held on the host:
@@ -37,8 +32,7 @@ export class ConversationViewHost {
   private view: ConversationView = EMPTY_CONVERSATION;
   private sent: readonly DisplayBlock[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private openTurnId: string | null = null;
-  private stoppedTurnId: string | null = null;
+  private gate: TurnGate = NO_TURN;
   private held: PromptHold = EMPTY_HOLD;
 
   constructor(private readonly post: (msg: HostToWebview) => void) {}
@@ -52,14 +46,9 @@ export class ConversationViewHost {
       this.post({ type: 'plannerLiveness' });
       return;
     }
-    if (msg.type === 'planner_turn_started') this.stoppedTurnId = null;
-    if (this.cutOff(msg)) {
-      if (msg.type === 'planner_turn_ended') this.stoppedTurnId = null;
-      return;
-    }
-    this.fold(msg);
-    if (msg.type === 'planner_turn_started') this.openTurn(msg.turnId);
-    if (msg.type === 'planner_turn_ended') this.closeTurn();
+    const wasOpen = this.gate.open;
+    this.update(followTurn(this.view, this.gate, msg));
+    if (this.gate.open !== wasOpen) this.announceTurn();
   }
 
   note(role: LocalEntry['role'], text: string): void {
@@ -107,10 +96,9 @@ export class ConversationViewHost {
       this.post({ type: 'promptUnsent', text: all.text });
       this.showHeld(all.rest);
     }
-    if (this.openTurnId === null) return;
-    this.stoppedTurnId = this.openTurnId;
-    this.fold({ type: 'planner_turn_ended', turnId: this.openTurnId, outcome: 'stopped' });
-    this.closeTurn();
+    if (this.gate.open === null) return;
+    this.update(stopTurn(this.view, this.gate));
+    this.announceTurn();
   }
 
   /** The view a saved session reopens with, built from its records alone (#51). */
@@ -154,29 +142,23 @@ export class ConversationViewHost {
     this.post({ type: 'heldPrompts', prompts: held });
   }
 
-  private cutOff(msg: SessionMessage): boolean {
-    if (this.stoppedTurnId === null || !TURN_STREAM.has(msg.type)) return false;
-    const turnId = 'turnId' in msg ? msg.turnId : undefined;
-    return turnId === undefined || turnId === this.stoppedTurnId;
-  }
-
-  private openTurn(turnId: string): void {
-    this.openTurnId = turnId;
+  // The turn opening or closing flushes first, so the webview never learns of
+  // the change ahead of the blocks it was drawn with.
+  private announceTurn(): void {
     this.flush();
-    this.post({ type: 'plannerTurn', active: true });
-  }
-
-  private closeTurn(): void {
-    this.openTurnId = null;
-    this.flush();
-    this.post({ type: 'plannerTurn', active: false });
+    this.post({ type: 'plannerTurn', active: this.gate.open !== null });
   }
 
   private fold(input: ConversationInput): void {
-    this.update(reduceConversation(this.view, input));
+    this.update(followTurn(this.view, this.gate, input));
   }
 
-  private update(next: ConversationView): void {
+  private update({ view, gate }: GatedConversation): void {
+    this.gate = gate;
+    this.show(view);
+  }
+
+  private show(next: ConversationView): void {
     if (next === this.view) return;
     this.view = next;
     this.timer ??= setTimeout(() => this.flush(), FLUSH_MS);

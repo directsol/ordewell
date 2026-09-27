@@ -46,9 +46,9 @@ describe('per-task runner change', () => {
     act(() => { fireEvent.change(screen.getByLabelText('Runner'), { target: { value: 'codex' } }); });
 
     expect(api.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'sendMessage',
-      text: JSON.stringify({ runner: 'codex' }),
-      actionContext: { type: 'execute', taskId: 't1' },
+      type: 'editTask',
+      taskId: 't1',
+      edit: { kind: 'runner', runner: 'codex' },
     }));
   });
 

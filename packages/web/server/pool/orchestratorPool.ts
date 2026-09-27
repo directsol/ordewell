@@ -87,13 +87,6 @@ export class OrchestratorPool {
   subscribe(sessionId: string, ws: WebSocket): void {
     if (!this.clients.has(sessionId)) this.clients.set(sessionId, new Set());
     this.clients.get(sessionId)!.add(ws);
-    // Replay the planner dialogue so a (re)connecting client gets the backlog
-    // instead of an empty chat. Read-only — no LLM call is made.
-    const plan = this.sessions.get(sessionId)?.planState;
-    const history = plan?.conversationHistory ?? [];
-    if (history.length > 0 && ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify({ type: 'chat_backlog', history }));
-    }
   }
 
   unsubscribe(sessionId: string, ws: WebSocket): void {
@@ -613,7 +606,11 @@ export class OrchestratorPool {
     return session;
   }
 
+  // The Session drops its planner context, but the model call in flight is
+  // the pool's to abort: it holds the only signal that reaches it.
   destroy(sessionId: string): void {
+    this.planningAborts.get(sessionId)?.abort();
+    this.planningAborts.delete(sessionId);
     this.sessions.get(sessionId)?.destroy();
     this.sessions.delete(sessionId);
   }

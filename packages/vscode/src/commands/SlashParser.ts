@@ -7,24 +7,16 @@ import type { AiProvider, IConfig, RunnerRegistry, ModelResolver, SettingsServic
 import type { ApiProvider } from '../adapters/SecretStore';
 import type { ChatViewProvider, PlannerBackend } from '../providers/ChatViewProvider';
 import { configureModelAllowlist } from './configureModelAllowlist';
+import { SLASH_COMMAND_NAMES, slashHelp } from './slashCommands';
 import { resolveAutonomousQuickPickItems, applyAutonomousChoice } from '../SlashAutonomous';
 
-/**
- * First-word names this parser recognizes as extension slash commands. Text
- * starting with '/' whose first word is NOT in this set is a discovered skill
- * (or unknown) invocation — the caller routes it to handleSendMessage instead,
- * so Session's own /skill-name substitution (ADR: skill invocation
- * interception) gets a chance to resolve it, rather than being swallowed here
- * as "Unknown command".
- */
-const KNOWN_SLASH_COMMAND_NAMES: ReadonlySet<string> = new Set([
-  'refresh', 'model', 'planner', 'planner-effort', 'key', 'sessions', 'allowlist', 'help', 'new', 'auto',
-  'fork', 'rewind', 'compact', 'parallel',
-]);
-
+// A '/' text whose first word the table does not name is a discovered skill
+// (or unknown) invocation: the caller routes it to handleSendMessage, so the
+// Session's own /skill-name substitution gets to resolve it rather than it
+// being swallowed here as "Unknown command".
 export function isKnownSlashCommand(text: string): boolean {
   const name = text.trim().slice(1).split(/\s+/)[0]?.toLowerCase();
-  return !!name && KNOWN_SLASH_COMMAND_NAMES.has(name);
+  return !!name && SLASH_COMMAND_NAMES.has(name);
 }
 
 export interface SlashDeps {
@@ -251,12 +243,7 @@ export async function handleSlashCommand(text: string, deps: SlashDeps): Promise
     return;
   }
   if (cmd === '/help') {
-    vscode.window.showInformationMessage(
-      'Commands: /planner, /model, /model set, /planner-effort, /key set, /sessions, /new, /refresh, /auto, /parallel, /allowlist, /help. Type / after a command to see model suggestions.\n'
-      + '/fork — continue in a copy of this conversation and its tasks; the original stays as it is. '
-      + '/rewind [<message>] — fork the conversation from just before one of your messages; the original stays as it is. '
-      + '/compact — condense this conversation into a summary; the last two exchanges and all tasks are kept.',
-    );
+    vscode.window.showInformationMessage(slashHelp());
     return;
   }
   if (cmd === '/parallel') {

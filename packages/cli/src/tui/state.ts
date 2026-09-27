@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, type ConversationView, type PromptHold } from '@ordewell/core';
+import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, type ConversationView, type PromptHold, type TurnGate } from '@ordewell/core';
 import { emptyEditor, type EditorState } from './editor';
 
 export type RunStatus = 'idle' | 'planning' | 'researching' | 'executing';
@@ -268,6 +268,8 @@ export interface TuiState {
    * `SessionMessage` and every line the TUI adds itself as a `LocalEntry`.
    */
   conversation: ConversationView;
+  /** The planner turn the conversation has open, and the one the user stopped — core's stop rule. */
+  turnGate: TurnGate;
   /**
    * Whether thinking, command and subagent blocks draw in full. One switch for
    * the whole conversation on purpose: with no block opening on its own there
@@ -367,6 +369,11 @@ export interface TuiState {
    * previous arm scheduled can never disarm a later one out of turn.
    */
   stopArmToken: number;
+  /**
+   * The user stopped the turn still in flight. The daemon answers an aborted
+   * turn with an error, and that error is the stop itself, not news.
+   */
+  stopRequested: boolean;
   toast: string;
   rows: number;
   cols: number;
@@ -447,6 +454,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
   return {
     editor: emptyEditor(),
     conversation: EMPTY_CONVERSATION,
+    turnGate: NO_TURN,
     detailAll: false,
     status: 'idle',
     busyLabel: '',
@@ -484,6 +492,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
     queuedPrompts: EMPTY_HOLD,
     stopArmed: false,
     stopArmToken: 0,
+    stopRequested: false,
     toast: '',
     rows: 24,
     cols: 80,

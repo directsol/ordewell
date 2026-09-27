@@ -14,15 +14,19 @@ import { outputLines, outputPreview } from '@ordewell/core/plan-utils';
 
 const PREVIEW_LINES = 3;
 
+// The text is a model's, and can be steered by what it read: quotes are
+// escaped so nothing leaves the href, and only a web URL becomes a link.
 export function renderMarkdown(text: string): string {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 }
 
 export default function ChatMessage({ block }: { block: MessageBlock }) {

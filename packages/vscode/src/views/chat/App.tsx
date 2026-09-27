@@ -12,12 +12,13 @@ import HandoffCard from './components/HandoffCard';
 import CheckpointPanel from './components/CheckpointPanel';
 import type { RunnerMode } from './components/TaskCard';
 import type { TaskDraft } from './components/NewTaskCard';
-import { LegacyPlanState, DiscoveredModel, TaskModelAssignment, RunnerId, IsolationHandoff, IsolationMergeResult, TaskIsolation } from '@ordewell/core';
+import type { LegacyPlanState, DiscoveredModel, Task, TaskModelAssignment, RunnerId, IsolationHandoff, IsolationMergeResult, TaskIsolation } from '@ordewell/core';
 import type { AiProvider } from '@ordewell/core';
 import { isPlanRevision, planSummaryLabel, nextDock } from './planDock';
 import { DetailContext } from './detail';
+import { slashHelp } from '../../commands/slashCommands';
 import type { HostToWebview, PendingPlanEdit, PlannerBackend, RunnerMeta, WebviewToHost } from '../../shared/protocol';
-import { EMPTY_HOLD, type PromptHold } from '@ordewell/core/plan-utils';
+import { EMPTY_HOLD, hasHiddenDetail, type PromptHold } from '@ordewell/core/plan-utils';
 import { applyConversationPatch, EMPTY_PATCHED_VIEW, patchedBlocks, type PatchedView } from '../../shared/conversationPatch';
 
 declare function acquireVsCodeApi(): {
@@ -91,7 +92,6 @@ export default function App() {
   const [handoff, setHandoff] = useState<IsolationHandoff | null>(null);
   /** What the last Merge all did; a blocked or part-landed group stays visible until the run clears. */
   const [mergeResult, setMergeResult] = useState<IsolationMergeResult | null>(null);
-  const [prefill, setPrefill] = useState<string | undefined>(undefined);
   /** Is the plan dock open? See planDock.ts for when this flips. */
   const [dockExpanded, setDockExpanded] = useState(false);
 
@@ -162,7 +162,8 @@ export default function App() {
           if (stoppedRef.current) break;
           const incoming: LegacyPlanState | null = msg.plan ?? null;
           setPlan(incoming);
-          setIsResearchActive(false);
+          // Not a turn's end: a run's status tick arrives mid-turn too, and
+          // the host's `plannerTurn` is what says a turn is over.
           if (incoming) {
             setIsExecuting(incoming.status === 'running');
           }
@@ -224,13 +225,6 @@ export default function App() {
 
         case 'conversationBusy':
           setConversationBusy(!!msg.busy);
-          break;
-
-        case 'showWarnings':
-          if (sessionClearedRef.current) break;
-          // A modify that produced warnings still ends the turn — without this
-          // the input stayed disabled forever.
-          setIsResearchActive(false);
           break;
 
         case 'showError':
@@ -323,10 +317,6 @@ export default function App() {
           break;
         }
 
-        case 'executionStatus':
-          if (msg.status === 'in_progress') setIsExecuting(true);
-          break;
-
         case 'pendingPlanEdits':
           setPendingEdits(msg.edits ?? []);
           break;
@@ -341,9 +331,6 @@ export default function App() {
 
         case 'setGoal':
           setCurrentGoal(msg.goal ?? '');
-          break;
-
-        case 'focusTask':
           break;
 
         case 'setSkillToggles':
@@ -435,21 +422,8 @@ export default function App() {
       return;
     }
     if (text === '/help') {
-      setSlashOutput('Commands: /model, /model set <id>, /key set, /sessions, /new, /fork, /rewind [n], /compact, /refresh, /auto, /parallel [n], /allowlist, /help\n\nType / after a command to see model suggestions.');
+      setSlashOutput(slashHelp());
       setTimeout(() => setSlashOutput(''), 6000);
-      return;
-    }
-
-    if (text.startsWith('retry ')) {
-      const taskId = text.slice(6).trim();
-      setPrefill(undefined);
-      vscode.postMessage({
-        type: 'sendMessage',
-        text: text.trim(),
-        runners,
-        actionContext: { type: 'retry', taskId },
-        typed: true,
-      });
       return;
     }
 
@@ -493,35 +467,35 @@ export default function App() {
     vscode.postMessage({ type: 'sendMessage', text: '/sessions', runners });
   }, [runners]);
 
+  // A task card's own edit shows at once; the host's next plan settles it.
+  const echoTask = useCallback((taskId: string, patch: Partial<Task>) => {
+    const patchIn = (tasks: Task[]): Task[] => tasks.map((t) => {
+      if (t.id === taskId) return { ...t, ...patch };
+      return t.subtasks.length > 0 ? { ...t, subtasks: patchIn(t.subtasks) } : t;
+    });
+    setPlan((current) => (current ? { ...current, tasks: patchIn(current.tasks) } : current));
+  }, []);
+
   const handlePromptChange = useCallback((taskId: string, prompt: string) => {
-    vscode.postMessage({ type: 'sendMessage', text: JSON.stringify({ prompt }), runners, actionContext: { type: 'execute', taskId } });
-    const current = planRef.current;
-    if (current) {
-      const updateTasks = (tasks: typeof current.tasks): typeof current.tasks =>
-        tasks.map((t) => {
-          if (t.id === taskId) return { ...t, prompt, description: prompt };
-          if (t.subtasks.length > 0) return { ...t, subtasks: updateTasks(t.subtasks) };
-          return t;
-        });
-      setPlan({ ...current, tasks: updateTasks(current.tasks) });
-    }
-  }, [runners]);
+    vscode.postMessage({ type: 'editTask', taskId, edit: { kind: 'prompt', prompt } });
+    echoTask(taskId, { prompt, description: prompt });
+  }, [echoTask]);
 
   // No optimistic removal: the host asks for confirmation, so the card must
   // survive a "Cancel" and only disappear when the host echoes the new plan.
   const handleRemoveTask = useCallback((taskId: string) => {
-    vscode.postMessage({ type: 'sendMessage', text: '', runners, actionContext: { type: 'execute', taskId } });
-  }, [runners]);
+    vscode.postMessage({ type: 'removeTask', taskId });
+  }, []);
 
   // Not echoed either: the host validates the edit against the whole graph and
   // refuses some lists, so the checkboxes must show what was accepted.
   const handleDependenciesChange = useCallback((taskId: string, dependencies: string[]) => {
-    vscode.postMessage({ type: 'sendMessage', text: JSON.stringify({ dependencies }), runners, actionContext: { type: 'execute', taskId } });
-  }, [runners]);
+    vscode.postMessage({ type: 'editTask', taskId, edit: { kind: 'dependencies', dependencies } });
+  }, []);
 
   const handleAddTask = useCallback((draft: TaskDraft) => {
-    vscode.postMessage({ type: 'sendMessage', text: JSON.stringify(draft), runners, actionContext: { type: 'addTask' } });
-  }, [runners]);
+    vscode.postMessage({ type: 'addTask', draft });
+  }, []);
 
   // Activation-time discovery can cache a degraded (empty) catalog for a runner
   // that was cold or unconfigured at that moment (see extension.ts's
@@ -535,54 +509,27 @@ export default function App() {
   }, []);
 
   const handleModelChange = useCallback((taskId: string, assignment: TaskModelAssignment) => {
-    vscode.postMessage({ type: 'sendMessage', text: JSON.stringify(assignment), runners, actionContext: { type: 'execute', taskId } });
-    const current = planRef.current;
-    if (current) {
-      const updateTasks = (tasks: typeof current.tasks): typeof current.tasks =>
-        tasks.map((t) => {
-          if (t.id === taskId) return { ...t, assignedModel: assignment };
-          if (t.subtasks.length > 0) return { ...t, subtasks: updateTasks(t.subtasks) };
-          return t;
-        });
-      setPlan({ ...current, tasks: updateTasks(current.tasks) });
-    }
-  }, [runners]);
+    vscode.postMessage({ type: 'editTask', taskId, edit: { kind: 'model', assignment } });
+    echoTask(taskId, { assignedModel: assignment });
+  }, [echoTask]);
 
   // Only the runner is echoed optimistically. The model, effort and mode that
   // follow from it come from the new runner's catalog, which only the host can
   // read — guessing them here would display an unspawnable assignment until the
   // retargeted plan arrives.
   const handleRunnerChange = useCallback((taskId: string, runner: string) => {
-    vscode.postMessage({ type: 'sendMessage', text: JSON.stringify({ runner }), runners, actionContext: { type: 'execute', taskId } });
-    const current = planRef.current;
-    if (current) {
-      const updateTasks = (tasks: typeof current.tasks): typeof current.tasks =>
-        tasks.map((t) => {
-          if (t.id === taskId) return { ...t, assignedRunner: runner };
-          if (t.subtasks.length > 0) return { ...t, subtasks: updateTasks(t.subtasks) };
-          return t;
-        });
-      setPlan({ ...current, tasks: updateTasks(current.tasks) });
-    }
-  }, [runners]);
+    vscode.postMessage({ type: 'editTask', taskId, edit: { kind: 'runner', runner } });
+    echoTask(taskId, { assignedRunner: runner });
+  }, [echoTask]);
 
   const handleModeChange = useCallback((taskId: string, mode: string) => {
-    vscode.postMessage({ type: 'sendMessage', text: JSON.stringify({ mode }), runners, actionContext: { type: 'execute', taskId } });
-    const current = planRef.current;
-    if (current) {
-      const updateTasks = (tasks: typeof current.tasks): typeof current.tasks =>
-        tasks.map((t) => {
-          if (t.id === taskId) return { ...t, taskMode: mode };
-          if (t.subtasks.length > 0) return { ...t, subtasks: updateTasks(t.subtasks) };
-          return t;
-        });
-      setPlan({ ...current, tasks: updateTasks(current.tasks) });
-    }
-  }, [runners]);
+    vscode.postMessage({ type: 'editTask', taskId, edit: { kind: 'mode', mode } });
+    echoTask(taskId, { taskMode: mode });
+  }, [echoTask]);
 
   const handleRetry = useCallback((taskId: string) => {
-    vscode.postMessage({ type: 'sendMessage', text: '', runners, actionContext: { type: 'retry', taskId } });
-  }, [runners]);
+    vscode.postMessage({ type: 'sendSystemCommand', command: 'retry', taskId });
+  }, []);
 
   const handleSkip = useCallback((taskId: string) => {
     const taskTitle = planRef.current?.tasks.find((t) => t.id === taskId)?.title ?? taskId;
@@ -596,11 +543,11 @@ export default function App() {
     pushSystem(`Task "${taskTitle}" cancelled.`);
   }, [pushSystem]);
 
+  // No notice of its own: the task's start comes back from the session and
+  // is announced by the host, as every start is.
   const handleForceStart = useCallback((taskId: string) => {
-    const taskTitle = planRef.current?.tasks.find((t) => t.id === taskId)?.title ?? taskId;
     vscode.postMessage({ type: 'sendSystemCommand', command: 'forceStart', taskId });
-    pushSystem(`Task "${taskTitle}" force started.`);
-  }, [pushSystem]);
+  }, []);
 
   const handleExecutePlan = useCallback(() => {
     vscode.postMessage({ type: 'sendSystemCommand', command: 'executePlan' });
@@ -613,10 +560,8 @@ export default function App() {
   }, [pushSystem]);
 
   const handleRunTask = useCallback((taskId: string) => {
-    const taskTitle = planRef.current?.tasks.find((t) => t.id === taskId)?.title ?? taskId;
     vscode.postMessage({ type: 'sendSystemCommand', command: 'runTask', taskId });
-    pushSystem(`Task "${taskTitle}" started.`);
-  }, [pushSystem]);
+  }, []);
 
   const handleMarkComplete = useCallback((taskId: string) => {
     const taskTitle = planRef.current?.tasks.find((t) => t.id === taskId)?.title ?? taskId;
@@ -653,12 +598,13 @@ export default function App() {
     vscode.postMessage({ type: 'stopResearch' });
   }, []);
 
+  // Stopping a run is not stopping a turn: the stale-plan gate is the turn's,
+  // and armed here it dropped every plan update after the run's stop.
   const handleStop = useCallback(() => {
     if (!isExecuting) {
       stopTurn();
       return;
     }
-    stoppedRef.current = true;
     setIsExecuting(false);
     vscode.postMessage({ type: 'sendSystemCommand', command: 'stopExecution' });
     pushSystem('Execution stopped.');
@@ -707,34 +653,34 @@ export default function App() {
 
   const handleApproveCheckpoint = useCallback(() => {
     if (!checkpoint) return;
-    vscode.postMessage({ type: 'sendMessage', text: '', runners, actionContext: { type: 'approve', taskId: checkpoint.taskId } });
+    vscode.postMessage({ type: 'answerCheckpoint', taskId: checkpoint.taskId, approved: true });
     setCheckpoint(null);
-  }, [checkpoint, runners]);
+  }, [checkpoint]);
 
   const handleRejectCheckpoint = useCallback((reason: string) => {
     if (!checkpoint) return;
     // Reject resumes the paused agent with the reason (rather than cancelling
     // the task), and the panel is torn down immediately — leaving a decision
     // box on screen after the decision is made asks the user to answer twice.
-    vscode.postMessage({ type: 'sendMessage', text: JSON.stringify({ reason }), runners, actionContext: { type: 'reject', taskId: checkpoint.taskId } });
+    vscode.postMessage({ type: 'answerCheckpoint', taskId: checkpoint.taskId, approved: false, reason });
     setCheckpoint(null);
-  }, [checkpoint, runners]);
+  }, [checkpoint]);
 
   const handleMergeTasks = useCallback((taskIds: string[]) => {
     const current = planRef.current;
     if (!current) return;
     const titles = taskIds.map((id) => current.tasks.find((t) => t.id === id)?.title ?? id);
     pushSystem(`Requesting merge of: ${titles.join(' + ')}.`);
-    vscode.postMessage({ type: 'sendMessage', text: JSON.stringify({ taskIds }), runners, actionContext: { type: 'merge' } });
-  }, [runners, pushSystem]);
+    vscode.postMessage({ type: 'mergeTasks', taskIds });
+  }, [pushSystem]);
 
   const handleSplitTask = useCallback((taskId: string) => {
     const current = planRef.current;
     if (!current) return;
     const task = current.tasks.find((t) => t.id === taskId);
     pushSystem(`Requesting split of: ${task?.title ?? taskId}.`);
-    vscode.postMessage({ type: 'sendMessage', text: '', runners, actionContext: { type: 'split', taskId } });
-  }, [runners, pushSystem]);
+    vscode.postMessage({ type: 'splitTask', taskId });
+  }, [pushSystem]);
 
   // The host owns every isolation action: opening the diff, and the merge,
   // discard and cleanup that touch the user's real branches.
@@ -848,15 +794,7 @@ export default function App() {
   const streaming = blocks.some((b) => (b.type === 'message' || b.type === 'thinking') && b.streaming);
   /** The one usage block, drawn pinned below the conversation rather than scrolling in it. */
   const usageBlock = useMemo(() => blocks.find((b) => b.type === 'usage'), [blocks]);
-  /**
-   * Whether the conversation has anything whose detail is hidden. The header
-   * toggle is the only expansion control — no block opens itself — so it is
-   * offered only when it would do something.
-   */
-  const hasDetail = useMemo(
-    () => blocks.some((b) => b.type === 'thinking' || b.type === 'tool' || b.type === 'subagent'),
-    [blocks],
-  );
+  const hasDetail = useMemo(() => hasHiddenDetail(blocks), [blocks]);
 
   /**
    * The plan, mounted once. Not a timeline entry: it is the live control surface
@@ -1198,7 +1136,6 @@ export default function App() {
         isProcessing={isGenerating}
         pendingEdits={pendingEdits}
         onRemovePendingEdit={handleRemovePendingEdit}
-        prefill={prefill}
         unsent={unsent}
         skills={skills}
       />

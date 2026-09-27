@@ -1,6 +1,6 @@
 import type {
   AiProvider, DisplayBlock, DiscoveredModel, IsolationHandoff, IsolationMergeResult, LegacyPlanState, PromptHold, RunnerId,
-  Task, TaskIsolation, TaskStatus,
+  TaskIsolation, TaskModelAssignment,
 } from '@ordewell/core';
 
 /*
@@ -45,7 +45,29 @@ export interface ModelOption {
 
 export type ChatState = 'empty' | 'researching' | 'planDraft' | 'approved' | 'error';
 
-export type SystemCommand = 'cancel' | 'skip' | 'forceStart' | 'runTask' | 'markComplete' | 'markIncomplete' | 'stopExecution' | 'executePlan';
+export type SystemCommand = 'cancel' | 'skip' | 'retry' | 'forceStart' | 'runTask' | 'markComplete' | 'markIncomplete' | 'stopExecution' | 'executePlan';
+
+/**
+ * One field edit from a task card. Named by kind rather than read off which
+ * keys a payload happens to carry: that guess let an emptied mode fall
+ * through to removing the task.
+ */
+export type TaskEdit =
+  | { kind: 'runner'; runner: RunnerId }
+  | { kind: 'model'; assignment: TaskModelAssignment }
+  | { kind: 'mode'; mode: string }
+  | { kind: 'prompt'; prompt: string }
+  | { kind: 'dependencies'; dependencies: string[] };
+
+/** A hand-written task from the add form: only what a user can fill in. */
+export interface TaskDraft {
+  title: string;
+  prompt?: string;
+  assignedRunner?: string;
+  assignedModel?: TaskModelAssignment;
+  taskMode?: string;
+  dependencies: string[];
+}
 
 export type IsolationActionKind = 'reviewDiff' | 'merge' | 'discard' | 'cleanup' | 'resolveConflict';
 
@@ -72,18 +94,25 @@ export interface PendingPlanEdit {
 }
 
 export type WebviewToHost =
+  /** Chat input: a message for the planner, or a slash command. */
   | {
       type: 'sendMessage';
       text: string;
       runners?: RunnerId[];
-      actionContext?: {
-        type: 'approve' | 'reject' | 'retry' | 'skip' | 'cancel' | 'execute' | 'merge' | 'split' | 'addTask';
-        taskId?: string;
-      };
       /** The user typed it, so the conversation shows it as theirs; a button's message is not echoed. */
       typed?: boolean;
     }
   | { type: 'sendSystemCommand'; command: SystemCommand; taskId?: string }
+  | { type: 'editTask'; taskId: string; edit: TaskEdit }
+  /** Asks the host to remove a task; the host confirms first, naming what depends on it. */
+  | { type: 'removeTask'; taskId: string }
+  | { type: 'addTask'; draft: TaskDraft }
+  /** The user's answer to a task paused at a checkpoint; a rejection resumes the agent with the reason. */
+  | { type: 'answerCheckpoint'; taskId: string; approved: boolean; reason?: string }
+  /** The planner merges these tasks into one (issue #18). */
+  | { type: 'mergeTasks'; taskIds: string[] }
+  /** The planner splits this task into smaller ones (issue #18). */
+  | { type: 'splitTask'; taskId: string }
   /**
    * The user answered an in-chat approval card. The id is the request's, so the
    * host resolves the same prompt any other surface would.
@@ -125,7 +154,6 @@ export type HostToWebview =
   /** The planner is working without producing anything visible; keeps the webview's watchdog quiet. */
   | { type: 'plannerLiveness' }
   | { type: 'planUpdated'; plan: LegacyPlanState }
-  | { type: 'executionStatus'; taskId: string; status: TaskStatus }
   | { type: 'taskOutput'; taskId: string; text: string }
   | { type: 'taskIdle'; taskId: string; idleSince: string | null }
   /** Every plan edit still waiting at a batch boundary, in the order it was sent. */
@@ -135,7 +163,6 @@ export type HostToWebview =
   /** Queued text the host gave back, to go above whatever is in the input. */
   | { type: 'promptUnsent'; text: string }
   | { type: 'showError'; error: string }
-  | { type: 'focusTask'; taskId: string }
   | { type: 'setModels'; models: DiscoveredModel[] }
   | { type: 'setRunners'; runners: RunnerMeta[] }
   // `unavailable` lists toggles that have no meaning for the current planner
@@ -151,8 +178,6 @@ export type HostToWebview =
   | { type: 'setPlannerBackends'; backends: PlannerBackend[]; provider: string; runner?: string; effort?: string }
   | { type: 'setModelApiMapping'; modelApiMapping: Record<string, AiProvider[]> }
   | { type: 'setModelDiscoveryErrors'; errors: Record<string, string> }
-  | { type: 'planApproved' }
-  | { type: 'showWarnings'; warnings: string; pendingTasks: Task[] }
   | { type: 'checkpoint'; taskId: string; taskTitle: string; summary: string }
   | { type: 'setGoal'; goal: string }
   // Per-task isolation state (ADR-0013) — sent only for tasks that have one, so
