@@ -360,7 +360,7 @@ function dispatchLifecycle(dispatch: Dispatch, event: LifecycleMessage, sessionI
 
     // How the run isolates. The daemon has no toast channel, so this is the only place the user hears it.
     case 'notice':
-      dispatch({ type: 'notice', message: event.message });
+      dispatch({ type: 'notice', message: event.message, level: event.level });
       return;
 
     case 'isolation_handoff':

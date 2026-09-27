@@ -694,6 +694,20 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
       expect(vi.mocked(notifications.info)).toHaveBeenCalledWith('Stashed your uncommitted changes — `git stash pop` brings them back.');
     });
+
+    it('hands over a task that could not spawn, which the notification channel may drop', async () => {
+      const { orchestrator, spawn } = setup();
+      const notices = heard(orchestrator);
+      spawn.mockRejectedValueOnce(new Error('opencode ENOENT'));
+      orchestrator.loadPlan([task('t1', 1)]);
+
+      await orchestrator.approveReview();
+
+      expect(notices).toContainEqual({
+        level: 'error',
+        message: 'Failed to start task "Task t1": Error: opencode ENOENT',
+      });
+    });
   });
 
   it('has the run saved with its landing before anything merges', async () => {

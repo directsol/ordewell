@@ -272,7 +272,7 @@ export function reduce(state: TuiState, action: Action): Step {
       });
 
     case 'notice':
-      return step(say(state, 'system', action.message));
+      return step(say(state, action.level === 'error' ? 'error' : 'system', action.message));
 
     case 'resize': {
       // A grown pane can leave both offsets pointing past the end of content

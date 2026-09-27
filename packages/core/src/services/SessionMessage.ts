@@ -200,7 +200,7 @@ export type SessionMessage =
  * widening the union would break every exhaustive switch over it. A host with
  * no toast channel (the daemon) hands these to its clients by its own means.
  */
-export type SessionNotice = { type: 'notice'; level: 'info' | 'warn'; message: string };
+export type SessionNotice = { type: 'notice'; level: 'info' | 'warn' | 'error'; message: string };
 
 export type SessionBroadcaster = (msg: SessionMessage) => void;
 

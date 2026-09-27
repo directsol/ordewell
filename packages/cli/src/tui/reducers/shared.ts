@@ -94,7 +94,7 @@ export type Action =
   | { type: 'failed'; message: string }
   /** The workspace has no project marker — offer to initialize it rather than just failing. */
   | { type: 'workspaceNeedsInit'; goal: string; workspace: string }
-  | { type: 'notice'; message: string }
+  | { type: 'notice'; message: string; level?: 'info' | 'warn' | 'error' }
   | { type: 'resize'; rows: number; cols: number }
   | { type: 'spinnerTick' };
 
