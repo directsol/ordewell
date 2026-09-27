@@ -162,7 +162,8 @@ export default function App() {
           if (stoppedRef.current) break;
           const incoming: LegacyPlanState | null = msg.plan ?? null;
           setPlan(incoming);
-          setIsResearchActive(false);
+          // Not a turn's end: a run's status tick arrives mid-turn too, and
+          // the host's `plannerTurn` is what says a turn is over.
           if (incoming) {
             setIsExecuting(incoming.status === 'running');
           }
@@ -604,12 +605,13 @@ export default function App() {
     vscode.postMessage({ type: 'stopResearch' });
   }, []);
 
+  // Stopping a run is not stopping a turn: the stale-plan gate is the turn's,
+  // and armed here it dropped every plan update after the run's stop.
   const handleStop = useCallback(() => {
     if (!isExecuting) {
       stopTurn();
       return;
     }
-    stoppedRef.current = true;
     setIsExecuting(false);
     vscode.postMessage({ type: 'sendSystemCommand', command: 'stopExecution' });
     pushSystem('Execution stopped.');

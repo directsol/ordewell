@@ -327,6 +327,25 @@ describe('chat plan flow', () => {
     );
   });
 
+  it('a run\'s status tick does not end a planner turn still answering', () => {
+    send({ type: 'planUpdated', plan: { ...plan, status: 'running' as const } });
+    host.session(turnStarted('while it runs, why is task 2 slow?'));
+    expect(document.querySelector('.chat-msg-working')).toBeTruthy();
+
+    send({ type: 'planUpdated', plan: { ...plan, status: 'running' as const } });
+
+    expect(document.querySelector('.chat-msg-working')).toBeTruthy();
+  });
+
+  it('keeps following the plan after the run is stopped from the input', () => {
+    send({ type: 'planUpdated', plan: { ...plan, status: 'running' as const } });
+    act(() => { fireEvent.click(document.querySelector('.send-btn.processing')!); });
+
+    send({ type: 'planUpdated', plan: { ...plan, status: 'draft' as const, tasks: [{ ...plan.tasks[0], title: 'Renamed after the stop' }] } });
+
+    expect(screen.getByText('Renamed after the stop')).toBeTruthy();
+  });
+
   it('stops the planner turn: stopResearch goes to the host and the input frees at once', () => {
     api.postMessage.mockClear();
     host.session(turnStarted(), thought('Analyzing...'));
