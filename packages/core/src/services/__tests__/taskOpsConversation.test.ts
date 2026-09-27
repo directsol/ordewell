@@ -259,8 +259,9 @@ describe('task_ops conversation turns', () => {
     await session.executePlan();
     await session.cancelTask('b');
 
-    // The scheduler is still armed — that is what used to make the edit queue.
-    expect(session.isExecuting).toBe(true);
+    // The scheduler is still armed, but nothing is executing — and it is the
+    // live runner, not the armed flag, that decides whether a run is active.
+    expect(session.isExecuting).toBe(false);
 
     const plan = await session.continueConversation('rename the sign-off step');
 
@@ -270,8 +271,35 @@ describe('task_ops conversation turns', () => {
     expect(last.content).not.toMatch(/queued/i);
   });
 
-  it('still queues an edit while a task session is genuinely live', async () => {
+  // A paused run whose last live task was cancelled must be startable again:
+  // otherwise the armed scheduler refuses every restart as "already
+  // executing" and the plan is stuck with work left in it.
+  it('lets a paused run start again after its last live task is cancelled', async () => {
+    const spawned: string[] = [];
     const session = makeSession({
+      runner: recordingRunner(spawned),
+      aiService: {
+        startConversation: vi.fn(),
+        continueConversation: vi.fn().mockResolvedValue({ kind: 'message', text: '', researchLog: [] }),
+        hasActiveConversation: () => true,
+        reset: vi.fn(),
+      },
+    });
+    session.loadPlan(pausedRunPlan(), 'build it', testWorkspace, { persist: false });
+    await session.executePlan();
+
+    expect(spawned).toEqual(['b']);
+    await session.cancelTask('b');
+    expect(session.hasLiveWork).toBe(false);
+
+    await expect(session.executePlan()).resolves.toBeUndefined();
+    expect(spawned).toEqual(['b', 'b']);
+  });
+
+  it('applies an edit to a task that is not running while another task is live', async () => {
+    const spawned: string[] = [];
+    const session = makeSession({
+      runner: recordingRunner(spawned),
       aiService: {
         startConversation: vi.fn(),
         continueConversation: vi.fn().mockResolvedValue({
@@ -288,8 +316,36 @@ describe('task_ops conversation turns', () => {
 
     const plan = await session.continueConversation('rename the sign-off step');
 
-    expect(session.planTasks.find((t) => t.id === 'c')!.title).toBe('Sign off'); // nothing applied live
-    expect(session.getQueuedMessages().map((m) => m.text)).toEqual(['rename the sign-off step']);
+    // The edit never reaches the running #2, so it lands now; #2 keeps running.
+    expect(session.planTasks.find((t) => t.id === 'c')!.title).toBe('Sign off with the team');
+    expect(session.getTask('b')!.status).toBe('in_progress');
+    expect(spawned).toEqual(['b']);
+    expect(session.queuedCount).toBe(0);
+    const last = plan.conversationHistory![plan.conversationHistory!.length - 1];
+    expect(last.content).not.toMatch(/queued/i);
+  });
+
+  it('still queues an edit that reaches the running task', async () => {
+    const session = makeSession({
+      aiService: {
+        startConversation: vi.fn(),
+        continueConversation: vi.fn().mockResolvedValue({
+          kind: 'task_ops',
+          ops: [{ op: 'update', taskId: '#2', changes: { title: 'Build the backend' } }],
+          text: '', researchLog: [],
+        }),
+        hasActiveConversation: () => true,
+        reset: vi.fn(),
+      },
+    });
+    session.loadPlan(pausedRunPlan(), 'build it', testWorkspace, { persist: false });
+    await session.executePlan(); // spawns #2 and leaves it running
+
+    const plan = await session.continueConversation('rename the running step');
+
+    expect(session.getTask('b')!.title).toBe('Build'); // nothing applied live
+    expect(session.getTask('b')!.status).toBe('in_progress');
+    expect(session.getQueuedMessages().map((m) => m.text)).toEqual(['rename the running step']);
     expect(session.queuedCount).toBe(1);
     const last = plan.conversationHistory![plan.conversationHistory!.length - 1];
     expect(last.content).toMatch(/queued your change/i);
@@ -310,7 +366,7 @@ describe('task_ops conversation turns', () => {
             ...t,
             // The snapshot the planner echoes back predates the spawn of 'b'.
             status: t.id === 'b' ? ('pending' as const) : t.status,
-            title: t.id === 'c' ? 'Sign off with the team' : t.title,
+            title: t.id === 'b' ? 'Build v2' : t.title,
           })),
         })),
       },
@@ -318,7 +374,7 @@ describe('task_ops conversation turns', () => {
         startConversation: vi.fn(),
         continueConversation: vi.fn().mockResolvedValue({
           kind: 'task_ops',
-          ops: [{ op: 'update', taskId: '#3', changes: { title: 'Sign off with the team' } }],
+          ops: [{ op: 'update', taskId: '#2', changes: { title: 'Build v2' } }],
           text: '', researchLog: [],
         }),
         hasActiveConversation: () => true,
@@ -327,12 +383,12 @@ describe('task_ops conversation turns', () => {
     });
     session.loadPlan(pausedRunPlan(), 'build it', testWorkspace, { persist: false });
     await session.executePlan(); // spawns #2 and leaves it running
-    await session.continueConversation('rename the sign-off step');
+    await session.continueConversation('rename the running step');
     expect(session.queuedCount).toBe(1);
 
     await session.processQueuedMessages();
 
-    expect(session.getTask('c')!.title).toBe('Sign off with the team');
+    expect(session.getTask('b')!.title).toBe('Build v2');
     expect(session.getTask('b')!.status).toBe('in_progress');
     expect(session.hasLiveWork).toBe(true);
     expect(session.isReviewApproved).toBe(true);

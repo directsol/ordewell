@@ -634,6 +634,41 @@ describe('one planner turn on both live streams', () => {
   });
 });
 
+/**
+ * The same run can be watched by more than one execution subscription — the
+ * initial Execute holds its socket open through a review pause, and approving
+ * opens another. The daemon fans every broadcast to both, so a task start
+ * arrives twice and must still be shown once.
+ */
+describe('duplicate run subscriptions', () => {
+  it('shows one task-start notice when the same start arrives on two run streams', async () => {
+    const listeners: Array<(event: unknown) => void> = [];
+    const settle: Array<() => void> = [];
+    const h = harness({
+      streamExecution: vi.fn().mockImplementation((_id: string, cb: (event: unknown) => void, onReady?: (error?: Error) => void) => {
+        listeners.push(cb);
+        onReady?.();
+        return new Promise<void>((resolve) => { settle.push(resolve); });
+      }),
+    });
+
+    const running = [
+      runEffect({ type: 'execute', sessionId: 's1' }, h.deps),
+      runEffect({ type: 'execute', sessionId: 's1' }, h.deps),
+    ];
+    await Promise.resolve();
+    expect(listeners).toHaveLength(2);
+
+    const started = { type: 'task_started', taskId: 't1', order: 1, title: 'Add route', runner: 'opencode' };
+    for (const listener of listeners) listener(started);
+
+    settle.forEach((resolve) => resolve());
+    await Promise.all(running);
+
+    expect(h.actions.filter((a) => a.type === 'taskStarted')).toHaveLength(1);
+  });
+});
+
 describe('task control', () => {
   it.each([
     ['retry', 'retry'],

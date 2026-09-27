@@ -148,6 +148,34 @@ function resolveRef(
   return { error: `task "${s}" not found` };
 }
 
+/**
+ * The task references an op carries, before a batch handle resolves; an `add`
+ * names none. Used to tell whether a batch reaches a task a runner is running.
+ */
+export function taskOpRefs(op: TaskOp): string[] {
+  switch (op.op) {
+    case 'update':
+    case 'remove':
+    case 'split':
+    case 'rearm':
+      return [op.taskId];
+    case 'merge':
+    case 'reorder':
+      return op.taskIds;
+    case 'add':
+      return [];
+  }
+}
+
+/** Whether a written reference names `task` by id, `#order`, bare order, or title. */
+export function refMatchesTask(ref: unknown, task: Pick<Task, 'id' | 'order' | 'title'>): boolean {
+  if (typeof ref !== 'string' && typeof ref !== 'number') return false;
+  const s = String(ref).trim();
+  if (task.id === s) return true;
+  const orderStr = s.startsWith('#') ? s.slice(1) : s;
+  return (/^\d+$/.test(orderStr) && task.order === Number(orderStr)) || task.title === s;
+}
+
 /** Whether `name` already denotes an existing task by id, `#order`, or title. */
 function refCollidesWithExisting(name: string, originalFlatAll: Task[]): boolean {
   if (originalFlatAll.some((t) => t.id === name)) return true;

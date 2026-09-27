@@ -611,7 +611,7 @@ async function withExecutionStream(
     settleReady = (error) => error ? reject(error) : resolve();
   });
   const inbound = inboundFor(deps.api, deps.dispatch, sessionId);
-  const stream = deps.api.streamExecution(sessionId, inbound.execution, settleReady);
+  const stream = deps.api.streamExecution(sessionId, inbound.execution(), settleReady);
   // Surface a failed connection while it is still being established.
   void stream.catch(settleReady);
   await streamReady;
@@ -625,7 +625,7 @@ async function withExecutionStream(
  */
 async function converse(deps: EffectDeps, sessionId: string, call: () => Promise<unknown>): Promise<void> {
   const inbound = inboundFor(deps.api, deps.dispatch, sessionId);
-  const stream = deps.api.streamPlanning(sessionId, inbound.planning);
+  const stream = deps.api.streamPlanning(sessionId, inbound.planning());
 
   try {
     await stream.ready;

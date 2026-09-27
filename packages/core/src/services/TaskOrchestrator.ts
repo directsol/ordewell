@@ -1076,12 +1076,12 @@ export class TaskOrchestrator {
 
   /**
    * Run exactly one task outside full-plan scheduling. The active/starting
-   * session still contributes to isRunning so every surface exposes Stop and
-   * disables Execute Plan, but onVerdict cannot auto-schedule other tasks
-   * because the plan scheduler's `running` flag remains false.
+   * session still contributes to {@link hasLiveWork} so every surface exposes
+   * Stop and disables Execute Plan, but onVerdict cannot auto-schedule other
+   * tasks because the plan scheduler's `running` flag remains false.
    */
   async runTask(taskId: string): Promise<void> {
-    if (this.isRunning) return;
+    if (this.hasLiveWork) return;
     const task = this.store.get(taskId);
     if (!task || task.type !== 'ai') return;
     if (!(await this.openRun(() => this.runTask(taskId)))) return;

@@ -708,7 +708,13 @@ export class Session {
 
   get currentGoal(): string { return this.goal; }
   get isPlanning(): boolean { return !this.orchestrator.isRunning; }
-  get isExecuting(): boolean { return this.orchestrator.isRunning; }
+  /**
+   * A task is running right now. Deliberately live work, not the scheduler's
+   * armed flag: a run paused on a user task, a hold or a cancellation has
+   * nothing executing, and reporting it as executing is what left the plan
+   * unstartable after its last live task was cancelled.
+   */
+  get isExecuting(): boolean { return this.orchestrator.hasLiveWork; }
   /** See {@link TaskOrchestrator.hasLiveWork} — a spawned runner, not merely an armed scheduler. */
   get hasLiveWork(): boolean { return this.orchestrator.hasLiveWork; }
   get status(): 'approved' | 'running' | 'completed' { return this.orchestrator.status; }
@@ -979,7 +985,13 @@ export class Session {
 
   async executePlan(): Promise<void> {
     if (!this.plan || !this.store.planTasks.length) throw new Error('No plan to execute');
-    if (this.orchestrator.isRunning) throw new Error('Session already executing');
+    if (this.orchestrator.hasLiveWork) throw new Error('Session already executing');
+
+    // A scheduler armed from an earlier run but with nothing live — paused on a
+    // hold, a user task, or a cancellation — would ignore the restart: `start`
+    // no-ops while armed and `loadPlan` keeps the run mode. Disarm it so this
+    // run starts cleanly; with nothing live, stopping has nothing to interrupt.
+    this.orchestrator.stop();
 
     this.plan.status = 'approved';
     this.store.clearLog();

@@ -598,6 +598,10 @@ describe('plan pane', () => {
     expect(press(planned, 'char', 'E').effects).toEqual([{ type: 'execute', sessionId: 's1' }]);
   });
 
+  it('S stops the run explicitly, so a stuck one can be halted and restarted', () => {
+    expect(press(planned, 'char', 'S').effects).toEqual([{ type: 'stopExecution', sessionId: 's1' }]);
+  });
+
   it('r is not bound — f is the one way to start a task', () => {
     expect(press(planned, 'char', 'r').effects).toEqual([]);
   });
