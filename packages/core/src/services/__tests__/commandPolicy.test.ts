@@ -253,6 +253,16 @@ describe('classifyCommand', () => {
       expect(classifyCommand('cat $0').tier).not.toBe('auto');
     });
 
+    // `/bin/sh` is bash on macOS, Fedora and Git for Windows, and bash expands
+    // `{a,b}` before anything runs: the path check saw `{,/etc/passwd}`, which
+    // does not look like a path, and the command name `{rm,-rf,build}` ran rm.
+    it('does not let brace expansion build a path or a command name the classifier never saw', () => {
+      expect(classifyCommand('cat {,/etc/passwd}').tier).not.toBe('auto');
+      expect(classifyCommand('rg TODO -- {src,/etc}').tier).not.toBe('auto');
+      expect(classifyCommand('{rm,-rf,build}').tier).toBe('refuse');
+      expect(classifyCommand("rg '{a,b}' src").tier).toBe('auto');
+    });
+
     it('gives the model an actionable reason, not just a refusal', () => {
       const { reason } = classifyCommand('rm -rf build');
       expect(reason).toMatch(/read-only planner/i);

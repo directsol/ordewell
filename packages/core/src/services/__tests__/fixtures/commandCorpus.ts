@@ -415,6 +415,7 @@ const REFUSED_CODE_SMUGGLING: CorpusEntry[] = [
   { command: '$CMD -rf build', tier: 'refuse' },
   { command: "$'\\x72\\x6d' -rf build", tier: 'refuse' },
   { command: 'env $(echo rm) -rf build', tier: 'refuse' },
+  { command: '{rm,-rf,build}', tier: 'refuse' },
   { command: '%COMSPEC% /c del x', tier: 'refuse', dialect: 'cmd' },
   { command: 'cat <(rm -rf /)', tier: 'refuse' },
   { command: 'echo >(rm -rf /)', tier: 'refuse' },
@@ -481,6 +482,9 @@ const EXPANDED_READS: CorpusEntry[] = [
   { command: 'head -n 5 `printf /etc/passwd`', tier: 'ask', scope: 'head' },
   { command: "cat $'/etc/passwd'", tier: 'ask', scope: 'cat' },
   { command: 'cat $0', tier: 'ask', scope: 'cat' },
+  // Brace expansion, where `/bin/sh` is bash.
+  { command: 'cat {,/etc/passwd}', tier: 'ask', scope: 'cat' },
+  { command: "rg '{a,b}' src", tier: 'auto' },
   // Inside double quotes `$"` is a literal dollar before the closing quote.
   { command: 'rg "total$" src', tier: 'auto' },
 ];

@@ -827,7 +827,14 @@ function lex(command: string, nested: string[], dialect: Dialect): Lexed {
   let redirectTargetMode = false;
   let redirectOperator = '';
 
+  // Brace expansion (`{a,b}`, `{1..3}`) in the current word, unquoted: bash
+  // turns it into other words before anything runs.
+  let braceOpen = false;
+  let braceList = false;
+
   const endToken = (hardBoundary = true) => {
+    braceOpen = false;
+    braceList = false;
     if (redirectTargetMode) {
       // Whitespace right after the operator (`2> /dev/null`) is not the end of
       // the target — keep waiting rather than concluding there is none.
@@ -966,6 +973,9 @@ function lex(command: string, nested: string[], dialect: Dialect): Lexed {
 
     if (/\s/.test(c)) { endToken(false); i++; continue; }
 
+    if (c === '{') braceOpen = true;
+    else if (braceOpen && (c === ',' || (c === '.' && command[i + 1] === '.'))) braceList = true;
+    else if (braceOpen && braceList && c === '}') expandable = true;
     current += c; started = true; i++;
   }
 
@@ -997,12 +1007,12 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /**
  * Whether the shell, not the command line, decides what this word says: it
- * holds a substitution or an expansion. Quotes are gone by now, so a `$` the
- * command line quoted counts too — harmless for a command name, since no
- * program is named with one.
+ * holds a substitution, an expansion or a brace list. Quotes are gone by now,
+ * so a `$` or a brace the command line quoted counts too — harmless for a
+ * command name, since no program is named with one.
  */
 function isComputedWord(token: string, dialect: Dialect): boolean {
-  if (/[$`]/.test(token)) return true;
+  if (/[$`]/.test(token) || /\{[^{}]*(?:,|\.\.)[^{}]*\}/.test(token)) return true;
   for (let i = 0; i < token.length; i++) if (dialect.expansion.test(token.slice(i, i + 2))) return true;
   return false;
 }
