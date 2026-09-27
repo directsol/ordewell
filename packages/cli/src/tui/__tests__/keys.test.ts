@@ -17,6 +17,7 @@ describe('decodeKey', () => {
     ['\x04', 'ctrl-d'],
     ['\x0c', 'ctrl-l'],
     ['\x0e', 'ctrl-n'],
+    ['\x0f', 'ctrl-o'],
     ['\x10', 'ctrl-p'],
     ['\x01', 'ctrl-a'],
     ['\x05', 'ctrl-e'],

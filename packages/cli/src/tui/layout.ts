@@ -75,8 +75,16 @@ export function footerHints(state: TuiState): string[] {
       'pgup/pgdn scroll', 'tab chat',
     ];
   }
+  // The detail-all toggle names the direction it will go, like `m done` does.
+  // Shown only once the conversation holds something it can expand: the
+  // welcome alone must keep the footer to one row, or a 24-row terminal
+  // loses the logo's last line.
+  const detailHint = state.conversation.blocks.some((b) => b.type === 'tool' || b.type === 'thinking' || b.type === 'subagent')
+    ? [state.detailAll ? 'ctrl-o collapse all' : 'ctrl-o expand all']
+    : [];
   return [
     '/help', 'tab plan', 'alt-enter newline', 'pgup/pgdn scroll',
+    ...detailHint,
     ...(escHint ? [escHint] : []),
     'ctrl-c quit',
   ];
@@ -681,7 +689,7 @@ export function helpLayout(rows: number, cols: number): HelpLayout {
     body.push('');
   }
   body.push(
-    style.grey('tab switches panes · ↑↓/pgup/pgdn scroll · ctrl-l clears · ctrl-c quits'),
+    style.grey('tab switches panes · ↑↓/pgup/pgdn scroll · ctrl-o expand/collapse all · ctrl-l clears · ctrl-c quits'),
   );
 
   // The sheet is a table: clip long descriptions to one row each rather than

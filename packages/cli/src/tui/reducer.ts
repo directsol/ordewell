@@ -940,6 +940,21 @@ function scrollChat(state: TuiState, delta: number): Step {
 }
 
 /**
+ * Full detail redraws the transcript at a different height, and the viewport
+ * has to move with it. A tail-pinned view stays pinned — that is what the pin
+ * means; a scrolled-back view takes on the height change, since the scroll
+ * bound moves by exactly what the blocks above the viewport grew or shrank,
+ * which leaves the line at the top of the pane where it was.
+ */
+function toggleDetail(state: TuiState): Step {
+  const flipped = { ...state, detailAll: !state.detailAll };
+  const bound = chatScrollMax(state);
+  const expanded = chatScrollMax(flipped);
+  const scroll = flipped.scroll === 0 ? 0 : clamp(flipped.scroll + expanded - bound, expanded);
+  return step({ ...flipped, scroll });
+}
+
+/**
  * Puts the plan pane's viewport where the selection (or the open prompt's
  * caret) is on screen, moving it no further than that takes — so anything that
  * changes what the pane holds or how tall it is can call this without the view
@@ -1039,6 +1054,10 @@ function handleKey(state: TuiState, key: Key): Step {
     return step({ ...state, exiting: true }, [{ type: 'exit' }]);
   }
   if (key.name === 'ctrl-l') return step({ ...state, conversation: wiped(state.conversation), scroll: 0 });
+  // A chat-pane switch: the plan pane's rows are never truncated, so there is
+  // nothing there to expand. It is open mid-turn on purpose — reading the
+  // stream in full as it lands is where full detail matters most.
+  if (key.name === 'ctrl-o' && state.focus === 'chat' && !state.overlay) return toggleDetail(state);
 
   // Esc during a planner turn, in order of the user's intent:
   // 1. take back the newest queued prompt (the planner keeps running);

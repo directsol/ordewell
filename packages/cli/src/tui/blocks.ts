@@ -153,7 +153,10 @@ function resultLines(block: ToolBlock, room: number, detailAll: boolean): string
   }
   if (detailAll) {
     const lines = outputLines(block.output).map(sanitize);
-    return lines.length > 0 ? lines.flatMap(fit).map(style.grey) : [style.grey('(no output)')];
+    // The collapsed preview counts what it hides; the expanded view marks the
+    // same rows with how to fold it back — the note flips rather than vanishes.
+    const note = lines.length > PREVIEW_LINES ? ['… (ctrl+o to collapse)'] : [];
+    return lines.length > 0 ? [...lines.flatMap(fit), ...note].map(style.grey) : [style.grey('(no output)')];
   }
   const { lines, hiddenLineCount } = outputPreview(block.output, PREVIEW_LINES);
   if (lines.length === 0) return [style.grey('(no output)')];
