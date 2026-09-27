@@ -961,8 +961,9 @@ function lex(command: string, nested: string[], dialect: Dialect): Lexed {
 
     if (c === '|') {
       const double = command[i + 1] === '|';
+      // `|&` pipes stderr too — still a pipe, not a `|` and a separate `&`.
       endSegment(!double);
-      i += double ? 2 : 1;
+      i += double || command[i + 1] === '&' ? 2 : 1;
       continue;
     }
     if (c === '&' || c === ';' || c === '\n') {

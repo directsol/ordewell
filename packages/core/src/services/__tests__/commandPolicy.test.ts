@@ -167,6 +167,14 @@ describe('classifyCommand', () => {
       expect(classifyCommand('cat script.py | python').tier).toBe('refuse');
     });
 
+    // `|&` pipes stderr as well as stdout. Lexed as `|` then `&`, the `&`
+    // ended the segment and the next stage lost its pipe, so the interpreter
+    // was only asked about — and a remembered grant ran it silently after.
+    it('treats bash\'s |& as the pipe it is', () => {
+      expect(classifyCommand('cat x.sh |& sh').tier).toBe('refuse');
+      expect(classifyCommand('echo hi |& bash -s').tier).toBe('refuse');
+    });
+
     it('refuses inline code, for the same reason', () => {
       expect(classifyCommand('python -c "import os; os.remove(1)"').tier).toBe('refuse');
       expect(classifyCommand('node -e "process.exit()"').tier).toBe('refuse');
