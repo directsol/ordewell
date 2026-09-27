@@ -26,6 +26,7 @@ const config = {
   orchestratorModel: MODEL, geminiModel: '',
   planMapEnabled: true, openrouterKey: KEY, geminiKey: '',
   autonomousMode: true, setProviderModelLists: () => {},
+  getProviderBaseUrl: () => 'https://openrouter.ai/api/v1', getProviderApiKey: () => KEY,
 };
 const ok = (output) => ({ success: true, output, truncated: false });
 const fsAdapter = {
@@ -46,7 +47,7 @@ const session = new Session({
   workspaceRoot: () => sandbox,
   fsAdapter,
   broadcast: (m) => { events.push(m.type); if (m.type === 'planner_message') console.log(`\n[planner] ${m.content.slice(0, 400)}`); },
-  modelResolver: { modelsForRunners: async () => ({}) },
+  modelResolver: { modelsForRunners: async () => ({}), getCachedRunnerModels: () => [] },
   settings: () => ({ tddEnabled: false, grillingEnabled: false }),
 });
 
