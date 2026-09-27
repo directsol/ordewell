@@ -165,6 +165,7 @@ export class TaskOrchestrator {
   private running = false;
   private planStatus: 'approved' | 'running' | 'completed' = 'approved';
   private messageQueue: QueuedMessage[] = [];
+  private queueSeq = 0;
   private reviewApproved = false;
   /*
    * Retry counts, spawn counts and holds describe a task across attempts, so
@@ -501,7 +502,9 @@ export class TaskOrchestrator {
 
   queueMessage(text: string): void {
     this.messageQueue.push({
-      id: `q-${Date.now()}`,
+      // A sequence, not just the clock: two sends inside one millisecond must
+      // stay distinguishable, since a surface removes one by id.
+      id: `q-${Date.now()}-${++this.queueSeq}`,
       text,
       timestamp: new Date().toISOString(),
     });
@@ -510,6 +513,15 @@ export class TaskOrchestrator {
 
   getQueuedMessages(): QueuedMessage[] {
     return [...this.messageQueue];
+  }
+
+  /** Take one unsent message back out of the queue; false when it was never there (or already drained). */
+  removeQueuedMessage(id: string): boolean {
+    const index = this.messageQueue.findIndex((m) => m.id === id);
+    if (index < 0) return false;
+    this.messageQueue.splice(index, 1);
+    this.emit('onTaskChanged');
+    return true;
   }
 
   setQueuedMessages(messages: QueuedMessage[]): void {

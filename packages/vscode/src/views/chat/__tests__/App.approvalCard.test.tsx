@@ -1,0 +1,85 @@
+import React from 'react';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { render, fireEvent } from '@testing-library/react';
+import type { SessionMessage } from '@ordewell/core';
+import App from '../App';
+import { api, hostBridge } from './hostBridge';
+
+const TURN = 'turn-1';
+
+const REQUEST: Extract<SessionMessage, { type: 'approval_request' }> = {
+  type: 'approval_request',
+  id: 'ap-1',
+  kind: 'shell_command',
+  subject: 'npm test',
+  scope: 'npm test',
+  detail: 'Planner research wants to run: npm test',
+  turnId: TURN,
+};
+
+describe('approval card', () => {
+  let host: ReturnType<typeof hostBridge>;
+  beforeEach(() => {
+    render(<App />);
+    host = hostBridge();
+    api.postMessage.mockClear();
+  });
+
+  it('asks in the chat, naming kind, subject, scope and detail, with Allow/Deny', () => {
+    host.session(REQUEST);
+
+    const card = document.querySelector('.approval-card')!;
+    expect(card).toBeTruthy();
+    expect(card.textContent).toContain('Run a command');
+    expect(card.textContent).toContain('npm test');
+    expect(card.textContent).toContain('Planner research wants to run: npm test');
+    // The grant outlives this one call — disclosed before the click.
+    expect(card.textContent).toContain('Approving also allows npm test for the rest of this session.');
+    expect([...card.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Allow', 'Deny']);
+  });
+
+  it('answers Allow through the host and then shows the granted resolution', () => {
+    host.session(REQUEST);
+
+    fireEvent.click(document.querySelector('.approval-card-allow')!);
+    expect(api.postMessage).toHaveBeenCalledWith({ type: 'resolveApproval', id: 'ap-1', granted: true });
+
+    // What the host's resolve reaches, broadcast back to every surface.
+    host.session({ type: 'approval_settled', id: 'ap-1', granted: true });
+    const card = document.querySelector('.approval-card')!;
+    expect(card.getAttribute('data-status')).toBe('granted');
+    expect(card.textContent).toContain('Approved');
+    expect(card.querySelectorAll('button')).toHaveLength(0);
+  });
+
+  it('answers Deny through the host, which shows as denied', () => {
+    host.session(REQUEST);
+
+    fireEvent.click(document.querySelector('.approval-card-deny')!);
+    expect(api.postMessage).toHaveBeenCalledWith({ type: 'resolveApproval', id: 'ap-1', granted: false });
+
+    host.session({ type: 'approval_settled', id: 'ap-1', granted: false });
+    const card = document.querySelector('.approval-card')!;
+    expect(card.getAttribute('data-status')).toBe('denied');
+    expect(card.textContent).toContain('Denied');
+  });
+
+  it('shows a decision nobody was asked about with its source, and nothing to click', () => {
+    host.session({
+      type: 'approval_decided', kind: 'shell_command', subject: 'npm test', scope: 'npm test', granted: true, source: 'remembered',
+    });
+
+    const card = document.querySelector('.approval-card')!;
+    expect(card.textContent).toContain('Auto-approved');
+    expect(card.textContent).toContain('remembered');
+    expect(card.querySelectorAll('button')).toHaveLength(0);
+  });
+
+  it('shows an external path as a workspace escape, not a command', () => {
+    host.session({ type: 'approval_request', id: 'ap-2', kind: 'external_path', subject: '/tmp/dump/a.log', scope: '/tmp/dump/*' });
+
+    const card = document.querySelector('.approval-card')!;
+    expect(card.textContent).toContain('outside the workspace');
+    expect(card.textContent).toContain('/tmp/dump/a.log');
+  });
+});

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import type { AiProvider, LegacyPlanState, Task, DiscoveredModel, RunnerId, TaskStatus, TaskIsolation, IsolationHandoff, IsolationMergeResult } from '@ordewell/core';
 import { ConversationViewHost, type SavedConversation } from '../ConversationViewHost';
-import type { ChatState, HostToWebview, ModelOption, PlannerBackend, RunnerMeta, RunnerModeMeta, WebviewToHost } from '../shared/protocol';
+import type { ChatState, HostToWebview, ModelOption, PlannerBackend, QueuedPrompt, RunnerMeta, RunnerModeMeta, WebviewToHost } from '../shared/protocol';
 
 export type { PlannerBackend, RunnerMeta } from '../shared/protocol';
 
@@ -37,10 +37,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   postMessage(msg: HostToWebview): void { this._view?.webview.postMessage(msg); }
+  /**
+   * Bring the chat to the front. A question that arrives behind a hidden view
+   * is one nobody answers, so an approval request calls this before it lands.
+   */
+  reveal(): void {
+    if (this._view) this._view.show(true);
+    else void vscode.commands.executeCommand('ordewellChatView.focus');
+  }
   setState(state: ChatState): void { this.postMessage({ type: 'setState', state }); }
   showError(error: string): void { this.postMessage({ type: 'showError', error }); }
   sendPlanUpdated(plan: LegacyPlanState): void { this._cachedPlan = plan; this.postMessage({ type: 'planUpdated', plan }); }
-  showQueueStatus(count: number): void { this.postMessage({ type: 'queueStatus', count }); }
+  /** Every prompt waiting at the next batch boundary, so the chat can list (and withdraw) each one. */
+  showQueueStatus(messages: QueuedPrompt[]): void { this.postMessage({ type: 'queueStatus', messages }); }
   focusTask(taskId: string): void { this.postMessage({ type: 'focusTask', taskId }); }
   sendExecutionStatus(taskId: string, status: TaskStatus): void { this.postMessage({ type: 'executionStatus', taskId, status }); }
   /** Live runner output for one task; the webview keeps the tail and renders it in that task's card. */

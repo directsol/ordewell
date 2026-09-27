@@ -1120,6 +1120,12 @@ export class Session {
   }
 
   getQueuedMessages() { return this.orchestrator.getQueuedMessages(); }
+  /** Take back one unsent message; the plan's persisted queue follows so a reload cannot resurrect it. */
+  removeQueuedMessage(id: string): boolean {
+    const removed = this.orchestrator.removeQueuedMessage(id);
+    if (removed && this.plan) this.plan.queuedMessages = this.getQueuedMessages();
+    return removed;
+  }
   setQueuedMessages(msgs: ReturnType<TaskOrchestrator['getQueuedMessages']>): void {
     this.orchestrator.setQueuedMessages(msgs);
   }

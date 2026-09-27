@@ -6,6 +6,7 @@ import { ConversationBlocks } from './components/ChatMessage';
 import { appendTaskOutput, type TaskOutputMap } from './taskOutput';
 import ModelSelector, { API_PROVIDER_LABELS } from './components/ModelSelector';
 import PlanCardGroup from './components/PlanCardGroup';
+import UsageLine from './components/UsageLine';
 import HandoffCard from './components/HandoffCard';
 import CheckpointPanel from './components/CheckpointPanel';
 import type { RunnerMode } from './components/TaskCard';
@@ -14,7 +15,7 @@ import { LegacyPlanState, DiscoveredModel, TaskModelAssignment, RunnerId, Isolat
 import type { AiProvider } from '@ordewell/core';
 import { isPlanRevision, planSummaryLabel, nextDock } from './planDock';
 import { DetailContext } from './detail';
-import type { HostToWebview, PlannerBackend, RunnerMeta, WebviewToHost } from '../../shared/protocol';
+import type { HostToWebview, PlannerBackend, QueuedPrompt, RunnerMeta, WebviewToHost } from '../../shared/protocol';
 import { applyConversationPatch, EMPTY_PATCHED_VIEW, patchedBlocks, type PatchedView } from '../../shared/conversationPatch';
 
 declare function acquireVsCodeApi(): {
@@ -46,7 +47,7 @@ export default function App() {
   const [runnerList, setRunnerList] = useState<RunnerInfo[]>([]);
   const [enabledRunnerIds, setEnabledRunnerIds] = useState<string[]>(['claude-code']);
   const [runners, setRunners] = useState<RunnerId[]>(['claude-code']);
-  const [queueCount, setQueueCount] = useState(0);
+  const [queued, setQueued] = useState<QueuedPrompt[]>([]);
   const [, setCurrentGoal] = useState<string>('');
   const [showModelInfo, setShowModelInfo] = useState(false);
   const [slashOutput, setSlashOutput] = useState('');
@@ -140,6 +141,7 @@ export default function App() {
             setTaskIsolation({});
             setHandoff(null);
             setMergeResult(null);
+            setQueued([]);
             setDockExpanded((v) => nextDock(v, 'session-reset'));
           }
           setIsResearchActive(msg.state === 'researching');
@@ -187,6 +189,9 @@ export default function App() {
           setTaskIsolation({});
           setHandoff(null);
           setMergeResult(null);
+          // A restore is followed by the host's own queueStatus; clearing here
+          // keeps a stale session's queue from flashing until it lands.
+          setQueued([]);
           setDockExpanded((v) => nextDock(v, 'session-reset'));
           break;
         }
@@ -312,7 +317,7 @@ export default function App() {
           break;
 
         case 'queueStatus':
-          setQueueCount(msg.count);
+          setQueued(msg.messages ?? []);
           break;
 
         case 'setGoal':
@@ -387,6 +392,7 @@ export default function App() {
     setTaskIsolation({});
     setHandoff(null);
     setMergeResult(null);
+    setQueued([]);
     setDockExpanded((v) => nextDock(v, 'session-reset'));
     // A distinct message from stopResearch: /new resets the whole session,
     // while Stop only aborts the current planner turn.
@@ -599,6 +605,19 @@ export default function App() {
     pushSystem(`Task "${taskTitle}" marked not done.`);
   }, [pushSystem]);
 
+  // The card answers into the same resolution every surface uses; the outcome
+  // comes back as `approval_settled` and redraws the card.
+  const handleResolveApproval = useCallback((id: string, granted: boolean) => {
+    vscode.postMessage({ type: 'resolveApproval', id, granted });
+  }, []);
+
+  // The host owns the queue; withdrawing removes it here at once so the click
+  // feels immediate, and the host's own queueStatus is what settles the list.
+  const handleRemoveQueued = useCallback((id: string) => {
+    setQueued((prev) => prev.filter((m) => m.id !== id));
+    vscode.postMessage({ type: 'removeQueuedMessage', id });
+  }, []);
+
   const handleStop = useCallback(() => {
     stoppedRef.current = true;
     if (isExecuting) {
@@ -759,8 +778,21 @@ export default function App() {
     [plan],
   );
 
+  const queueCount = queued.length;
+
   const hasContent = blocks.length > 0 || isResearchActive || isExecuting || !!error;
   const streaming = blocks.some((b) => (b.type === 'message' || b.type === 'thinking') && b.streaming);
+  /** The one usage block, drawn pinned below the conversation rather than scrolling in it. */
+  const usageBlock = useMemo(() => blocks.find((b) => b.type === 'usage'), [blocks]);
+  /**
+   * Whether the conversation has anything whose detail is hidden. The header
+   * toggle is the only expansion control — no block opens itself — so it is
+   * offered only when it would do something.
+   */
+  const hasDetail = useMemo(
+    () => blocks.some((b) => b.type === 'thinking' || b.type === 'tool' || b.type === 'subagent'),
+    [blocks],
+  );
 
   /**
    * The plan, mounted once. Not a timeline entry: it is the live control surface
@@ -982,6 +1014,20 @@ export default function App() {
         </button>
       </div>
 
+      {hasDetail && (
+        <div className="chat-header">
+          <button
+            type="button"
+            className="detail-toggle"
+            aria-pressed={detailAll}
+            onClick={() => setDetailAll((v) => !v)}
+            title="Show or hide the full thinking, command and subagent detail for the whole conversation"
+          >
+            {detailAll ? 'Collapse all' : 'Expand all'}
+          </button>
+        </div>
+      )}
+
       {showModelInfo && (
         <div className="model-info-panel">
           <div className="model-info-title">Model Configuration</div>
@@ -1056,6 +1102,7 @@ export default function App() {
           blocks={blocks}
           detailAll={detailAll}
           onShowPlan={handleShowPlan}
+          onResolveApproval={handleResolveApproval}
         />
 
         {isResearchActive && !streaming && (
@@ -1069,6 +1116,8 @@ export default function App() {
 
       {renderPlanDock()}
 
+      {usageBlock && <UsageLine block={usageBlock} />}
+
       <ChatInput
         onSend={handleSend}
         onStop={handleStop}
@@ -1077,7 +1126,8 @@ export default function App() {
         modelOptions={modelOptions}
         configuredProviders={configuredProviders}
         isProcessing={isGenerating}
-        queueCount={queueCount}
+        queued={queued}
+        onRemoveQueued={handleRemoveQueued}
         prefill={prefill}
         skills={skills}
       />

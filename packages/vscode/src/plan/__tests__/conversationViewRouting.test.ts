@@ -49,10 +49,14 @@ describe('planner events reach the webview through the conversation view', () =>
     ]);
   });
 
-  it('says in the conversation what an approval decided on its own', () => {
+  it('draws a silent approval decision as a card carrying its source', () => {
     send({ type: 'approval_decided', kind: 'shell_command', subject: 'npm test', scope: 'npm test', granted: true, source: 'remembered' });
 
-    expect(screen.blocks()).toContainEqual(expect.objectContaining({ type: 'message', role: 'system', text: 'Auto-approved (remembered): npm test' }));
+    expect(screen.blocks()).toContainEqual(expect.objectContaining({
+      type: 'approval', subject: 'npm test', status: 'granted', decidedBy: 'remembered',
+    }));
+    // The card is the record now; a duplicate system line would say it twice.
+    expect(screen.blocks()).not.toContainEqual(expect.objectContaining({ type: 'message', role: 'system' }));
   });
 
   it('forwards liveness so the webview watchdog sees a quiet planner working', () => {

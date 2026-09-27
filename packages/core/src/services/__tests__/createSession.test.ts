@@ -185,6 +185,50 @@ describe('model allowlist wiring', () => {
   });
 });
 
+describe('removing a queued message', () => {
+  function loadedSession(): Session {
+    const session = makeSession();
+    session.loadPlan({
+      tasks: [createTask({ id: 't1', order: 1, title: 'Task 1', prompt: 'do it' })],
+      generatedAt: new Date().toISOString(),
+      status: 'approved',
+      runners: ['claude-code'],
+      lastUpdated: new Date().toISOString(),
+    }, 'Test', '/repo');
+    return session;
+  }
+
+  it('removes one queued message by id and leaves the rest in order', () => {
+    const session = loadedSession();
+    session.queueMessage('first');
+    session.queueMessage('second');
+    session.queueMessage('third');
+
+    const [first] = session.getQueuedMessages();
+    expect(session.removeQueuedMessage(first.id)).toBe(true);
+
+    expect(session.getQueuedMessages().map((m) => m.text)).toEqual(['second', 'third']);
+    expect(session.queuedCount).toBe(2);
+  });
+
+  it('reports false for an id that is not queued', () => {
+    const session = loadedSession();
+    session.queueMessage('only');
+
+    expect(session.removeQueuedMessage('q-nope')).toBe(false);
+    expect(session.queuedCount).toBe(1);
+  });
+
+  it('gives every queued message its own id, even within one millisecond', () => {
+    const session = loadedSession();
+    session.queueMessage('a');
+    session.queueMessage('b');
+
+    const ids = session.getQueuedMessages().map((m) => m.id);
+    expect(new Set(ids).size).toBe(2);
+  });
+});
+
 describe('processQueuedMessages', () => {
   it('drains queued messages and clears them', async () => {
     const planner = {

@@ -181,4 +181,11 @@ describe('ConversationBlocks', () => {
     );
     expect(getByText('Building plan…')).toBeTruthy();
   });
+
+  it('marks an updated plan with its task count', () => {
+    const { getByText } = render(
+      <ConversationBlocks blocks={[{ type: 'plan', id: 'pl', status: 'updated', taskCount: 2, text: '' }]} detailAll={false} onShowPlan={() => {}} />,
+    );
+    expect(getByText('Plan updated · 2 tasks')).toBeTruthy();
+  });
 });
