@@ -39,6 +39,22 @@ export interface UsageTotals {
   reportedCost?: Record<string, number>;
 }
 
+/**
+ * The input side of a call whose provider reports its prompt in parts — the
+ * uncached tail, with cache reads and cache writes beside it rather than inside
+ * it (Anthropic, and OpenCode after it). The prompt the model saw is all three;
+ * only the reads were served from cache, since a write is billed as fresh
+ * input. A part left unreported adds nothing, and with no part reported there
+ * is no measure at all.
+ */
+export function partedPromptUsage(parts: { uncached?: number; cacheRead?: number; cacheWrite?: number }): Pick<UsageRecord, 'inputTokens' | 'cachedInputTokens'> {
+  const reported = [parts.uncached, parts.cacheRead, parts.cacheWrite].filter((n): n is number => n !== undefined);
+  return {
+    ...(reported.length > 0 ? { inputTokens: reported.reduce((a, b) => a + b, 0) } : {}),
+    ...(parts.cacheRead !== undefined ? { cachedInputTokens: parts.cacheRead } : {}),
+  };
+}
+
 const TOKEN_FIELDS = ['inputTokens', 'outputTokens', 'cachedInputTokens'] as const;
 
 export function addUsage(totals: UsageTotals, record: UsageRecord): UsageTotals {

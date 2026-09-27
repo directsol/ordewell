@@ -4,7 +4,7 @@ import { planDirectLaunch, isExecutableResolved, ExecutableNotFoundError } from 
 import { assertWorkspaceExists } from '../../utils/workspace';
 import { killTree } from '../../utils/processTree';
 import { workspaceEnvOf } from '../workspaceEnv';
-import type { UsageRecord } from '../../models/Usage';
+import { partedPromptUsage, type UsageRecord } from '../../models/Usage';
 import type { AgentAdapter, AgentEvent, AgentProcessDeps, AgentStartOptions } from './AgentAdapter';
 
 const SERVER_READY_TIMEOUT_MS = 30000;
@@ -155,21 +155,20 @@ function flatModelId(providerID: string | undefined, modelID: string | undefined
 
 /**
  * OpenCode's `input` counts only the uncached prompt — cache reads and writes
- * sit beside it, as with Anthropic: in the recordings `tokens.total` is input +
- * output + both cache counts. Its `output` excludes `reasoning` (a recorded
- * reply with text reports output 0 beside reasoning 127), and reasoning is
- * billed as output, so it is counted as output.
+ * sit beside it, as with Anthropic ({@link partedPromptUsage}): in the
+ * recordings `tokens.total` is input + output + both cache counts. Its `output`
+ * excludes `reasoning` (a recorded reply with text reports output 0 beside
+ * reasoning 127), and reasoning is billed as output, so it is counted as output.
  */
 function usageRecord(info: OpenCodeMessageInfo, subagentId?: string): UsageRecord | null {
   const tokens = info.tokens;
   if (!tokens) return null;
-  const cached = tokens.cache?.read ?? 0;
-  const inputTokens = (tokens.input ?? 0) + cached + (tokens.cache?.write ?? 0);
+  const prompt = partedPromptUsage({ uncached: tokens.input, cacheRead: tokens.cache?.read, cacheWrite: tokens.cache?.write });
   const outputTokens = (tokens.output ?? 0) + (tokens.reasoning ?? 0);
   // A call that failed before the provider answered reports all zeros. That
   // is no measurement, and a zero prompt would read as an empty context.
-  if (inputTokens + outputTokens === 0) return null;
-  const record: UsageRecord = { source: 'opencode', inputTokens, outputTokens, cachedInputTokens: cached };
+  if ((prompt.inputTokens ?? 0) + outputTokens === 0) return null;
+  const record: UsageRecord = { source: 'opencode', ...prompt, outputTokens };
   const model = flatModelId(info.providerID, info.modelID);
   if (model) record.model = model;
   // OpenCode prices a call itself, from its model catalog, so a reported 0

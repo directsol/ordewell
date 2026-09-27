@@ -1343,6 +1343,21 @@ describe('CliAgentAiService — Claude Code partial messages, usage and subagent
     expect(plannerContextFill(usage)).toEqual({ usedTokens: 20025, windowTokens: 1000000 });
   });
 
+  // A prompt of 0 would read as an empty context; absent is "not reported" (ADR-0017 U1).
+  it('leaves the prompt out of a call that reported only its output, rather than counting it as zero', async () => {
+    const lines = [
+      { type: 'stream_event', event: { type: 'message_start', message: { model: 'claude-sonnet-5' } } },
+      { type: 'stream_event', event: { type: 'message_delta', usage: { output_tokens: 7 } } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Hi.' }] } },
+      { type: 'result', subtype: 'success' },
+    ];
+    const { svc } = service('claude-code', [lines.map((l) => `${JSON.stringify(l)}\n`).join('')]);
+    const { events, onProgress } = collector();
+    await svc.startConversation(request({ onProgress }));
+
+    expect(usageRecords(events)).toEqual([{ source: 'claude-code', model: 'claude-sonnet-5', outputTokens: 7 }]);
+  });
+
   // `total_cost_usd` is the session's running total: 0.075482 after the first
   // of these recorded turns, 0.0866244 after the second.
   it('reports each turn\'s own share of the session cost', async () => {

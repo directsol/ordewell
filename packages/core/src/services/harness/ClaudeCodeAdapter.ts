@@ -1,5 +1,5 @@
 import type { SubagentOutcome } from '../../models/Task';
-import type { UsageRecord } from '../../models/Usage';
+import { partedPromptUsage, type UsageRecord } from '../../models/Usage';
 import type { AgentEvent, AgentStartOptions } from './AgentAdapter';
 import { StdioAgentAdapter, type SpawnSpec } from './StdioAgentAdapter';
 
@@ -73,18 +73,11 @@ interface ClaudeLine {
 /** The tool Claude Code delegates to a subagent with — `Task` before it was renamed `Agent`. */
 const SUBAGENT_TOOLS = new Set(['Agent', 'Task']);
 
-/**
- * Anthropic's `input_tokens` counts only the uncached tail of the prompt: cache
- * reads and cache writes are reported beside it, not inside it. The prompt the
- * model saw is all three, and only the reads were served from cache — a cache
- * write is billed as fresh input, above the base rate.
- */
+/** Anthropic's `input_tokens` is only the uncached tail of the prompt — see {@link partedPromptUsage}. */
 function usageRecord(usage: ClaudeUsage, model: string | undefined, subagentId?: string): UsageRecord {
-  const cached = usage.cache_read_input_tokens ?? 0;
   const record: UsageRecord = {
     source: 'claude-code',
-    inputTokens: (usage.input_tokens ?? 0) + cached + (usage.cache_creation_input_tokens ?? 0),
-    cachedInputTokens: cached,
+    ...partedPromptUsage({ uncached: usage.input_tokens, cacheRead: usage.cache_read_input_tokens, cacheWrite: usage.cache_creation_input_tokens }),
   };
   if (model) record.model = model;
   if (usage.output_tokens !== undefined) record.outputTokens = usage.output_tokens;
