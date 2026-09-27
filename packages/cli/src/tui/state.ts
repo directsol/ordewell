@@ -1,30 +1,5 @@
-import { DEFAULT_MAX_PARALLEL } from '@ordewell/core';
-import type { ResearchStepOutcome } from '@ordewell/core';
+import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, type ConversationView } from '@ordewell/core';
 import { emptyEditor, type EditorState } from './editor';
-
-export type MessageRole = 'user' | 'assistant' | 'system' | 'error' | 'research';
-
-/**
- * The identity and fate of one research tool call. Carried on its transcript
- * entry so the matching `research_step_done` settles that exact line — a
- * parallel round has several same-tool calls open at once, and matching by
- * name alone would land the wrong outcome on the wrong line.
- */
-export interface ResearchMeta {
-  toolCallId?: string;
-  /** Absent while the call is still in flight. */
-  outcome?: ResearchStepOutcome;
-  result?: string;
-}
-
-export interface ChatMessage {
-  role: MessageRole;
-  content: string;
-  timestamp: string;
-  research?: ResearchMeta;
-  /** Set on an assistant entry still being appended to by incoming `plan_token` deltas. */
-  streaming?: boolean;
-}
 
 export type RunStatus = 'idle' | 'planning' | 'researching' | 'executing';
 
@@ -288,12 +263,21 @@ export interface Selection {
 
 export interface TuiState {
   editor: EditorState;
-  messages: ChatMessage[];
+  /**
+   * The chat pane's content: core's display blocks (#51), fed every planner
+   * `SessionMessage` and every line the TUI adds itself as a `LocalEntry`.
+   */
+  conversation: ConversationView;
+  /**
+   * Whether thinking, command and subagent blocks draw in full. One switch for
+   * the whole conversation on purpose: with no block opening on its own there
+   * is no set of expanded ids and no focus cursor to keep in step with a
+   * stream that inserts, replaces and retracts blocks under them.
+   */
+  detailAll: boolean;
   status: RunStatus;
   /** Short label shown next to the spinner, e.g. the current research step. */
   busyLabel: string;
-  /** Tail of the planner's raw reasoning for this turn, shown under the spinner. */
-  thinkingLine: string;
   sessionId: string | null;
   goal: string;
   tasks: TaskView[];
@@ -453,10 +437,10 @@ export function findTask(tasks: TaskView[], id: string): TaskView | undefined {
 export function initialState(overrides: Partial<TuiState> = {}): TuiState {
   return {
     editor: emptyEditor(),
-    messages: [],
+    conversation: EMPTY_CONVERSATION,
+    detailAll: false,
     status: 'idle',
     busyLabel: '',
-    thinkingLine: '',
     sessionId: null,
     goal: '',
     tasks: [],

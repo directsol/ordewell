@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { render } from '../render';
-import { chatBodyLines, helpLayout } from '../layout';
+import { bodyRows, chatBodyLines, helpLayout } from '../layout';
 import { stripAnsi, style, width } from '../ansi';
-import { initialState, type ChatMessage, type TaskView, type TuiState } from '../state';
-import { reduce } from '../reducer';
+import { initialState, type TaskView, type TuiState } from '../state';
+import { reduce, type Action } from '../reducer';
+import type { ResearchStepOutcome, SessionMessage } from '@ordewell/core';
+import { chatOf } from './chat';
 import { registerSkillCommands } from '../slash';
 
 // Any escape sequence at all, and the two kinds a painted frame may carry:
@@ -25,6 +27,11 @@ const screen = (over: Partial<TuiState> = {}): string[] =>
 
 const text = (over: Partial<TuiState> = {}): string => screen(over).join('\n');
 
+/** The planner's settled reply, as the session broadcasts it. */
+const reply = (content: string): Action => ({
+  type: 'sessionMessage', message: { type: 'planner_message', content, timestamp: '2026-09-27T10:00:00.000Z' },
+});
+
 const tasks: TaskView[] = [
   { id: 'a', order: 1, title: 'Add the login route', type: 'ai', status: 'completed', dependencies: [] },
   { id: 'b', order: 2, title: 'Write the tests', type: 'ai', status: 'running', dependencies: ['a'] },
@@ -38,7 +45,7 @@ describe('frame geometry', () => {
   });
 
   it('never writes past the last column', () => {
-    for (const line of screen({ cols: 60, tasks, messages: [{ role: 'assistant', content: 'x'.repeat(400), timestamp: '' }] })) {
+    for (const line of screen({ cols: 60, tasks, conversation: chatOf(['planner', 'x'.repeat(400)]) })) {
       expect(width(line)).toBeLessThanOrEqual(60);
     }
   });
@@ -47,7 +54,7 @@ describe('frame geometry', () => {
     const out = screen({
       cols: 100,
       tasks,
-      messages: [{ role: 'assistant', content: 'Symbols ❯ ◐ ◆ ✓ and 日本 stay aligned.', timestamp: '' }],
+      conversation: chatOf(['planner', 'Symbols ❯ ◐ ◆ ✓ and 日本 stay aligned.']),
     });
     const dividerColumns = out
       .filter((line) => stripAnsi(line).includes('│'))
@@ -62,9 +69,7 @@ describe('frame geometry', () => {
     const out = screen({
       cols: 100,
       tasks,
-      messages: [
-        { role: 'assistant', content: 'Emoji ✅ and a family \u{1F468}‍\u{1F469}‍\u{1F467}‍\u{1F466} plus 日本語 and a\ttab.', timestamp: '' },
-      ],
+      conversation: chatOf(['planner', 'Emoji ✅ and a family \u{1F468}‍\u{1F469}‍\u{1F467}‍\u{1F466} plus 日本語 and a\ttab.']),
     });
     const dividerColumns = out
       .filter((line) => stripAnsi(line).includes('│'))
@@ -87,11 +92,9 @@ describe('frame geometry', () => {
     // erase-and-return, a cursor move, a window title. Left in, the bell rings
     // on every spinner tick and the cursor move takes the divider with it.
     const hostile = 'failed:\x07 \x1b[2Krestart\r shifted\x1b[10C \x1b]0;title\x07 \x1b[31mred';
-    const { messages } = reduce(initialState({ rows: 24, cols: 100, tasks }), {
-      type: 'plannerMessage', content: hostile,
-    }).state;
+    const { conversation } = reduce(initialState({ rows: 24, cols: 100, tasks }), reply(hostile)).state;
 
-    for (const line of screen({ cols: 100, tasks, messages })) {
+    for (const line of screen({ cols: 100, tasks, conversation })) {
       for (const escape of line.match(ANY_ESCAPE) ?? []) expect(escape).toMatch(PAINT_ESCAPE);
       expect(line.replace(ANY_ESCAPE, '')).not.toMatch(CONTROL_CHAR);
     }
@@ -125,7 +128,7 @@ describe('frame geometry', () => {
       type: 'planUpdated',
       plan: { tasks: [{ id: 'a', order: 1, title: hostile, status: 'running', type: 'ai' }] },
     }).state;
-    const state = reduce(planned, { type: 'plannerMessage', content: hostile }).state;
+    const state = reduce(planned, reply(hostile)).state;
 
     for (let cols = 1; cols <= 200; cols++) {
       for (const rows of [1, 3, 8, 24, 60]) {
@@ -194,15 +197,12 @@ describe('welcome banner', () => {
 
 describe('transcript', () => {
   it('shows the newest messages', () => {
-    const out = text({ messages: [{ role: 'assistant', content: 'Which database?', timestamp: '' }] });
+    const out = text({ conversation: chatOf(['planner', 'Which database?']) });
     expect(out).toContain('Which database?');
   });
 
   it('drops the oldest messages when the pane is full rather than overflowing', () => {
-    const messages = Array.from({ length: 60 }, (_, i) => ({
-      role: 'user' as const, content: `message ${i}`, timestamp: '',
-    }));
-    const out = text({ messages });
+    const out = text({ conversation: chatOf(...Array.from({ length: 60 }, (_, i): ['user', string] => ['user', `message ${i}`])) });
     expect(out).toContain('message 59');
     expect(out).not.toContain('message 0');
   });
@@ -212,43 +212,41 @@ describe('transcript', () => {
   });
 
   it('keeps the welcome hints until a real conversation starts', () => {
-    const out = text({ messages: [{ role: 'system', content: 'Refreshed runners.', timestamp: '' }] });
+    const out = text({ conversation: chatOf(['system', 'Refreshed runners.']) });
     expect(out).toMatch(/describe|goal/i);
     expect(out).toContain('Refreshed runners.');
   });
 
   it('keeps the welcome above the conversation while no plan exists', () => {
-    const out = text({ messages: [{ role: 'assistant', content: 'Which database?', timestamp: '' }] });
+    const out = text({ conversation: chatOf(['planner', 'Which database?']) });
     expect(out).toMatch(/Describe a goal/i);
     expect(out).toContain('Which database?');
   });
 
   it('keeps the welcome on the top body row with zero or one message', () => {
     const none = screen({ rows: 40 }).map(stripAnsi);
-    const one = screen({ rows: 40, messages: [{ role: 'system', content: 'hello there', timestamp: '' }] }).map(stripAnsi);
+    const one = screen({ rows: 40, conversation: chatOf(['system', 'hello there']) }).map(stripAnsi);
     const firstRow = none.findIndex((l, i) => i > 0 && /\S/.test(l));
     expect(firstRow).toBeLessThan(4);
     expect(one[firstRow]).toBe(none[firstRow]);
   });
 
   it('puts the newest message on the last body row once the chat overflows', () => {
-    const messages: ChatMessage[] = Array.from({ length: 60 }, (_, i) => ({
-      role: 'user' as const, content: `message ${i + 1}`, timestamp: '',
-    }));
-    const rows = screen({ rows: 24, messages }).map(stripAnsi);
+    const conversation = chatOf(...Array.from({ length: 60 }, (_, i): ['user', string] => ['user', `message ${i + 1}`]));
+    const rows = screen({ rows: 24, conversation }).map(stripAnsi);
     const last = rows.map((l, i) => (l.includes('message 60') ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
     expect(last).toBeGreaterThan(rows.length - 8);
   });
 
   it('top-anchors the remaining messages once a plan replaces the welcome', () => {
-    const rows = screen({ rows: 24, tasks, messages: [{ role: 'assistant', content: 'Which database?', timestamp: '' }] }).map(stripAnsi);
+    const rows = screen({ rows: 24, tasks, conversation: chatOf(['planner', 'Which database?']) }).map(stripAnsi);
     const at = rows.findIndex((l) => l.includes('Which database?'));
     expect(at).toBeGreaterThanOrEqual(0);
     expect(at).toBeLessThan(6);
   });
 
   it('drops the welcome once a plan is produced', () => {
-    const out = text({ tasks, messages: [{ role: 'assistant', content: 'Which database?', timestamp: '' }] });
+    const out = text({ tasks, conversation: chatOf(['planner', 'Which database?']) });
     expect(out).not.toMatch(/Describe a goal/i);
   });
 
@@ -279,26 +277,24 @@ describe('transcript', () => {
   });
 
   it('marks an error turn as an error', () => {
-    expect(text({ messages: [{ role: 'error', content: 'it broke', timestamp: '' }] })).toContain('it broke');
+    expect(text({ conversation: chatOf(['error', 'it broke']) })).toContain('it broke');
   });
 
   it('renders planner Markdown as terminal-native chat', () => {
     const out = text({
       cols: 100,
-      messages: [{
-        role: 'assistant', timestamp: '', content: [
-          '## What `/auto` does in the TUI',
-          '',
-          '`/auto` is a **global toggle** for new plans.',
-          '',
-          '### How it works',
-          '',
-          '| Command | Effect |',
-          '|---|---|',
-          '| `/auto` (no args) | Flips the current setting |',
-          '| `/auto on` | Sets `ORDEWELL_AUTONOMOUS_MODE=true` |',
-        ].join('\n'),
-      }],
+      conversation: chatOf(['planner', [
+        '## What `/auto` does in the TUI',
+        '',
+        '`/auto` is a **global toggle** for new plans.',
+        '',
+        '### How it works',
+        '',
+        '| Command | Effect |',
+        '|---|---|',
+        '| `/auto` (no args) | Flips the current setting |',
+        '| `/auto on` | Sets `ORDEWELL_AUTONOMOUS_MODE=true` |',
+      ].join('\n')]),
     });
     expect(out).toContain('What /auto does in the TUI');
     expect(out).toContain('/auto is a global toggle for new plans.');
@@ -314,13 +310,11 @@ describe('transcript', () => {
   it('keeps Markdown table rows within a narrow chat pane', () => {
     const out = screen({
       cols: 44,
-      messages: [{
-        role: 'assistant', timestamp: '', content: [
-          '| Command | Effect |',
-          '|---|---|',
-          '| `/auto on` | Sets `ORDEWELL_AUTONOMOUS_MODE=true` |',
-        ].join('\n'),
-      }],
+      conversation: chatOf(['planner', [
+        '| Command | Effect |',
+        '|---|---|',
+        '| `/auto on` | Sets `ORDEWELL_AUTONOMOUS_MODE=true` |',
+      ].join('\n')]),
     });
     for (const line of out) expect(width(line)).toBeLessThanOrEqual(44);
     expect(out.join('\n')).toContain('ORDEWELL_AUTONOMOUS_MODE');
@@ -838,16 +832,14 @@ describe('plan pane scrolling', () => {
 });
 
 describe('chat scrolling', () => {
-  const messages = Array.from({ length: 40 }, (_, i) => ({
-    role: 'user' as const, content: `message number ${i + 1}`, timestamp: '',
-  }));
+  const conversation = chatOf(...Array.from({ length: 40 }, (_, i): ['user', string] => ['user', `message number ${i + 1}`]));
 
   it('follows the tail by default', () => {
-    expect(text({ messages })).toContain('message number 40');
+    expect(text({ conversation })).toContain('message number 40');
   });
 
   it('reveals older messages when scrolled back', () => {
-    const out = text({ messages, scroll: 30 });
+    const out = text({ conversation, scroll: 30 });
     expect(out).not.toContain('message number 40');
     expect(out).toContain('message number 20');
   });
@@ -855,11 +847,11 @@ describe('chat scrolling', () => {
   it('stops at the top instead of scrolling into blank space', () => {
     // With a plan the transcript has no welcome header, so the very first
     // message is the top of the scrollback.
-    expect(text({ messages, tasks, scroll: 9999 })).toContain('message number 1');
+    expect(text({ conversation, tasks, scroll: 9999 })).toContain('message number 1');
   });
 
   it('scrolling all the way back lands on the welcome while planning', () => {
-    expect(text({ messages, scroll: 9999 })).toMatch(/Describe a goal/i);
+    expect(text({ conversation, scroll: 9999 })).toMatch(/Describe a goal/i);
   });
 });
 
@@ -907,29 +899,34 @@ describe('plan pane — runner and mode', () => {
 
 describe('chat body memo', () => {
   // The body is the expensive part — one Markdown parse plus a string-width
-  // pass per message per frame. The memo keys on the (immutable) `messages`
-  // array reference, so a spinner tick or a `status_update` flood that never
-  // touches `messages` reuses these lines instead of re-parsing every
-  // assistant message on each frame. That is what stops arrow-key scrolling on
-  // a task from lagging while a six-task plan runs.
-  it('returns the same wrapped lines when messages are unchanged', () => {
-    const messages: ChatMessage[] = [{ role: 'assistant', content: '# Heading\nbody wrap here', timestamp: '' }];
-    const first = chatBodyLines(messages, 80);
-    expect(chatBodyLines(messages, 80)).toBe(first);
+  // pass per message per frame. The memo keys on the conversation's `blocks`
+  // array, which core hands back unchanged for anything that changes nothing,
+  // so a spinner tick or a `status_update` flood reuses these lines instead of
+  // re-parsing every planner message on each frame.
+  it('returns the same wrapped lines when the blocks are unchanged', () => {
+    const { blocks } = chatOf(['planner', '# Heading\nbody wrap here']);
+    const first = chatBodyLines(blocks, 80, false);
+    expect(chatBodyLines(blocks, 80, false)).toBe(first);
   });
 
-  it('recomputes when the messages array reference changes (content changed)', () => {
-    const messages: ChatMessage[] = [{ role: 'assistant', content: 'hello', timestamp: '' }];
-    const first = chatBodyLines(messages, 80);
-    const recomputed = chatBodyLines([{ ...messages[0] }, ...messages.slice(1)], 80);
+  it('recomputes when the blocks array reference changes (content changed)', () => {
+    const { blocks } = chatOf(['planner', 'hello']);
+    const first = chatBodyLines(blocks, 80, false);
+    const recomputed = chatBodyLines([{ ...blocks[0] }, ...blocks.slice(1)], 80, false);
     expect(recomputed).not.toBe(first);
     expect(recomputed.join('\n')).toBe(first.join('\n'));
   });
 
   it('recomputes when the column width changes', () => {
-    const messages: ChatMessage[] = [{ role: 'assistant', content: 'x'.repeat(100), timestamp: '' }];
-    const at80 = chatBodyLines(messages, 80);
-    expect(chatBodyLines(messages, 40)).not.toBe(at80);
+    const { blocks } = chatOf(['planner', 'x'.repeat(100)]);
+    const at80 = chatBodyLines(blocks, 80, false);
+    expect(chatBodyLines(blocks, 40, false)).not.toBe(at80);
+  });
+
+  it('recomputes when the detail-all switch flips', () => {
+    const { blocks } = chatOf(['planner', 'hello']);
+    const collapsed = chatBodyLines(blocks, 80, false);
+    expect(chatBodyLines(blocks, 80, true)).not.toBe(collapsed);
   });
 });
 
@@ -947,9 +944,7 @@ describe('selection highlight', () => {
 
   const chatty: Partial<TuiState> = {
     tasks,
-    messages: Array.from({ length: 30 }, (_, i): ChatMessage => ({
-      role: 'user', content: `chat row ${i} with enough text to fill the pane`, timestamp: '',
-    })),
+    conversation: chatOf(...Array.from({ length: 30 }, (_, i): ['user', string] => ['user', `chat row ${i} with enough text to fill the pane`])),
   };
 
   const INVERSE_ON = '\x1b[7m';
@@ -987,5 +982,477 @@ describe('selection highlight', () => {
       if (at === -1) continue;
       expect(width(stripAnsi(line.slice(0, at)))).toBeLessThan(43);
     }
+  });
+});
+
+// ── The conversation's blocks (#52) ─────────────────────────────────────────
+
+/** A state that has heard these session messages, at a pane `cols` wide. */
+function heard(cols: number, ...messages: SessionMessage[]): TuiState {
+  return messages.reduce((s, message) => reduce(s, { type: 'sessionMessage', message }).state, initialState({ rows: 40, cols }));
+}
+
+/** The same state with the detail-all switch on. */
+const detailed = (state: TuiState): TuiState => ({ ...state, detailAll: true });
+
+/** The painted rows of the block whose first row starts with `head`, up to the blank row after it. */
+function blockRows(state: TuiState, head: string): string[] {
+  const rows = render(state).map((row) => stripAnsi(row).trimEnd());
+  const start = rows.findIndex((row) => row.startsWith(head));
+  if (start < 0) throw new Error(`no row starts with "${head}" in:\n${rows.join('\n')}`);
+  const end = rows.indexOf('', start);
+  return rows.slice(start, end < 0 ? undefined : end);
+}
+
+const bash = (command: string, toolCallId = 'tc-1'): SessionMessage =>
+  ({ type: 'research_step', tool: 'bash', args: JSON.stringify({ command }), toolCallId });
+
+const ran = (command: string, result: string, outcome: ResearchStepOutcome = 'success', toolCallId = 'tc-1'): SessionMessage => ({
+  type: 'research_step_done',
+  step: {
+    id: `rs-${toolCallId}`, tool: 'bash', args: JSON.stringify({ command }), result, success: outcome === 'success', outcome,
+    toolCallId, timestamp: '2026-09-27T10:00:00.000Z',
+  },
+});
+
+/** 215 lines of `gh issue view` output. */
+const ISSUES = ['=== #47 ===', 'Planner view: a transparent, streaming conversation', 'line 3', ...Array.from({ length: 212 }, (_, i) => `line ${i + 4}`)].join('\n');
+
+const LOOP = 'for i in 47 48 49 50 51 52 53; do gh issue view $i; done';
+
+describe('command rows', () => {
+  it('draws a command as its header over a three-line preview, noting what the preview hides', () => {
+    const state = heard(80, bash('gh issue view 47'), ran('gh issue view 47', ISSUES));
+
+    expect(blockRows(state, '●')).toEqual([
+      '● Bash(gh issue view 47)',
+      '  ⎿  === #47 ===',
+      '     Planner view: a transparent, streaming conversation',
+      '     line 3',
+      '     … +212 lines (ctrl+o to expand)',
+    ]);
+  });
+
+  it('cuts the argument, not the tool name or the closing parenthesis, to fit a 40-column pane', () => {
+    const state = heard(40, bash(LOOP), ran(LOOP, ISSUES));
+
+    expect(blockRows(state, '●')).toEqual([
+      '● Bash(for i in 47 48 49 50 51 52 53; …)',
+      '  ⎿  === #47 ===',
+      '     Planner view: a transparent, strea…',
+      '     line 3',
+      '     … +212 lines (ctrl+o to expand)',
+    ]);
+  });
+
+  it('shows the whole header and preview when a 120-column pane has room', () => {
+    const state = heard(120, bash(LOOP), ran(LOOP, ISSUES));
+
+    expect(blockRows(state, '●')).toEqual([
+      '● Bash(for i in 47 48 49 50 51 52 53; do gh issue view $i; done)',
+      '  ⎿  === #47 ===',
+      '     Planner view: a transparent, streaming conversation',
+      '     line 3',
+      '     … +212 lines (ctrl+o to expand)',
+    ]);
+  });
+
+  it('keeps a multi-line command to one header row, counting the lines it leaves out', () => {
+    const heredoc = "cat <<'EOF' > notes.md\n# Notes\nline two\nEOF";
+    const state = heard(80, bash(heredoc), ran(heredoc, 'wrote notes.md'));
+
+    expect(blockRows(state, '●')).toEqual([
+      "● Bash(cat <<'EOF' > notes.md … +3 lines)",
+      '  ⎿  wrote notes.md',
+    ]);
+  });
+
+  it('says so when a command printed nothing', () => {
+    const state = heard(80, bash('touch notes.md'), ran('touch notes.md', ''));
+
+    expect(blockRows(state, '●')).toEqual([
+      '● Bash(touch notes.md)',
+      '  ⎿  (no output)',
+    ]);
+  });
+
+  it('shows a failed command as one error line, in place of the preview', () => {
+    const state = heard(80, bash('npm test'), ran('npm test', 'FAIL src/a.test.ts\n  expected 1 to be 2\n  at a.test.ts:3', 'failure'));
+
+    expect(blockRows(state, '●')).toEqual([
+      '● Bash(npm test)',
+      '  ⎿  Error: FAIL src/a.test.ts',
+    ]);
+  });
+
+  const refused = () => heard(80, bash('rm -rf build'), ran('rm -rf build', "Command refused: writes are the runners' job.", 'refused'));
+  const denied = () => heard(80, bash('curl example.com'), ran('curl example.com', 'Denied by the user.', 'denied'));
+  const stopped = () => heard(80, bash('npm test'), { type: 'planner_turn_ended', turnId: 't1', outcome: 'stopped' });
+
+  it('shows a refused, a denied and an interrupted command each as one status line', () => {
+    expect(blockRows(refused(), '●')).toEqual(['● Bash(rm -rf build)', "  ⎿  Refused: Command refused: writes are the runners' job."]);
+    expect(blockRows(denied(), '●')).toEqual(['● Bash(curl example.com)', '  ⎿  Denied: Denied by the user.']);
+    expect(blockRows(stopped(), '●')).toEqual(['● Bash(npm test)', '  ⎿  Interrupted']);
+  });
+
+  it('paints a status line as the outcome marks were: failure red, refusal and denial yellow, interruption grey', () => {
+    const failed = heard(80, bash('npm test'), ran('npm test', 'FAIL', 'failure'));
+    const row = (state: TuiState, label: string): string => {
+      style.enabled = true;
+      try {
+        return render(state).find((line) => stripAnsi(line).includes(`⎿  ${label}`)) ?? '';
+      } finally {
+        style.enabled = false;
+      }
+    };
+
+    expect(row(failed, 'Error')).toContain('\x1b[31mError: FAIL');
+    expect(row(refused(), 'Refused')).toContain('\x1b[33mRefused:');
+    expect(row(denied(), 'Denied')).toContain('\x1b[33mDenied:');
+    expect(row(stopped(), 'Interrupted')).toContain('\x1b[90mInterrupted');
+  });
+
+  it('marks a command still running', () => {
+    const state = heard(80, bash('npm test'));
+
+    expect(blockRows(state, '○ Bash')).toEqual([
+      '○ Bash(npm test)',
+      '  ⎿  Running…',
+    ]);
+  });
+
+  it('never paints a row wider than the pane, at any width', () => {
+    for (const cols of [8, 12, 20, 40, 80]) {
+      for (const row of render(heard(cols, bash(LOOP), ran(LOOP, ISSUES)))) expect(width(row)).toBeLessThanOrEqual(cols);
+      for (const row of render(detailed(heard(cols, bash(LOOP), ran(LOOP, ISSUES))))) expect(width(row)).toBeLessThanOrEqual(cols);
+    }
+  });
+});
+
+describe('command rows in full detail', () => {
+  it('shows the full arguments and the full output, wrapped to the pane', () => {
+    const loop = 'for i in 47 48 49; do\n  gh issue view $i --json title\ndone';
+    const output = '=== #47 ===\nPlanner view: a transparent, streaming conversation that wraps\nline 3\nline 4';
+    const state = detailed(heard(50, bash(loop), ran(loop, output)));
+
+    expect(blockRows(state, '●')).toEqual([
+      '● Bash(for i in 47 48 49; do … +2 lines)',
+      '     command: for i in 47 48 49; do',
+      '       gh issue view $i --json title',
+      '     done',
+      '  ⎿  === #47 ===',
+      '     Planner view: a transparent, streaming',
+      '     conversation that wraps',
+      '     line 3',
+      '     line 4',
+    ]);
+  });
+
+  it('wraps a header too long for the pane instead of cutting it', () => {
+    const state = detailed(heard(40, bash(LOOP), ran(LOOP, 'ok')));
+
+    expect(blockRows(state, '●')).toEqual([
+      '● Bash(for i in 47 48 49 50 51 52 53; do',
+      '  gh issue view $i; done)',
+      '     command: for i in 47 48 49 50 51 52',
+      '     53; do gh issue view $i; done',
+      '  ⎿  ok',
+    ]);
+  });
+
+  it('shows every line of a long output, with nothing left to expand', () => {
+    const tall = { ...heard(80, bash('gh issue view 47'), ran('gh issue view 47', ISSUES)), rows: 260 };
+    const rows = blockRows(detailed(tall), '●');
+
+    expect(rows).toHaveLength(1 + 1 + 215);
+    expect(rows.at(-1)).toBe('     line 215');
+    expect(rows.join('\n')).not.toContain('ctrl+o');
+  });
+
+  it('keeps the status line of a failure, followed by the rest of what it printed', () => {
+    const state = detailed(heard(80, bash('npm test'), ran('npm test', 'FAIL src/a.test.ts\n  expected 1 to be 2', 'failure')));
+
+    expect(blockRows(state, '●')).toEqual([
+      '● Bash(npm test)',
+      '     command: npm test',
+      '  ⎿  Error: FAIL src/a.test.ts',
+      '       expected 1 to be 2',
+    ]);
+  });
+});
+
+describe('thinking', () => {
+  const thought = (text: string): SessionMessage => ({ type: 'planner_thinking_delta', turnId: 't1', segmentId: 's1', text });
+  const ended: SessionMessage = { type: 'planner_turn_ended', turnId: 't1', outcome: 'message' };
+
+  it('collapses to one line that counts its words', () => {
+    const state = heard(80, thought('Reading the auth module.\nNext, the session store'), ended);
+
+    expect(blockRows(state, '∴')).toEqual(['∴ Thinking (8 words)']);
+  });
+
+  it('shows its latest line while it streams, the newest words kept when the row is short', () => {
+    const streaming = [thought('Reading the auth module.\n'), thought('Next, the session store')];
+
+    expect(blockRows(heard(80, ...streaming), '∴')).toEqual(['∴ Thinking (8 words) · Next, the session store']);
+    expect(blockRows(heard(40, ...streaming), '∴')).toEqual(['∴ Thinking (8 words) · …he session store']);
+  });
+
+  it('shows the whole text in full detail', () => {
+    const state = detailed(heard(40, thought('Reading the auth module.\nNext, the session store and then the cookie jar'), ended));
+
+    expect(blockRows(state, '∴')).toEqual([
+      '∴ Thinking (13 words)',
+      '  Reading the auth module.',
+      '  Next, the session store and then the',
+      '  cookie jar',
+    ]);
+  });
+
+  it('is dim, collapsed or not', () => {
+    style.enabled = true;
+    try {
+      const collapsed = heard(80, thought('one word'), ended);
+      const row = render(collapsed).find((line) => stripAnsi(line).startsWith('∴')) ?? '';
+      expect(row.startsWith('\x1b[90m')).toBe(true);
+    } finally {
+      style.enabled = false;
+    }
+  });
+});
+
+describe('subagents', () => {
+  const started: SessionMessage = { type: 'subagent_started', subagentId: 'sa1', brief: 'Find the auth handlers\nLook in src/ only.' };
+  const grep: SessionMessage = { type: 'research_step', subagentId: 'sa1', tool: 'grep', args: '{"pattern":"auth"}', toolCallId: 'c1' };
+  const grepped: SessionMessage = {
+    type: 'research_step_done', subagentId: 'sa1',
+    step: { id: 'r1', tool: 'grep', args: '{"pattern":"auth"}', result: 'src/auth.ts:3', success: true, outcome: 'success', toolCallId: 'c1', subagentId: 'sa1', timestamp: '' },
+  };
+  const read: SessionMessage = { type: 'research_step', subagentId: 'sa1', tool: 'read_file', args: '{"path":"src/auth.ts"}', toolCallId: 'c2' };
+  const finished: SessionMessage = {
+    type: 'subagent_finished', subagentId: 'sa1', outcome: 'done', digest: 'Found 3 handlers in src/auth.ts\nDetails follow.',
+  };
+
+  it('is one line with its brief, and its step count while it runs', () => {
+    expect(blockRows(heard(80, started, grep, grepped, read), '◆')).toEqual(['◆ Agent: Find the auth handlers  running · 2 steps']);
+  });
+
+  it('ends with its status and the first line of what it handed back', () => {
+    expect(blockRows(heard(80, started, grep, grepped, finished), '◆')).toEqual([
+      '◆ Agent: Find the auth handlers  done · Found 3 handlers in src/auth.ts',
+    ]);
+  });
+
+  it('keeps the status when the pane is narrow, letting the digest go first', () => {
+    expect(blockRows(heard(40, started, grep, grepped, finished), '◆')).toEqual(['◆ Agent: Find the auth handlers  done']);
+  });
+
+  it('shows its children indented beneath it, and all it handed back, in full detail', () => {
+    expect(blockRows(detailed(heard(80, started, grep, grepped, finished)), '◆')).toEqual([
+      '◆ Agent: Find the auth handlers  done · Found 3 handlers in src/auth.ts',
+      '    ● Grep(auth)',
+      '         pattern: auth',
+      '      ⎿  src/auth.ts:3',
+      '  ⎿  Found 3 handlers in src/auth.ts',
+      '     Details follow.',
+    ]);
+  });
+});
+
+describe('approvals', () => {
+  const asked: SessionMessage = { type: 'approval_request', id: 'ap-1', kind: 'shell_command', subject: 'npm test', scope: 'npm test' };
+
+  it('is one line that says where the request stands', () => {
+    // Its modal covers the pane while it is up; behind another request's, the line shows.
+    expect(blockRows({ ...heard(80, asked), overlay: null }, '?')).toEqual(['? Waiting for you · Run a command: npm test']);
+    expect(blockRows(heard(80, asked, { type: 'approval_settled', id: 'ap-1', granted: true }), '✓')).toEqual(['✓ Approved · Run a command: npm test']);
+    expect(blockRows(heard(80, asked, { type: 'approval_settled', id: 'ap-1', granted: false }), '⊘')).toEqual(['⊘ Denied · Run a command: npm test']);
+  });
+
+  it('names the policy behind a decision nobody was asked about', () => {
+    const decided = (granted: boolean, source: 'pre-approved' | 'mode'): SessionMessage => ({
+      type: 'approval_decided', kind: 'url_fetch', subject: 'https://example.com', scope: 'example.com', granted, source,
+    });
+
+    expect(blockRows(heard(80, decided(true, 'pre-approved')), '✓')).toEqual(['✓ Auto-approved (pre-approved) · Fetch a URL: https://example.com']);
+    expect(blockRows(heard(80, decided(false, 'mode')), '⊘')).toEqual(['⊘ Auto-denied (policy) · Fetch a URL: https://example.com']);
+  });
+});
+
+describe('plan markers', () => {
+  const plan = (content: string): SessionMessage => ({
+    type: 'plan_generated',
+    goal: 'g',
+    runners: [],
+    plan: {
+      tasks: [], runners: [], generatedAt: '',
+      conversationHistory: [{ role: 'assistant', content, timestamp: '2026-09-27T10:00:00.000Z', kind: 'plan_generated' }],
+    },
+  });
+
+  it('reads "Building plan…" while the plan streams', () => {
+    expect(blockRows(heard(80, { type: 'plan_token', turnId: 't1', token: '{"tasks":' }), '◇')).toEqual(['◇ Building plan…']);
+  });
+
+  it('then says what the plan became, and how many tasks it has', () => {
+    const building: SessionMessage = { type: 'plan_token', turnId: 't1', token: '{"tasks":' };
+
+    expect(blockRows(heard(80, building, plan('Plan generated with 2 tasks.')), '◇')).toEqual(['◇ Plan generated (2 tasks)']);
+    expect(blockRows(heard(80, plan('Plan updated — now 1 task.')), '◇')).toEqual(['◇ Plan updated (1 task)']);
+  });
+});
+
+describe('the token line', () => {
+  const usage = (over: Partial<Extract<SessionMessage, { type: 'planner_usage' }>> = {}): SessionMessage => ({
+    type: 'planner_usage', totals: { inputTokens: 12_400, outputTokens: 3_100 }, ...over,
+  });
+  /** The chat pane's bottom row: the last body row, just above the status row. */
+  const bottomRow = (state: TuiState): string => stripAnsi(render(state)[bodyRows(state)]).trimEnd();
+
+  it('sits on the chat pane\'s bottom row with the totals and how full the context is', () => {
+    const state = heard(80, { type: 'planner_message', content: 'Which database?', timestamp: '' }, usage({ contextFill: { usedTokens: 36_000, windowTokens: 200_000 } }));
+
+    expect(bottomRow(state)).toBe('12.4k in · 3.1k out · 18% ctx');
+  });
+
+  it('leaves out the context fill when the window is unknown', () => {
+    expect(bottomRow(heard(80, usage()))).toBe('12.4k in · 3.1k out');
+  });
+
+  it('shows a cost only when one was reported', () => {
+    const state = heard(80, usage({ totals: { inputTokens: 12_400, outputTokens: 3_100, reportedCost: { usd: 0.42 } }, contextFill: { usedTokens: 36_000, windowTokens: 200_000 } }));
+
+    expect(bottomRow(state)).toBe('12.4k in · 3.1k out · 18% ctx · $0.42');
+  });
+
+  it('counts what subagents used in the total', () => {
+    const state = heard(80, usage({ totals: { inputTokens: 1_500, outputTokens: 200 }, bySubagent: { sa1: { inputTokens: 500, outputTokens: 100 } } }));
+
+    expect(bottomRow(state)).toBe('1.5k in · 200 out');
+  });
+
+  it('stays put while the transcript scrolls back beneath it', () => {
+    const long = heard(80, ...Array.from({ length: 40 }, (_, i): SessionMessage => ({ type: 'planner_message', content: `reply ${i}`, timestamp: '' })), usage());
+    const back = reduce(long, { type: 'key', key: { name: 'pageup' } }).state;
+
+    expect(back.scroll).toBeGreaterThan(0);
+    expect(bottomRow(back)).toBe('12.4k in · 3.1k out');
+    expect(render(back).map(stripAnsi).join('\n')).not.toContain('reply 39');
+  });
+
+  it('takes no row until usage is reported', () => {
+    const state = heard(80, ...Array.from({ length: 40 }, (_, i): SessionMessage => ({ type: 'planner_message', content: `reply ${i}`, timestamp: '' })));
+
+    expect(bottomRow(state)).toBe('');
+    expect(stripAnsi(render(state)[bodyRows(state) - 1])).toContain('reply 39');
+  });
+});
+
+describe('streamed replies', () => {
+  const delta = (text: string, segmentId = 's1'): SessionMessage => ({ type: 'planner_text_delta', turnId: 't1', segmentId, text });
+  const hear = (state: TuiState, message: SessionMessage): TuiState => reduce(state, { type: 'sessionMessage', message }).state;
+
+  it('grow in place, on the rows they started on', () => {
+    const started = heard(80, { type: 'planner_turn_started', turnId: 't1', prompt: 'Add rate limiting' }, delta('Checking the '));
+    const grown = hear(started, delta('**auth** module'));
+    const rowOf = (state: TuiState) => render(state).map((r) => stripAnsi(r).trimEnd()).findIndex((r) => r.startsWith('◆'));
+
+    expect(blockRows(started, '◆')).toEqual(['◆ Checking the']);
+    expect(blockRows(grown, '◆')).toEqual(['◆ Checking the auth module']);
+    expect(rowOf(grown)).toBe(rowOf(started));
+  });
+
+  it('drop an attempt the turn took back, and show the one that replaced it', () => {
+    const attempt = heard(80, { type: 'planner_turn_started', turnId: 't1', prompt: 'Add rate limiting' }, delta('A first attempt that went wrong'));
+    const retracted = hear(attempt, { type: 'planner_text_retracted', turnId: 't1' });
+    const retried = hear(retracted, delta('The corrected answer', 's2'));
+    const screenOf = (state: TuiState) => render(state).map(stripAnsi).join('\n');
+
+    expect(screenOf(attempt)).toContain('A first attempt that went wrong');
+    expect(screenOf(retracted)).not.toContain('A first attempt that went wrong');
+    expect(screenOf(retried)).not.toContain('A first attempt that went wrong');
+    expect(blockRows(retried, '◆')).toEqual(['◆ The corrected answer']);
+  });
+});
+
+describe('a reloaded session', () => {
+  const at = (second: number) => `2026-09-27T10:00:${String(second).padStart(2, '0')}.000Z`;
+  const read = { id: 'r1', tool: 'read_file' as const, args: '{"path":"src/app.ts"}', result: 'import express from "express";\nconst app = express();', success: true, outcome: 'success' as const, toolCallId: 'c1', timestamp: at(2) };
+  const grep = { id: 'r3', tool: 'grep' as const, args: '{"pattern":"app.use"}', result: 'src/mw.ts:4', success: true, outcome: 'success' as const, toolCallId: 'c3', subagentId: 'sa-1', timestamp: at(4) };
+  const spawn = { id: 'r2', tool: 'spawn_research_agent' as const, args: '{"prompt":"Find the middleware"}', result: 'Middleware lives in src/mw.ts', success: true, outcome: 'success' as const, toolCallId: 'c2', timestamp: at(6) };
+  const history = [
+    { role: 'user' as const, content: 'Add rate limiting', timestamp: at(0) },
+    { role: 'assistant' as const, content: 'Here is the plan.', timestamp: at(7) },
+    { role: 'assistant' as const, content: 'Plan generated with 1 task.', timestamp: at(8), kind: 'plan_generated' as const },
+  ];
+  const subagentUsage = { inputTokens: 400, outputTokens: 40 };
+  const totals = { inputTokens: 3_400, outputTokens: 240 };
+
+  const live = heard(
+    80,
+    { type: 'planner_turn_started', turnId: 't1', prompt: 'Add rate limiting' },
+    { type: 'planner_thinking_delta', turnId: 't1', segmentId: 's0', text: 'Reading the app first' },
+    { type: 'research_step', tool: 'read_file', args: read.args, toolCallId: 'c1', turnId: 't1' },
+    { type: 'research_step_done', step: read, turnId: 't1' },
+    { type: 'research_step', tool: 'spawn_research_agent', args: spawn.args, subagentId: 'sa-1', toolCallId: 'c2', turnId: 't1' },
+    { type: 'subagent_started', subagentId: 'sa-1', brief: 'Find the middleware', turnId: 't1' },
+    { type: 'research_step', tool: 'grep', args: grep.args, subagentId: 'sa-1', toolCallId: 'c3', turnId: 't1' },
+    { type: 'research_step_done', step: grep, subagentId: 'sa-1', turnId: 't1' },
+    { type: 'subagent_finished', subagentId: 'sa-1', outcome: 'done', digest: 'Middleware lives in src/mw.ts', usage: subagentUsage, turnId: 't1' },
+    { type: 'research_step_done', step: spawn, subagentId: 'sa-1', turnId: 't1' },
+    { type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Here is ' },
+    { type: 'planner_message', content: 'Here is the plan.', timestamp: at(7), turnId: 't1' },
+    { type: 'plan_generated', goal: 'Add rate limiting', runners: [], plan: { tasks: [], runners: [], generatedAt: at(8), conversationHistory: history } },
+    { type: 'planner_usage', turnId: 't1', totals, bySubagent: { 'sa-1': subagentUsage }, contextFill: { usedTokens: 3_000, windowTokens: 128_000 } },
+    { type: 'planner_turn_ended', turnId: 't1', outcome: 'plan' },
+  );
+
+  const reloaded = reduce(initialState({ rows: 40, cols: 80 }), {
+    type: 'chatRestored',
+    history,
+    researchLog: [read, grep, { id: 'sa', type: 'subagent', subagentId: 'sa-1', brief: 'Find the middleware', outcome: 'done', digest: 'Middleware lives in src/mw.ts', usage: subagentUsage, timestamp: at(5) }, spawn],
+    plannerUsage: { totals, bySubagent: { 'sa-1': subagentUsage }, lastPromptTokens: 3_000, contextWindow: 128_000 },
+  }).state;
+
+  /**
+   * The conversation's rows, from the prompt down to the token line, without
+   * the reasoning — the one block a session never saves.
+   */
+  const saved = (state: TuiState): string[] => {
+    const tall = { ...state, rows: 80 };
+    const rows = render(tall).map((r) => stripAnsi(r).trimEnd());
+    const shown = rows.slice(rows.indexOf('❯ Add rate limiting'), bodyRows(tall) + 1);
+    const thinking = shown.findIndex((r) => r.startsWith('∴'));
+    const kept = thinking < 0 ? shown : [...shown.slice(0, thinking), ...shown.slice(shown.indexOf('', thinking))];
+    return kept.filter(Boolean);
+  };
+
+  it('draws what the live view drew, for everything the session saves', () => {
+    expect(render(live).map(stripAnsi).join('\n')).toContain('∴ Thinking');
+    expect(saved(reloaded)).toEqual(saved(live));
+    expect(saved(reloaded).at(-1)).toBe('3.4k in · 240 out · 2% ctx');
+  });
+
+  it('draws the same in full detail too', () => {
+    expect(saved(detailed(reloaded))).toEqual(saved(detailed(live)));
+  });
+});
+
+describe('queued prompts with the conversation', () => {
+  it('still wait as bubbles below the transcript, with the token line under them', () => {
+    const talking = heard(
+      80,
+      { type: 'planner_turn_started', turnId: 't1', prompt: 'Add rate limiting' },
+      bash('npm test'),
+      { type: 'planner_usage', totals: { inputTokens: 900, outputTokens: 80 } },
+    );
+    const state = { ...talking, status: 'planning' as const, queuedPrompts: ['Use SQLite'] };
+    const rows = render(state).map((r) => stripAnsi(r).trimEnd());
+    const bubble = rows.findIndex((r) => r.startsWith('◇ Use SQLite'));
+
+    expect(rows[bubble]).toBe('◇ Use SQLite · queued · esc to unsend');
+    expect(bubble).toBeGreaterThan(rows.findIndex((r) => r.startsWith('○ Bash(npm test)')));
+    expect(rows[bodyRows(state)]).toBe('900 in · 80 out');
+    expect(bubble).toBeLessThan(bodyRows(state));
   });
 });

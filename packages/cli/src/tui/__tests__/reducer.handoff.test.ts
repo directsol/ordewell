@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce, type Action, type Step } from '../reducer';
 import type { HandoffView, TaskView, TuiState } from '../state';
+import { lastMessage } from './chat';
 
 const key = (name: string, char?: string) => ({ type: 'key' as const, key: { name, char } });
 const press = (state: TuiState, name: string, char?: string): Step => reduce(state, key(name, char));
@@ -22,7 +23,6 @@ const task = (over: Partial<TaskView> = {}): TaskView => ({
 
 const session = (over: Partial<TuiState> = {}): TuiState => initialState({ sessionId: 's1', rows: 30, cols: 80, ...over });
 const withHandoff = (over: Partial<TuiState> = {}): TuiState => session({ handoff, ...over });
-const lastMessage = (state: TuiState) => state.messages.at(-1);
 
 function typed(state: TuiState, text: string): Step {
   return reduce({ ...state, editor: { ...state.editor, text, cursor: text.length } }, key('enter'));
@@ -34,7 +34,7 @@ describe('isolation_handoff', () => {
 
     expect(state.handoff).toEqual(handoff);
     expect(state.overlay).toEqual({ kind: 'handoff', index: 0, diff: null });
-    expect(lastMessage(state)?.content).toMatch(/ordewell\/r1\/integration — 2 tasks landed/);
+    expect(lastMessage(state)?.text).toMatch(/ordewell\/r1\/integration — 2 tasks landed/);
   });
 
   it('does not take over a screen that already has an overlay', () => {
@@ -42,7 +42,7 @@ describe('isolation_handoff', () => {
 
     expect(state.overlay).toEqual({ kind: 'help' });
     expect(state.handoff).toEqual(handoff);
-    expect(lastMessage(state)?.content).toMatch(/\/handoff/);
+    expect(lastMessage(state)?.text).toMatch(/\/handoff/);
   });
 
   it("ignores another session's handoff", () => {
@@ -63,7 +63,7 @@ describe('/handoff', () => {
 
     expect(effects).toEqual([]);
     expect(state.overlay).toBeNull();
-    expect(lastMessage(state)).toMatchObject({ role: 'error', content: expect.stringMatching(/No isolated run/) });
+    expect(lastMessage(state)).toMatchObject({ role: 'error', text: expect.stringMatching(/No isolated run/) });
   });
 
   it('review asks for the diff', () => {
@@ -89,7 +89,7 @@ describe('/handoff', () => {
     const { effects, state } = typed(withHandoff(), '/handoff deploy');
 
     expect(effects).toEqual([]);
-    expect(lastMessage(state)?.content).toMatch(/Usage: \/handoff/);
+    expect(lastMessage(state)?.text).toMatch(/Usage: \/handoff/);
   });
 });
 
@@ -220,7 +220,7 @@ describe('the diff view', () => {
     const { state } = apply(session({ handoff }), { type: 'handoffDiff', diff: '\n', sessionId: 's1' });
 
     expect(state.overlay).toBeNull();
-    expect(lastMessage(state)?.content).toMatch(/Nothing differs from abcdef12/);
+    expect(lastMessage(state)?.text).toMatch(/Nothing differs from abcdef12/);
   });
 });
 
@@ -408,7 +408,7 @@ describe('a run over a repo group', () => {
   it('says which repos the run finished in when it arrives', () => {
     const { state } = apply(session(), { type: 'isolationHandoff', handoff: group, sessionId: 's1' });
 
-    expect(lastMessage(state)?.content).toBe(`Run finished on ${branch} in api, web, infra — 2 tasks landed. /handoff to review and land it.`);
+    expect(lastMessage(state)?.text).toBe(`Run finished on ${branch} in api, web, infra — 2 tasks landed. /handoff to review and land it.`);
   });
 
   it('asks before Merge all, naming the repos it will merge and that it merges none unless all can', () => {

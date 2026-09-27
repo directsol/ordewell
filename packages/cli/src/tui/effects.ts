@@ -1,6 +1,8 @@
 import { execSync } from 'child_process';
-import { ALL_PROVIDERS, clipboardCopyCommand, isCliProvider, truncateCheckpointSummary, type AiProvider, type ConversationMessage, type HasBinFn, type PlannerModelRecall } from '@ordewell/core';
-import { summarizeToolCall } from '@ordewell/core/plan-utils';
+import {
+  ALL_PROVIDERS, clipboardCopyCommand, isCliProvider, truncateCheckpointSummary, type AiProvider, type HasBinFn, type LegacyPlanState,
+  type PlannerModelRecall, type SessionMessage,
+} from '@ordewell/core';
 import { describeConnectionRefused, isConnectionRefused } from '../daemonClient';
 import { WorkspaceInitNeededError } from '../apiClient';
 import { normalizeCatalog } from '../catalog';
@@ -427,7 +429,7 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
       // restored plan executable — `getSession` alone only reads the file.
       const { plan, goal } = await api.adoptSession(effect.sessionId, workspace);
       dispatch({ type: 'sessionStarted', sessionId: effect.sessionId, goal });
-      dispatch({ type: 'chatRestored', history: (plan as { conversationHistory?: ConversationMessage[] }).conversationHistory ?? [], sessionId: effect.sessionId });
+      dispatch(restoredChat(plan, effect.sessionId));
       dispatch({ type: 'planUpdated', plan, sessionId: effect.sessionId });
       dispatch({ type: 'notice', message: `Loaded "${goal || effect.sessionId}".` });
       return;
@@ -438,7 +440,7 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
     case 'forkConversation': {
       const fork = await api.forkConversation(effect.sessionId);
       dispatch({ type: 'sessionForked', sessionId: fork.sessionId, goal: fork.goal });
-      dispatch({ type: 'chatRestored', history: (fork.plan as { conversationHistory?: ConversationMessage[] }).conversationHistory ?? [], sessionId: fork.sessionId });
+      dispatch(restoredChat(fork.plan, fork.sessionId));
       dispatch({ type: 'planUpdated', plan: fork.plan, sessionId: fork.sessionId });
       dispatch({ type: 'notice', message: `Forked ${effect.sessionId} into ${fork.sessionId} — you are in the fork now. /sessions to go back.` });
       return;
@@ -459,7 +461,7 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
     case 'rewindConversation': {
       const fork = await api.rewindConversation(effect.sessionId, effect.index);
       dispatch({ type: 'sessionForked', sessionId: fork.sessionId, goal: fork.goal });
-      dispatch({ type: 'chatRestored', history: (fork.plan as { conversationHistory?: ConversationMessage[] }).conversationHistory ?? [], sessionId: fork.sessionId });
+      dispatch(restoredChat(fork.plan, fork.sessionId));
       dispatch({ type: 'planUpdated', plan: fork.plan, sessionId: fork.sessionId });
       dispatch({ type: 'inputPrefilled', text: fork.rewoundMessage, sessionId: fork.sessionId });
       dispatch({ type: 'notice', message: `Forked ${effect.sessionId} into ${fork.sessionId} from before that message — the original is kept (/sessions to go back). The message is ready to edit and resend.` });
@@ -470,7 +472,7 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
     // user gets to read — no separate notice to repeat it.
     case 'compactConversation': {
       const { plan } = await api.compactConversation(effect.sessionId);
-      dispatch({ type: 'chatRestored', history: (plan as { conversationHistory?: ConversationMessage[] }).conversationHistory ?? [], sessionId: effect.sessionId });
+      dispatch(restoredChat(plan, effect.sessionId));
       dispatch({ type: 'planUpdated', plan, sessionId: effect.sessionId });
       return;
     }
@@ -621,118 +623,95 @@ async function withExecutionStream(
   await stream;
 }
 
+/** A streamed text piece: one of many that arrive in a burst and read as one. */
+type Delta = Extract<SessionMessage, { type: 'planner_text_delta' | 'planner_thinking_delta' | 'plan_thinking' | 'plan_token' }>;
+
+function isDelta(message: SessionMessage): message is Delta {
+  return message.type === 'planner_text_delta' || message.type === 'planner_thinking_delta'
+    || message.type === 'plan_thinking' || message.type === 'plan_token';
+}
+
+/** Two deltas as one, when the second continues the same stream; otherwise null. */
+function joinDeltas(held: Delta, next: Delta): Delta | null {
+  if (held.type === 'planner_text_delta' && next.type === 'planner_text_delta') {
+    return held.turnId === next.turnId && held.segmentId === next.segmentId ? { ...held, text: held.text + next.text } : null;
+  }
+  if (held.type === 'planner_thinking_delta' && next.type === 'planner_thinking_delta') {
+    const same = held.turnId === next.turnId && held.segmentId === next.segmentId && held.subagentId === next.subagentId;
+    return same ? { ...held, text: held.text + next.text } : null;
+  }
+  if (held.type === 'plan_thinking' && next.type === 'plan_thinking') {
+    return held.turnId === next.turnId && held.subagentId === next.subagentId ? { ...held, text: held.text + next.text } : null;
+  }
+  if (held.type === 'plan_token' && next.type === 'plan_token') {
+    return held.turnId === next.turnId ? { ...held, token: held.token + next.token } : null;
+  }
+  return null;
+}
+
 /**
- * One planner turn: research progress streams over the websocket while the
- * REST call is in flight, and the reply is either a question or a plan.
+ * One planner turn: its messages stream over the websocket while the REST call
+ * is in flight, and the reply is either a question or a plan.
  */
-async function converse(deps: EffectDeps, sessionId: string, call: () => Promise<any>): Promise<void> {
+async function converse(deps: EffectDeps, sessionId: string, call: () => Promise<unknown>): Promise<void> {
   // What the socket already delivered for this turn. The plan the REST call
   // returns carries the same reply as its last assistant entry, so without this
   // the turn is spoken twice — see `alreadySpoken`, which catches the remaining
   // case of two subscriptions to one channel during a run.
   let streamed: string | null = null;
 
-  // Rapid plan_token deltas are coalesced into one dispatch instead of one per
-  // token — see layout.ts's array-identity memoization for the same reasoning.
-  // Flushed immediately whenever a different event type lands in the same
-  // callback, so dispatch order stays exactly chronological relative to those.
-  const TOKEN_DEBOUNCE_MS = 75;
-  let tokenBuffer = '';
-  let tokenTimer: ReturnType<typeof setTimeout> | null = null;
+  // A burst of deltas is held and dispatched as one, so a fast stream repaints
+  // once per burst rather than once per token. Anything that is not the same
+  // stream's next piece flushes it first: dispatch order stays exactly the
+  // order the session sent.
+  const DELTA_DEBOUNCE_MS = 75;
+  let held: Delta | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
 
-  const flushTokens = (): void => {
-    if (tokenTimer !== null) {
-      clearTimeout(tokenTimer);
-      tokenTimer = null;
+  const pass = (message: SessionMessage): void => deps.dispatch({ type: 'sessionMessage', message, sessionId });
+  const flush = (): void => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
     }
-    if (!tokenBuffer) return;
-    const text = tokenBuffer;
-    tokenBuffer = '';
-    deps.dispatch({ type: 'plannerToken', text, sessionId });
+    if (held === null) return;
+    const message = held;
+    held = null;
+    pass(message);
   };
 
   const stream = deps.api.streamPlanning(sessionId, (event) => {
-    const token = event?.type === 'plan_token' ? event.token : event?.type === 'planner_text_delta' ? event.text : '';
-    if (token) {
-      tokenBuffer += token;
-      if (tokenTimer === null) {
-        tokenTimer = setTimeout(flushTokens, TOKEN_DEBOUNCE_MS);
-      }
-      return;
-    }
-    // The rest of a turn's stream waits for the shared conversation view
-    // (#52); dropped here, it neither renders nor splits a token burst.
-    switch (event?.type) {
-      case 'planner_turn_started':
-      case 'planner_turn_ended':
-      case 'planner_text_retracted':
-      case 'planner_usage':
-      case 'subagent_started':
-      case 'subagent_finished':
+    // A run's notices reach the user through the execution stream.
+    if (!event || event.type === 'notice') return;
+    if (isDelta(event)) {
+      const joined = held && joinDeltas(held, event);
+      if (joined) {
+        held = joined;
         return;
-    }
-    flushTokens();
-    if (event?.type === 'approval_request') {
-      deps.dispatch({
-        type: 'approvalRequested',
-        sessionId,
-        request: { id: event.id, kind: event.kind, subject: event.subject, scope: event.scope, detail: event.detail },
-      });
+      }
+      flush();
+      held = event;
+      timer = setTimeout(flush, DELTA_DEBOUNCE_MS);
       return;
     }
-    if (event?.type === 'approval_settled') {
-      deps.dispatch({ type: 'approvalSettled', sessionId, approvalId: event.id });
-      return;
-    }
-    if (event?.type === 'approval_decided') {
-      deps.dispatch({ type: 'notice', message: describeApprovalDecision(event) });
-      return;
-    }
-    if (event?.type === 'research_step') {
-      const summary = summarizeToolCall(event.tool, event.args || '{}', event.toolLabel);
-      deps.dispatch({
-        type: 'researchStep',
-        summary: event.subagentId ? `↳ ${summary}` : summary,
-        toolCallId: event.toolCallId,
-        sessionId,
-      });
-      return;
-    }
-    if (event?.type === 'research_step_done' && event.step) {
-      const step = event.step;
-      const summary = summarizeToolCall(step.tool, step.args, step.toolLabel);
-      deps.dispatch({
-        type: 'researchStepDone',
-        summary: event.subagentId ? `↳ ${summary}` : summary,
-        toolCallId: step.toolCallId,
-        outcome: step.outcome,
-        result: step.result ?? '',
-        sessionId,
-      });
-      return;
-    }
-    if (event?.type === 'planner_message') {
-      streamed = String(event.content ?? '');
-      deps.dispatch({ type: 'plannerMessage', content: streamed, sessionId });
-      return;
-    }
-    if ((event?.type === 'plan_thinking' || event?.type === 'planner_thinking_delta') && event.text) {
-      deps.dispatch({ type: 'plannerThinking', text: event.text, sessionId });
-    }
+    flush();
+    if (event.type === 'planner_message') streamed = event.content;
+    pass(event);
   });
 
   try {
     const plan = await call();
+    flush();
     // Speak the turn before `planUpdated` settles it: the settle is also what
     // drains the next queued prompt, so the reply would otherwise land after
     // the prompt that queue sent, in the wrong order.
     const question = lastAssistantMessage(plan);
     if (question && question !== streamed) {
-      deps.dispatch({ type: 'plannerMessage', content: question, sessionId });
+      pass({ type: 'planner_message', content: question, timestamp: new Date().toISOString() });
     }
     deps.dispatch({ type: 'planUpdated', plan, sessionId });
   } finally {
-    if (tokenTimer !== null) clearTimeout(tokenTimer);
+    flush();
     stream.close();
   }
 }
@@ -752,12 +731,24 @@ function describeApprovalDecision(event: Extract<WsEvent, { type: 'approval_deci
   return `${event.granted ? 'Auto-approved' : 'Auto-denied'} (${label}): ${event.subject}`;
 }
 
-function lastAssistantMessage(plan: any): string | null {
-  const history = (plan?.conversationHistory ?? []) as { role: string; content: string }[];
+function lastAssistantMessage(plan: unknown): string | null {
+  const history = (plan as Pick<LegacyPlanState, 'conversationHistory'> | null)?.conversationHistory ?? [];
   for (let i = history.length - 1; i >= 0; i--) {
     if (history[i].role === 'assistant') return history[i].content;
   }
   return null;
+}
+
+/** The conversation a saved plan reopens with: its transcript, research log and token line. */
+function restoredChat(plan: unknown, sessionId: string): Action {
+  const saved = plan as Pick<LegacyPlanState, 'conversationHistory' | 'researchLog' | 'plannerUsage'> | null;
+  return {
+    type: 'chatRestored',
+    history: saved?.conversationHistory ?? [],
+    ...(saved?.researchLog ? { researchLog: saved.researchLog } : {}),
+    ...(saved?.plannerUsage ? { plannerUsage: saved.plannerUsage } : {}),
+    sessionId,
+  };
 }
 
 /**
@@ -798,12 +789,15 @@ function onExecutionEvent(dispatch: (action: Action) => void, event: WsEvent, se
       dispatch({ type: 'notice', message: 'Plan approved.' });
       return;
 
+    // Its transcript also carries the plan's marker for the conversation — a
+    // run's queued edit is reconciled by the planner with no turn of its own.
     case 'plan_generated':
+      dispatch({ type: 'sessionMessage', message: event, sessionId });
       dispatch({ type: 'planUpdated', plan: event.plan, sessionId });
       return;
 
     case 'planner_message':
-      dispatch({ type: 'plannerMessage', content: String(event.content ?? ''), sessionId });
+      dispatch({ type: 'sessionMessage', message: event, sessionId });
       return;
 
     // The orchestrator paused fan-out because a structural edit is queued; drain

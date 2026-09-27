@@ -1,166 +1,94 @@
 import { describe, it, expect } from 'vitest';
+import type { ResearchStepOutcome, SessionMessage, ToolBlock } from '@ordewell/core';
 import { initialState, reduce, type Action } from '../reducer';
-import { researchLine } from '../layout';
-import type { ChatMessage, TuiState } from '../state';
+import type { TuiState } from '../state';
 
+const hear = (message: SessionMessage, sessionId?: string): Action => ({ type: 'sessionMessage', message, ...(sessionId ? { sessionId } : {}) });
 const send = (state: TuiState, action: Action) => reduce(state, action).state;
-const drive = (state: TuiState, actions: Action[]) => actions.reduce(send, state);
+const drive = (state: TuiState, messages: SessionMessage[]) => messages.map((m) => hear(m)).reduce(send, state);
 
 const planning = (): TuiState => ({ ...initialState(), status: 'planning' });
 
-const call = (summary: string, toolCallId?: string): Action =>
-  ({ type: 'researchStep', summary, toolCallId });
+const call = (path: string, toolCallId?: string): SessionMessage =>
+  ({ type: 'research_step', tool: 'read_file', args: JSON.stringify({ path }), ...(toolCallId ? { toolCallId } : {}) });
 
-const done = (
-  summary: string,
-  overrides: Partial<Extract<Action, { type: 'researchStepDone' }>> = {},
-): Action => ({ type: 'researchStepDone', summary, outcome: 'success', result: '', ...overrides });
+const done = (path: string, toolCallId?: string, outcome: ResearchStepOutcome = 'success', result = ''): SessionMessage => ({
+  type: 'research_step_done',
+  step: {
+    id: `rs-${path}`, tool: 'read_file', args: JSON.stringify({ path }), result, success: outcome === 'success', outcome,
+    timestamp: '2026-09-27T10:00:00.000Z', ...(toolCallId ? { toolCallId } : {}),
+  },
+});
 
-const research = (state: TuiState): ChatMessage[] => state.messages.filter((m) => m.role === 'research');
+const tools = (state: TuiState): ToolBlock[] => state.conversation.blocks.filter((b): b is ToolBlock => b.type === 'tool');
 
-describe('researchStep', () => {
-  it('appends one transcript entry per call instead of overwriting the spinner', () => {
-    const s = drive(planning(), [call('read_file a.ts', 't1'), call('read_file b.ts', 't2')]);
+describe('research calls during a planner turn', () => {
+  it('adds one command block per call instead of overwriting the spinner', () => {
+    const s = drive(planning(), [call('a.ts', 't1'), call('b.ts', 't2')]);
 
-    expect(research(s).map((m) => m.content)).toEqual(['read_file a.ts', 'read_file b.ts']);
+    expect(tools(s).map((t) => t.headline)).toEqual([{ name: 'Read', keyArg: 'a.ts' }, { name: 'Read', keyArg: 'b.ts' }]);
   });
 
-  it('counts the rest of a parallel round on the spinner label', () => {
-    const s = drive(planning(), [call('read_file a.ts', 't1'), call('read_file b.ts', 't2'), call('grep foo', 't3')]);
+  it('names the newest call on the spinner and counts the rest of a parallel round', () => {
+    const s = drive(planning(), [call('a.ts', 't1'), call('b.ts', 't2'), call('c.ts', 't3')]);
 
-    expect(s.busyLabel).toBe('grep foo (+2 more)');
+    expect(s.busyLabel).toBe('Read(c.ts) (+2 more)');
   });
 
   it('flips the status to researching so the footer stops claiming it is planning', () => {
-    expect(send(planning(), call('grep auth', 't1')).status).toBe('researching');
+    expect(drive(planning(), [call('a.ts', 't1')]).status).toBe('researching');
   });
 
   it('leaves an executing run alone — research steps belong to the planner', () => {
-    const executing: TuiState = { ...initialState(), status: 'executing' };
-    expect(send(executing, call('grep auth', 't1')).status).toBe('executing');
+    const executing: TuiState = { ...initialState(), status: 'executing', busyLabel: 'Write the tests' };
+    const s = drive(executing, [call('a.ts', 't1')]);
+
+    expect(s.status).toBe('executing');
+    expect(s.busyLabel).toBe('Write the tests');
   });
 
-  it('ignores steps from a session that /new has replaced', () => {
-    const s = send({ ...planning(), sessionId: 's2' }, { type: 'researchStep', summary: 'grep old', sessionId: 's1' });
+  it('ignores messages from a session that /new has replaced', () => {
+    const s = send({ ...planning(), sessionId: 's2' }, hear(call('old.ts', 't1'), 's1'));
 
-    expect(research(s)).toEqual([]);
-  });
-});
-
-describe('researchStepDone', () => {
-  it('settles the matching entry with its result and outcome', () => {
-    const s = drive(planning(), [
-      call('read_file a.ts', 't1'),
-      done('read_file a.ts', { toolCallId: 't1', result: 'export const a = 1;' }),
-    ]);
-
-    expect(research(s)[0].research).toEqual({
-      toolCallId: 't1',
-      outcome: 'success',
-      result: 'export const a = 1;',
-    });
+    expect(s.conversation.blocks).toEqual([]);
   });
 
-  it('matches by tool_call id, not by arrival order, across a parallel round', () => {
-    const s = drive(planning(), [
-      call('read_file a.ts', 't1'),
-      call('read_file b.ts', 't2'),
-      done('read_file b.ts', { toolCallId: 't2', result: 'b body' }),
-    ]);
+  it('settles the call its result names, by tool_call id, across a parallel round', () => {
+    const s = drive(planning(), [call('a.ts', 't1'), call('b.ts', 't2'), done('b.ts', 't2', 'success', 'b body')]);
 
-    const [first, second] = research(s);
-    expect(first.research?.outcome).toBeUndefined();
-    expect(second.research?.result).toBe('b body');
+    expect(tools(s).map((t) => [t.status, t.output])).toEqual([['pending', ''], ['ok', 'b body']]);
   });
 
-  it('falls back to the summary when the stream reports no tool_call id', () => {
-    const s = drive(planning(), [call('grep auth'), done('grep auth', { result: '3 matches' })]);
+  it('keeps naming the call still out once the other settles', () => {
+    const s = drive(planning(), [call('a.ts', 't1'), call('b.ts', 't2'), done('a.ts', 't1')]);
 
-    expect(research(s)[0].research?.result).toBe('3 matches');
-  });
-
-  it('clears the spinner label once every call has settled', () => {
-    const s = drive(planning(), [
-      call('read_file a.ts', 't1'),
-      call('read_file b.ts', 't2'),
-      done('read_file a.ts', { toolCallId: 't1' }),
-    ]);
-    expect(s.busyLabel).toBe('read_file b.ts');
-
-    const settled = send(s, done('read_file b.ts', { toolCallId: 't2' }));
-    expect(settled.busyLabel).toBe('');
-  });
-
-  it('hands the status back to planning once the round is over and the model is thinking again', () => {
-    const s = drive(planning(), [
-      call('read_file a.ts', 't1'),
-      call('read_file b.ts', 't2'),
-      done('read_file a.ts', { toolCallId: 't1' }),
-    ]);
+    expect(s.busyLabel).toBe('Read(b.ts)');
     expect(s.status).toBe('researching');
-
-    expect(send(s, done('read_file b.ts', { toolCallId: 't2' })).status).toBe('planning');
   });
 
-  it('leaves the transcript alone when nothing matches', () => {
-    const s = drive(planning(), [call('read_file a.ts', 't1'), done('grep other', { toolCallId: 'unknown' })]);
+  it('hands the status back to planning, and clears the label, once the round is over', () => {
+    const s = drive(planning(), [call('a.ts', 't1'), call('b.ts', 't2'), done('a.ts', 't1'), done('b.ts', 't2')]);
 
-    expect(research(s)).toHaveLength(1);
-    expect(research(s)[0].research?.outcome).toBeUndefined();
-  });
-});
-
-describe('researchLine', () => {
-  const line = (state: TuiState) => researchLine(research(state)[0]);
-
-  it('marks a pending call', () => {
-    expect(line(send(planning(), call('bash rm -rf /', 't1')))).toBe('⋯ bash rm -rf /');
+    expect(s.status).toBe('planning');
+    expect(s.busyLabel).toBe('');
   });
 
-  it('renders success, failure, refusal, denial and non-execution distinctly', () => {
-    const outcomes = ['success', 'failure', 'refused', 'denied', 'not_executed'] as const;
-    const marks = outcomes.map((outcome) =>
-      line(drive(planning(), [call('bash rm -rf /', 't1'), done('bash rm -rf /', { toolCallId: 't1', outcome })])),
-    );
+  it('counts a running subagent as work in flight, its brief flattened onto the one-row label', () => {
+    const s = drive(planning(), [{ type: 'subagent_started', subagentId: 'sa1', brief: 'find the auth handlers\n\tin src/ only' }]);
 
-    expect(marks).toEqual([
-      '✓ bash rm -rf /',
-      '✗ bash rm -rf /',
-      '⊘ bash rm -rf /',
-      '⊘ bash rm -rf /',
-      '– bash rm -rf /',
-    ]);
-  });
-
-  it('appends a one-line, truncated result preview', () => {
-    const s = drive(planning(), [
-      call('read_file a.ts', 't1'),
-      done('read_file a.ts', { toolCallId: 't1', result: `line one\nline two${'x'.repeat(200)}` }),
-    ]);
-
-    const rendered = line(s);
-    expect(rendered.startsWith('✓ read_file a.ts → line one line two')).toBe(true);
-    expect(rendered).not.toContain('\n');
-    expect(rendered.endsWith('…')).toBe(true);
+    expect(s.status).toBe('researching');
+    expect(s.busyLabel).toBe('Agent(find the auth handlers in src/ only)');
   });
 });
 
-describe('plannerThinking', () => {
-  it('accumulates reasoning deltas onto the status row, capped to a tail', () => {
+describe('planner thinking', () => {
+  it('becomes a thinking block in the conversation, not a status-row tail', () => {
     const s = drive(planning(), [
-      { type: 'plannerThinking', text: 'a'.repeat(500) },
-      { type: 'plannerThinking', text: 'tail end' },
+      { type: 'plan_thinking', text: 'weighing ' },
+      { type: 'plan_thinking', text: 'the options' },
     ]);
 
-    expect(s.thinkingLine).toHaveLength(400);
-    expect(s.thinkingLine.endsWith('tail end')).toBe(true);
-    expect(s.messages).toEqual([]);
-  });
-
-  it('is dropped when the planner turn ends', () => {
-    const thinking = send(planning(), { type: 'plannerThinking', text: 'considering auth' });
-    const replied = send(thinking, { type: 'plannerMessage', content: 'Which module?' });
-
-    expect(replied.thinkingLine).toBe('');
+    expect(s.conversation.blocks).toMatchObject([{ type: 'thinking', text: 'weighing the options', streaming: true }]);
+    expect(s.status).toBe('planning');
   });
 });

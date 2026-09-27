@@ -4,6 +4,7 @@ import { render } from '../render';
 import { style } from '../ansi';
 import { registerSkillCommands } from '../slash';
 import type { TaskView, TuiState } from '../state';
+import { lastMessage, messagesOf } from './chat';
 
 /**
  * Prompts typed while a planner turn answers hold in a visible queue instead
@@ -37,7 +38,7 @@ describe('submitting while a planner turn is in flight', () => {
 
     expect(effects).toEqual([]);
     expect(state.queuedPrompts).toEqual(['also cover caching']);
-    expect(state.messages.some((m) => m.role === 'user')).toBe(false);
+    expect(messagesOf(state).some((m) => m.role === 'user')).toBe(false);
     expect(state.editor.text).toBe('');
   });
 
@@ -52,7 +53,7 @@ describe('submitting while a planner turn is in flight', () => {
     const second = submitInto(first, 'two');
 
     expect(second.queuedPrompts).toEqual(['one', 'two']);
-    expect(second.messages.every((m) => m.role !== 'user')).toBe(true);
+    expect(messagesOf(second).every((m) => m.role !== 'user')).toBe(true);
   });
 
   it('still sends immediately when no turn is in flight', () => {
@@ -84,7 +85,7 @@ describe('the turn settling sends the next queued prompt', () => {
       sessionId: 'session-1',
     });
 
-    expect(after.messages.at(-1)).toMatchObject({ role: 'user', content: 'follow up' });
+    expect(lastMessage(after)).toMatchObject({ role: 'user', text: 'follow up' });
     expect(after.status).toBe('planning');
     expect(after.queuedPrompts).toEqual([]);
     expect(effects).toEqual([{ type: 'sendMessage', sessionId: 'session-1', message: 'follow up' }]);
@@ -96,7 +97,7 @@ describe('the turn settling sends the next queued prompt', () => {
 
     const first = reduce(state, { type: 'planUpdated', plan: {}, sessionId: 'session-1' });
     expect(first.state.queuedPrompts).toEqual(['two']);
-    expect(first.state.messages.at(-1)).toMatchObject({ role: 'user', content: 'one' });
+    expect(lastMessage(first.state)).toMatchObject({ role: 'user', text: 'one' });
     expect(first.state.status).toBe('planning');
 
     // The second settle's plan carries no tasks, so the turn it names ends
@@ -108,7 +109,7 @@ describe('the turn settling sends the next queued prompt', () => {
       sessionId: 'session-1',
     });
     expect(second.state.queuedPrompts).toEqual([]);
-    expect(second.state.messages.filter((m) => m.role === 'user').map((m) => m.content)).toEqual(['one', 'two']);
+    expect(messagesOf(second.state).filter((m) => m.role === 'user').map((m) => m.text)).toEqual(['one', 'two']);
     // The drain that sent the last prompt started the next turn.
     expect(second.state.status).toBe('planning');
   });
@@ -119,7 +120,7 @@ describe('the turn settling sends the next queued prompt', () => {
 
     expect(effects).toEqual([{ type: 'sendMessage', sessionId: 'session-1', message: 'follow up' }]);
     expect(after.status).toBe('planning');
-    expect(after.messages.some((m) => m.role === 'error')).toBe(true);
+    expect(messagesOf(after).some((m) => m.role === 'error')).toBe(true);
   });
 
   it('an idle failure does not drain the queue — only a turn ending does', () => {
@@ -140,7 +141,7 @@ describe('the turn settling sends the next queued prompt', () => {
       const state = run('/grilling-after', planningState()).state;
       const { state: after } = reduce(state, { type: 'planUpdated', plan: {}, sessionId: 'session-1' });
 
-      expect(after.messages.at(-1)).toMatchObject({ role: 'user', content: '/grilling-after' });
+      expect(lastMessage(after)).toMatchObject({ role: 'user', text: '/grilling-after' });
     } finally {
       registerSkillCommands([]);
     }
@@ -311,7 +312,7 @@ describe('leftover queue on a settling turn whose queue was emptied another way'
     expect(unsent.editor.cursor).toBe(3);
 
     const settled = reduce(unsent, { type: 'planUpdated', plan: {}, sessionId: 'session-1' });
-    expect(settled.state.messages.at(-1)).toMatchObject({ role: 'user', content: 'one' });
+    expect(lastMessage(settled.state)).toMatchObject({ role: 'user', text: 'one' });
     expect(settled.state.editor.text).toBe('two');
   });
 });

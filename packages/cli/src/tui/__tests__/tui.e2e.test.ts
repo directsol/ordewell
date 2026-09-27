@@ -5,6 +5,7 @@ import { openTerminal, type Terminal } from '../terminal';
 import { runEffect, type OrdewellApi } from '../effects';
 import { stripAnsi } from '../ansi';
 import type { RewindTargetView } from '../state';
+import { messagesOf } from './chat';
 
 /**
  * End-to-end: raw stdin bytes → terminal key decoding → reducer → real
@@ -125,6 +126,7 @@ function fakeDaemon() {
     api: api as unknown as OrdewellApi,
     mocks: api,
     log,
+    emitPlanning: (event: unknown) => planningListener?.(event),
     emitExecution: (event: unknown) => executionListener?.(event),
     endExecution: () => settleExecution(),
   };
@@ -248,6 +250,46 @@ describe('TUI end to end', () => {
     expect(h.app.getState().sessionId).toBe('session-1');
   });
 
+  it('draws the turn as the shared view: a command row with its preview, the streamed reply, and the token line', async () => {
+    const h = harness();
+    h.daemon.mocks.startConversation.mockImplementationOnce(async () => {
+      const emit = h.daemon.emitPlanning;
+      emit({ type: 'planner_turn_started', turnId: 't1', prompt: 'Build the login flow' });
+      emit({ type: 'research_step', tool: 'bash', args: '{"command":"ls src"}', toolCallId: 'c1', turnId: 't1' });
+      emit({
+        type: 'research_step_done', turnId: 't1',
+        step: { id: 'r1', tool: 'bash', args: '{"command":"ls src"}', result: 'LoginRoute.ts\nSession.ts\nauth.ts\nmiddleware.ts\nroutes.ts', success: true, outcome: 'success', toolCallId: 'c1', timestamp: '' },
+      });
+      emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Plan drafted — ' });
+      emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'anything to change?' });
+      emit({ type: 'planner_message', content: 'Plan drafted — anything to change?', timestamp: '', turnId: 't1' });
+      emit({ type: 'planner_usage', turnId: 't1', totals: { inputTokens: 12_400, outputTokens: 3_100 }, contextFill: { usedTokens: 36_000, windowTokens: 200_000 } });
+      emit({ type: 'planner_turn_ended', turnId: 't1', outcome: 'plan' });
+      await Promise.resolve();
+      return planPayload();
+    });
+
+    h.type('Build the login flow');
+    h.type('\r');
+    await vi.waitFor(() => expect(h.screen()).toContain('Add the login route'));
+
+    const chat = h.screen().split('\n').map((line) => (line.includes('│') ? line.slice(0, line.indexOf('│')) : line).trimEnd());
+    const header = chat.findIndex((line) => line.startsWith('● Bash(ls src)'));
+    expect(chat.slice(header, header + 5)).toEqual([
+      '● Bash(ls src)',
+      '  ⎿  LoginRoute.ts',
+      '     Session.ts',
+      '     auth.ts',
+      '     … +2 lines (ctrl+o to expand)',
+    ]);
+    expect(h.transcript()).toContain('◆ Plan drafted — anything to change?');
+    // The prompt the turn answers is the line already shown, not a second copy of it.
+    expect(messagesOf(h.app.getState()).filter((m) => m.role === 'user')).toHaveLength(1);
+    // Pinned to the chat pane's last row: above the status row, which sits above the input.
+    const input = chat.findIndex((line, i) => i > header && line.startsWith('❯'));
+    expect(chat[input - 2]).toBe('12.4k in · 3.1k out · 18% ctx');
+  });
+
   it('a bracketed paste with a newline lands in the editor without submitting', async () => {
     const h = harness();
     h.type('\x1b[200~first line\nsecond line\x1b[201~');
@@ -309,7 +351,7 @@ describe('TUI end to end', () => {
     await vi.waitFor(() => expect(h.daemon.mocks.sendConversationMessage).toHaveBeenCalledWith('session-1', 'Use SQLite'));
     // No longer queued — it is a spoken turn now.
     expect(h.app.getState().queuedPrompts).toEqual([]);
-    expect(h.app.getState().messages.some((m) => m.role === 'user' && m.content === 'Use SQLite')).toBe(true);
+    expect(messagesOf(h.app.getState()).some((m) => m.role === 'user' && m.text === 'Use SQLite')).toBe(true);
   });
 
   it('esc takes a queued prompt back into the editor while the turn keeps running', async () => {
@@ -562,7 +604,7 @@ describe('TUI end to end', () => {
     expect(h.app.getState().tasks).toEqual([]);
     // The rejected close must not surface in the fresh session's transcript.
     await settle();
-    expect(h.app.getState().messages.some((m) => m.role === 'error')).toBe(false);
+    expect(messagesOf(h.app.getState()).some((m) => m.role === 'error')).toBe(false);
 
     h.type('Fresh goal');
     h.type('\r');
@@ -685,8 +727,8 @@ describe('TUI end to end', () => {
     await settle();
 
     h.app.dispatch({
-      type: 'approvalRequested',
-      request: { id: 'a1', kind: 'shell_command', subject: 'npm test', scope: 'once' },
+      type: 'sessionMessage',
+      message: { type: 'approval_request', id: 'a1', kind: 'shell_command', subject: 'npm test', scope: 'once' },
     });
     await settle();
     expect(h.screen()).toContain('npm test');
@@ -699,7 +741,7 @@ describe('TUI end to end', () => {
     expect(h.screen()).toContain('npm test');
     expect(h.screen()).not.toBe(withOverlay);
 
-    h.app.dispatch({ type: 'approvalSettled', approvalId: 'a1' });
+    h.app.dispatch({ type: 'sessionMessage', message: { type: 'approval_settled', id: 'a1', granted: true } });
     await settle();
     expect(h.app.getState().overlay).toBeNull();
     const noOverlay = h.screen();
@@ -851,7 +893,7 @@ describe('TUI end to end', () => {
     }));
     h.type('Use email based auth');
     h.type('\r');
-    await vi.waitFor(() => expect(h.app.getState().messages.map((m) => m.content)).toContain('Use email based auth'));
+    await vi.waitFor(() => expect(messagesOf(h.app.getState()).map((m) => m.text)).toContain('Use email based auth'));
     await vi.waitFor(() => expect(h.app.getState().status).toBe('idle'));
 
     // D/E: `/rewind` picks that follow-up message and, through the popup,
@@ -892,10 +934,10 @@ describe('TUI end to end', () => {
     // The chat is truncated to just before the rewound message — the follow-up
     // itself is gone from the restored transcript, kept only in the prefilled input.
     // (A trailing notice about the fork follows the two restored messages.)
-    expect(h.app.getState().messages.map((m) => m.content).slice(0, 2)).toEqual([
+    expect(messagesOf(h.app.getState()).map((m) => m.text).slice(0, 2)).toEqual([
       'Build the login flow',
       'Which auth provider?',
     ]);
-    expect(h.app.getState().messages.some((m) => m.content === 'Use email based auth')).toBe(false);
+    expect(messagesOf(h.app.getState()).some((m) => m.text === 'Use email based auth')).toBe(false);
   });
 });

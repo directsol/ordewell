@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { initialState, reduce } from '../reducer';
 import { planPaneWidth } from '../geometry';
 import type { TuiState } from '../state';
+import { lastMessage } from './chat';
 
 const press = (state: TuiState, name: string, char?: string) =>
   reduce(state, { type: 'key', key: { name, char } });
@@ -41,7 +42,7 @@ describe('first task on an empty plan', () => {
   it('with no session, /add-task says what to do', () => {
     const { state, effects } = submit(initialState({ cols: 120 }), '/add-task Foo');
     expect(effects).toEqual([]);
-    expect(state.messages.at(-1)?.content).toMatch(/describe a goal first, then \/add-task <title>/);
+    expect(lastMessage(state)?.text).toMatch(/describe a goal first, then \/add-task <title>/);
   });
 
   it('the plan-pane `a` key opens the prompt with zero tasks', () => {

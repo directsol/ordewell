@@ -1,7 +1,11 @@
-import { ALL_PROVIDERS, CLI_PROVIDERS, parseMaxParallel, PROVIDER_PRIORITY, runnerForProvider, type AiProvider, type ConversationMessage, type ResearchStepOutcome } from '@ordewell/core';
+import {
+  ALL_PROVIDERS, CLI_PROVIDERS, EMPTY_CONVERSATION, fromTranscript, parseMaxParallel, PROVIDER_PRIORITY, runnerForProvider,
+  type AiProvider, type ConversationMessage, type ConversationView, type DisplayBlock, type PlannerUsage, type ResearchLogEntry,
+  type SessionMessage,
+} from '@ordewell/core';
 import { dependencyCandidates, dependentsOf } from '@ordewell/core/plan-utils';
 import { sanitize } from './ansi';
-import { say } from './transcript';
+import { hear, say, wiped } from './transcript';
 import {
   blockedPicker, chooseBlocked, clearIsolation, confirmedHandoff, handleHandoffKey, handoffArrived, handoffCommand,
   isolationForPlan, sameIsolation, showDiff, type BlockedChoice,
@@ -17,7 +21,7 @@ import { selectedText } from './render';
 import { activeToken, findCommand, parseSlash, tokenCompletions, type ParsedCommand } from './slash';
 import {
   findTask, initialState, isTaskRunning, SKILL_IDS, planRows, selectedPlanRow, visibleItems,
-  type ApprovalRequestView, type Cell, type ChatMessage, type Focus, type ModeView,
+  type ApprovalRequestView, type Cell, type Focus, type ModeView,
   type ConfirmOption, type HandoffView, type LandedTaskView, type ModelView, type PickerItem, type PickerState, type RewindTargetView, type RunnerView, type Selection, type SessionView,
   type SkillId, type TaskIsolationView, type TaskView, type TuiState,
 } from './state';
@@ -87,16 +91,12 @@ export type Action =
   | { type: 'key'; key: Key }
   | { type: 'sessionStarted'; sessionId: string; goal: string }
   | { type: 'sessionCleared' }
-  | { type: 'chatRestored'; history: ConversationMessage[]; sessionId?: string }
+  /** A saved session's records, which the conversation is rebuilt from as a reload would show it. */
+  | { type: 'chatRestored'; history: ConversationMessage[]; researchLog?: ResearchLogEntry[]; plannerUsage?: PlannerUsage; sessionId?: string }
   | { type: 'planUpdated'; plan: unknown; sessionId?: string }
-  | { type: 'plannerMessage'; content: string; sessionId?: string }
-  | { type: 'plannerToken'; text: string; sessionId?: string }
-  | { type: 'researchStep'; summary: string; toolCallId?: string; sessionId?: string }
+  /** One planner message from the session, as it came: core's conversation view decides what it shows. */
+  | { type: 'sessionMessage'; message: SessionMessage; sessionId?: string }
   | { type: 'taskStarted'; taskId: string; title: string; runner?: string; sessionId?: string }
-  | { type: 'researchStepDone'; summary: string; toolCallId?: string; outcome: ResearchStepOutcome; result: string; sessionId?: string }
-  | { type: 'plannerThinking'; text: string; sessionId?: string }
-  | { type: 'approvalRequested'; request: ApprovalRequestView; sessionId?: string }
-  | { type: 'approvalSettled'; approvalId: string; sessionId?: string }
   | { type: 'taskStatus'; taskId: string; status: string; sessionId?: string }
   | { type: 'tasksStatus'; updates: Record<string, { status: string; idleSince?: string | null; isolation?: TaskIsolationView }>; sessionId?: string }
   | { type: 'isolationBlocked'; message: string; repos?: string[]; sessionId?: string }
@@ -135,22 +135,6 @@ function step(state: TuiState, effects: Effect[] = []): Step {
 }
 
 /**
- * A loaded session's persisted dialogue (ADR-0002) rebuilt as transcript
- * entries. `plan_generated` is a timeline marker, not a spoken turn — the plan
- * pane already shows the plan itself, so it becomes a system note rather than
- * an inline card (the TUI has no equivalent of the webview's plan anchor).
- */
-function restoredMessages(history: ConversationMessage[]): ChatMessage[] {
-  return history.map((entry) => ({
-    role: entry.kind === 'plan_generated' || entry.kind === 'system' || entry.kind === 'compaction' ? 'system' : entry.role,
-    content: sanitize(entry.kind === 'plan_generated' ? 'Plan generated.' : entry.content),
-    timestamp: entry.timestamp,
-  }));
-}
-
-const isPendingResearch = (m: ChatMessage): boolean => m.role === 'research' && !m.research?.outcome;
-
-/**
  * A planner turn ending is the moment the next queued prompt goes out. The
  * actions that end a turn (`planUpdated`'s settle branch, `failed`) funnel
  * through here: one prompt is spoken and sent, and the status says planning
@@ -170,35 +154,33 @@ function drainQueue(state: TuiState, settled: TuiState): Step {
     ? { type: 'sendMessage', sessionId: state.sessionId, message: next }
     : null;
   return step(
-    { ...spoken, queuedPrompts: rest, status: 'planning', busyLabel: '', thinkingLine: '' },
+    { ...spoken, queuedPrompts: rest, status: 'planning', busyLabel: '' },
     effect ? [effect] : [],
   );
 }
 
 /**
- * Whether this is the planner's newest turn arriving a second time.
+ * Whether this is the planner's newest reply arriving a second time.
  *
- * One turn can reach the TUI twice: the daemon broadcasts `planner_message` on
+ * One reply can reach the TUI twice: the daemon broadcasts `planner_message` on
  * the session socket *and* leaves it as the last assistant entry in the plan it
  * returns, and while a run is live there are two subscriptions to that one
- * channel (planning and execution). Only a repeat of the newest turn counts —
+ * channel (planning and execution). Only a repeat of the newest reply counts —
  * scoped to "nothing has been said since" so a planner legitimately repeating
- * itself on a later turn still gets its line.
+ * itself on a later turn still gets its line. A streamed segment still waiting
+ * for its reply is not spoken yet: the reply is what settles it.
  */
-function alreadySpoken(messages: ChatMessage[], content: string): boolean {
-  const last = findLastIndex(messages, (m) => m.role === 'assistant' || m.role === 'user');
-  const spoken = last >= 0 && messages[last].role === 'assistant' && messages[last].content === content;
+function alreadySpoken(view: ConversationView, content: string): boolean {
+  const blocks = view.blocks.filter((b) => b.type !== 'usage');
+  const last = blocks.filter((b) => b.type === 'message' && (b.role === 'planner' || b.role === 'user')).at(-1);
+  const spoken = last?.type === 'message' && last.role === 'planner' && last.segmentId === undefined && last.text === content;
   // A compaction's summary is redrawn as a system entry, and the daemon's
   // notice of the same text may land on either side of that redraw.
-  const redrawn = messages.at(-1)?.role === 'system' && messages.at(-1)?.content === content;
+  const tail = blocks.at(-1);
+  const redrawn = tail?.type === 'message' && tail.role === 'system' && tail.text === content;
   return spoken || redrawn;
 }
 
-/**
- * A parallel tool round opens several calls at once. The spinner names the
- * newest and counts the rest, rather than flickering between filenames and
- * leaving the user with whichever one happened to land last.
- */
 /**
  * What a run is doing right now, from the tasks themselves. It used to be the
  * last `task_started` title, which went on naming a task long after it had
@@ -216,46 +198,46 @@ function runLabel(tasks: TaskView[]): string {
   return waiting === 1 ? '1 task waits for you' : `${waiting} tasks wait for you`;
 }
 
-function researchLabel(messages: ChatMessage[], summary: string): string {
-  const others = messages.filter(isPendingResearch).length - 1;
-  return others > 0 ? `${summary} (+${others} more)` : summary;
+/** A label for the status row, which is one row: text from a model flattened onto it. */
+const statusText = (text: string): string => sanitize(text).replace(/\s+/g, ' ').trim();
+
+/** What the conversation has in flight: calls awaiting their result, and subagents still at work, oldest first. */
+function inFlight(blocks: readonly DisplayBlock[]): string[] {
+  return blocks.flatMap((block): string[] => {
+    if (block.type === 'tool') return block.status === 'pending' ? [statusText(`${block.headline.name}(${block.headline.keyArg})`)] : [];
+    if (block.type !== 'subagent' || block.status !== 'running') return [];
+    return [statusText(`Agent(${block.brief})`), ...inFlight(block.children)];
+  });
 }
 
 /**
- * Settle the transcript entry this result belongs to. The id match is what
- * keeps a parallel round honest; the summary match is the fallback for a
- * stream that reports no tool_call id.
+ * The status row during a planner turn, read off the conversation: it says
+ * researching while a call is out, and names the newest one. A parallel round
+ * opens several calls at once, so it counts the rest rather than flickering
+ * between filenames and leaving whichever landed last.
  */
-function settleResearchStep(
-  messages: ChatMessage[],
-  action: Extract<Action, { type: 'researchStepDone' }>,
-): ChatMessage[] {
-  // The stored entry's content already went through `say`, so the no-id
-  // fallback match has to compare against the same sanitized form or a
-  // summary carrying a tab would never settle.
-  const summary = sanitize(action.summary);
-  const index = findLastIndex(messages, (m) =>
-    isPendingResearch(m) &&
-    (action.toolCallId ? m.research?.toolCallId === action.toolCallId : m.content === summary));
-  if (index < 0) return messages;
-
-  const next = [...messages];
-  next[index] = {
-    ...next[index],
-    research: { ...next[index].research, outcome: action.outcome, result: sanitize(action.result) },
-  };
-  return next;
+function turnActivity(state: TuiState): TuiState {
+  if (state.status !== 'planning' && state.status !== 'researching') return state;
+  const open = inFlight(state.conversation.blocks);
+  const status = open.length > 0 ? 'researching' : 'planning';
+  const newest = open.at(-1) ?? '';
+  const busyLabel = open.length > 1 ? `${newest} (+${open.length - 1} more)` : newest;
+  return status === state.status && busyLabel === state.busyLabel ? state : { ...state, status, busyLabel };
 }
 
-function findLastIndex<T>(items: T[], match: (item: T) => boolean): number {
-  for (let i = items.length - 1; i >= 0; i--) {
-    if (match(items[i])) return i;
+/**
+ * One planner message into the TUI. The conversation view takes all of it; an
+ * approval request also queues its modal, since the planner waits on the answer.
+ */
+function followSession(state: TuiState, message: SessionMessage): TuiState {
+  if (message.type === 'planner_message' && alreadySpoken(state.conversation, message.content)) return state;
+  const heard = turnActivity(hear(state, message));
+  if (message.type === 'approval_request') {
+    const { id, kind, subject, scope, detail } = message;
+    return enqueueApproval(heard, { id, kind, subject, scope, ...(detail ? { detail } : {}) });
   }
-  return -1;
+  return message.type === 'approval_settled' ? dropApproval(heard, message.id) : heard;
 }
-
-/** Enough reasoning to see the planner is thinking, not enough to scroll the frame. */
-const THINKING_TAIL = 400;
 
 const fail = (state: TuiState, message: string): Step => step(say(state, 'error', message));
 
@@ -292,19 +274,9 @@ export function reduce(state: TuiState, action: Action): Step {
         overlay: state.overlay?.kind === 'approval' ? null : state.overlay,
       });
 
-    case 'approvalRequested': {
-      if (stale(state, action.sessionId)) return step(state);
-      return step(enqueueApproval(state, action.request));
-    }
-
-    case 'approvalSettled': {
-      if (stale(state, action.sessionId)) return step(state);
-      return step(dropApproval(state, action.approvalId));
-    }
-
     case 'chatRestored':
       if (stale(state, action.sessionId)) return step(state);
-      return step({ ...state, messages: restoredMessages(action.history), scroll: 0 });
+      return step({ ...state, conversation: fromTranscript(action.history, action.researchLog, action.plannerUsage), scroll: 0 });
 
     case 'planUpdated': {
       if (stale(state, action.sessionId)) return step(state);
@@ -325,7 +297,6 @@ export function reduce(state: TuiState, action: Action): Step {
         handoff: isolation ? isolation.handoff : state.handoff,
         status: state.status === 'planning' || state.status === 'researching' ? 'idle' : state.status,
         busyLabel: '',
-        thinkingLine: '',
         expandedTaskId,
         taskEditor: expandedTaskId !== null ? state.taskEditor : null,
       };
@@ -343,55 +314,12 @@ export function reduce(state: TuiState, action: Action): Step {
       return drainQueue(state, settled);
     }
 
-    case 'plannerMessage': {
+    // A message never ends a turn: `planUpdated` does (see `converse`), so a
+    // queued prompt drains onto a settled state. Until then the status only
+    // says whether a call is out.
+    case 'sessionMessage':
       if (stale(state, action.sessionId)) return step(state);
-      // The turn's spinner is stopped by `planUpdated`, which is the action
-      // that ends a turn (see `converse`) — this only speaks the text, so a
-      // queued prompt can drain onto a settled state without this clobbering
-      // the next turn's status.
-      const settled: TuiState = { ...state, busyLabel: '', thinkingLine: '' };
-      // Sanitized before the comparison, not just before storage — `say`
-      // stores the sanitized form, so matching against the raw turn would
-      // never dedup a repeat that carries a tab.
-      const content = sanitize(action.content);
-      // A live `plan_token` stream left a partial bubble at the tail: settle it
-      // with the final text in place rather than appending a second entry.
-      const last = state.messages.at(-1);
-      if (last?.role === 'assistant' && last.streaming) {
-        const messages = [...state.messages];
-        messages[messages.length - 1] = { ...last, content, streaming: undefined };
-        return step({ ...settled, messages });
-      }
-      // Already on screen: the same turn reached us over both the session
-      // socket and the REST reply (see `converse`), so only the status settles.
-      if (alreadySpoken(state.messages, content)) return step(settled);
-      return step(say(settled, 'assistant', content));
-    }
-
-    case 'plannerToken': {
-      if (stale(state, action.sessionId)) return step(state);
-      const text = sanitize(action.text);
-      const last = state.messages.at(-1);
-      if (last?.role === 'assistant' && last.streaming) {
-        const messages = [...state.messages];
-        messages[messages.length - 1] = { ...last, content: last.content + text };
-        return step({ ...state, messages });
-      }
-      return step(say(state, 'assistant', text, undefined, { streaming: true }));
-    }
-
-    case 'researchStep': {
-      if (stale(state, action.sessionId)) return step(state);
-      const summary = sanitize(action.summary);
-      // A transcript entry, not just a spinner label: overwriting the label was
-      // why a parallel round collapsed to whichever call finished last.
-      const spoken = say(state, 'research', summary, { toolCallId: action.toolCallId });
-      // The footer said "Planning…" through the whole research phase, which is
-      // where a turn spends most of its time. `researching` is the same
-      // in-flight state as far as ESC is concerned — only the label differs.
-      const status = state.status === 'planning' ? 'researching' : state.status;
-      return step({ ...spoken, status, busyLabel: researchLabel(spoken.messages, summary) });
-    }
+      return step(followSession(state, action.message));
 
     // A settled transcript line, not a research step: nothing ever settles a
     // task's start, so as a step it stayed "⋯" forever and was counted into
@@ -400,31 +328,8 @@ export function reduce(state: TuiState, action: Action): Step {
       if (stale(state, action.sessionId)) return step(state);
       const tasks = state.tasks.map((t) => (t.id === action.taskId && !isTaskRunning(t) ? { ...t, status: 'in_progress' } : t));
       const who = action.runner ? ` · ${action.runner}` : '';
-      const spoken = say(state, 'system', sanitize(`Started "${action.title}"${who}`));
+      const spoken = say(state, 'system', `Started "${action.title}"${who}`);
       return step({ ...spoken, tasks, status: 'executing', busyLabel: runLabel(tasks) });
-    }
-
-    case 'researchStepDone': {
-      if (stale(state, action.sessionId)) return step(state);
-      const messages = settleResearchStep(state.messages, action);
-      const pending = messages.filter(isPendingResearch);
-      // Round over, model thinking again — back to the planning label until the
-      // next tool call, or until the turn settles the status to idle.
-      const status = pending.length === 0 && state.status === 'researching' ? 'planning' : state.status;
-      return step({
-        ...state,
-        messages,
-        status,
-        busyLabel: pending.length > 0 ? researchLabel(messages, pending[pending.length - 1].content) : '',
-      });
-    }
-
-    case 'plannerThinking': {
-      if (stale(state, action.sessionId)) return step(state);
-      // The one piece of planner text that never becomes a transcript entry,
-      // and so never passes through `say` — it goes straight to the status row,
-      // which is repainted on every spinner tick.
-      return step({ ...state, thinkingLine: (state.thinkingLine + sanitize(action.text)).slice(-THINKING_TAIL) });
     }
 
     case 'taskStatus': {
@@ -504,7 +409,6 @@ export function reduce(state: TuiState, action: Action): Step {
         ...say(state, 'system', `Execution ${verb} — ${completed}/${total} tasks complete${failures}.`),
         status: 'idle',
         busyLabel: '',
-        thinkingLine: '',
       });
     }
 
@@ -543,7 +447,6 @@ export function reduce(state: TuiState, action: Action): Step {
         goal: action.goal,
         status: 'idle',
         busyLabel: '',
-        thinkingLine: '',
         planApproved: false,
         pendingApprovals: [],
         queuedPrompts: [],
@@ -572,7 +475,7 @@ export function reduce(state: TuiState, action: Action): Step {
       }, ['set-planner', 'set-task-runner']));
 
     case 'failed': {
-      const reported = { ...say(state, 'error', action.message), status: 'idle' as const, busyLabel: '', thinkingLine: '' };
+      const reported = { ...say(state, 'error', action.message), status: 'idle' as const, busyLabel: '' };
       // A planner turn dying IS a turn ending — the queue would otherwise wait
       // on a next one that never comes. An execution failure (or any failure
       // with no turn running) drains nothing.
@@ -585,7 +488,6 @@ export function reduce(state: TuiState, action: Action): Step {
         ...state,
         status: 'idle',
         busyLabel: '',
-        thinkingLine: '',
         overlay: {
           kind: 'confirm',
           title: 'Initialize new workspace?',
@@ -1136,7 +1038,7 @@ function handleKey(state: TuiState, key: Key): Step {
   if (key.name === 'ctrl-d' && !state.editor.text && !state.overlay) {
     return step({ ...state, exiting: true }, [{ type: 'exit' }]);
   }
-  if (key.name === 'ctrl-l') return step({ ...state, messages: [] });
+  if (key.name === 'ctrl-l') return step({ ...state, conversation: wiped(state.conversation), scroll: 0 });
 
   // Esc during a planner turn, in order of the user's intent:
   // 1. take back the newest queued prompt (the planner keeps running);
@@ -1375,10 +1277,9 @@ function handleApprovalKey(
   if (!grant && !deny) return step(state);
 
   const { request } = overlay;
-  const verdict = grant ? 'approved' : 'denied';
-  const noted = say(showNextApproval({ ...state, overlay: null }), 'system', `Approval ${verdict}: ${request.subject}`);
-
-  return step(noted, state.sessionId
+  // No line of its own: the request's approval block shows the verdict, from
+  // the session's `approval_settled` rather than from this keypress.
+  return step(showNextApproval({ ...state, overlay: null }), state.sessionId
     ? [{ type: 'respondApproval', sessionId: state.sessionId, approvalId: request.id, granted: grant }]
     : []);
 }
@@ -1883,7 +1784,7 @@ function toggleSkill(state: TuiState, skill: SkillId, arg: string | undefined): 
 // Only asks when there is something to lose; an empty/idle session resets
 // silently. Mirrors the VS Code extension's confirm-before-reset.
 function requestNewSession(state: TuiState): Step {
-  const hasContent = state.tasks.length > 0 || state.messages.length > 0 || state.goal !== '' || state.status !== 'idle';
+  const hasContent = state.tasks.length > 0 || state.conversation.blocks.length > 0 || state.goal !== '' || state.status !== 'idle';
   if (!state.sessionId || !hasContent) return newSession(state);
   return step({
     ...state,
@@ -1907,7 +1808,7 @@ function newSession(state: TuiState): Step {
     goal: '',
     tasks: [],
     planApproved: false,
-    messages: [],
+    conversation: EMPTY_CONVERSATION,
     selectedTask: 0,
     expandedTaskId: null,
     taskEditor: null,
@@ -1915,7 +1816,6 @@ function newSession(state: TuiState): Step {
     planScroll: null,
     status: 'idle',
     busyLabel: '',
-    thinkingLine: '',
     // Prompts belong to the session that raised them; the old planner is gone
     // and its pending requests deny on their own timeout.
     pendingApprovals: [],

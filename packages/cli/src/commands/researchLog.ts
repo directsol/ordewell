@@ -1,5 +1,4 @@
-import { summarizeToolCall } from '@ordewell/core/plan-utils';
-import type { ResearchStep, ResearchStepOutcome } from '@ordewell/core';
+import { toolHeadline, type ResearchStep, type ResearchStepOutcome } from '@ordewell/core';
 import type { WsEvent } from '../apiClient';
 
 /**
@@ -25,6 +24,12 @@ export interface StepLineOptions {
   verbose?: boolean;
 }
 
+// The TUI's command-row head, so a piped log and the chat pane name a call alike.
+function summarize(tool: string, args: string, toolLabel?: string): string {
+  const { name, keyArg } = toolHeadline(tool, args, toolLabel);
+  return `${name}(${keyArg})`;
+}
+
 function oneLine(text: string, max: number): string {
   const collapsed = text.replace(/\s+/g, ' ').trim();
   return collapsed.length > max ? `${collapsed.slice(0, max)}…` : collapsed;
@@ -33,7 +38,7 @@ function oneLine(text: string, max: number): string {
 /** The line a stream event should print, or null when it prints nothing. */
 export function formatStepLine(event: WsEvent, options: StepLineOptions = {}): string | null {
   if (event.type === 'research_step') {
-    const summary = summarizeToolCall(String(event.tool), String(event.args || '{}'), event.toolLabel as string | undefined);
+    const summary = summarize(event.tool, event.args || '{}', event.toolLabel);
     return event.subagentId ? `  ↳ ${summary}` : summary;
   }
 
@@ -41,7 +46,7 @@ export function formatStepLine(event: WsEvent, options: StepLineOptions = {}): s
     const step = event.step as ResearchStep | undefined;
     if (!step) return null;
     const mark = OUTCOME_MARK[step.outcome] ?? '✓';
-    const summary = summarizeToolCall(step.tool, step.args, step.toolLabel);
+    const summary = summarize(step.tool, step.args, step.toolLabel);
     const result = oneLine(step.result ?? '', options.verbose ? VERBOSE_RESULT_CHARS : RESULT_CHARS);
     const indent = event.subagentId ? '  ↳ ' : '';
     return result ? `${indent}${mark} ${summary} → ${result}` : `${indent}${mark} ${summary}`;

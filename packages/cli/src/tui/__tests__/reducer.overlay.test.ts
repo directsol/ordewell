@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce, type Step } from '../reducer';
 import type { ConfirmAction, PickerState, TaskView, TuiState } from '../state';
+import { chatOf, messagesOf } from './chat';
 
 const key = (name: string, char?: string) => ({ type: 'key' as const, key: { name, char } });
 const press = (state: TuiState, name: string, char?: string): Step => reduce(state, key(name, char));
@@ -651,8 +652,8 @@ describe('global keys', () => {
   });
 
   it('ctrl-l clears the transcript', () => {
-    const s = initialState({ messages: [{ role: 'user', content: 'x', timestamp: '' }] });
-    expect(press(s, 'ctrl-l').state.messages).toEqual([]);
+    const s = initialState({ conversation: chatOf(['user', 'x']) });
+    expect(messagesOf(press(s, 'ctrl-l').state)).toEqual([]);
   });
 
   it('escape clears the chat input', () => {
@@ -667,7 +668,7 @@ describe('the wheel reaches past an overlay', () => {
   const behindOverlay = (overlay: TuiState['overlay'], over: Partial<TuiState> = {}): TuiState => initialState({
     rows: 24,
     cols: 80,
-    messages: Array.from({ length: 40 }, (_, i) => ({ role: 'user' as const, content: `m${i}`, timestamp: '' })),
+    conversation: chatOf(...Array.from({ length: 40 }, (_, i): ['user', string] => ['user', `m${i}`])),
     tasks: Array.from({ length: 30 }, (_, i) => ({
       id: `t${i}`, order: i + 1, title: `Task ${i}`, type: 'ai' as const,
       status: 'pending', dependencies: [], assignedRunner: 'claude-code',

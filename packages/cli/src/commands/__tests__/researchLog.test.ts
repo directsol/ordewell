@@ -18,18 +18,18 @@ const done = (overrides: Partial<ResearchStep> = {}, event: Record<string, unkno
   ({ type: 'research_step_done', step: step(overrides), ...event });
 
 describe('formatStepLine', () => {
-  it('summarizes an issued call', () => {
+  it('names an issued call as the TUI\'s command row does', () => {
     expect(formatStepLine({ type: 'research_step', tool: 'read_file', args: '{"path":"src/auth.ts"}' }))
-      .toBe('read_file auth.ts');
+      .toBe('Read(src/auth.ts)');
   });
 
   it('indents a subagent call under its parent', () => {
     expect(formatStepLine({ type: 'research_step', tool: 'grep', args: '{"pattern":"login"}', subagentId: 'sub-1' }))
-      .toBe('  ↳ grep login');
+      .toBe('  ↳ Grep(login)');
   });
 
   it('reports the outcome and a result preview when a call settles', () => {
-    expect(formatStepLine(done())).toBe('✓ read_file auth.ts → export const auth = 1;');
+    expect(formatStepLine(done())).toBe('✓ Read(src/auth.ts) → export const auth = 1;');
   });
 
   it('distinguishes failure, refusal, denial and non-execution from success', () => {
@@ -38,10 +38,10 @@ describe('formatStepLine', () => {
     );
 
     expect(marks).toEqual([
-      '✗ read_file auth.ts',
-      '⊘ read_file auth.ts',
-      '⊘ read_file auth.ts',
-      '– read_file auth.ts',
+      '✗ Read(src/auth.ts)',
+      '⊘ Read(src/auth.ts)',
+      '⊘ Read(src/auth.ts)',
+      '– Read(src/auth.ts)',
     ]);
   });
 
@@ -49,7 +49,7 @@ describe('formatStepLine', () => {
     const line = formatStepLine(done({ result: `first\nsecond${'x'.repeat(400)}` }))!;
 
     expect(line).not.toContain('\n');
-    expect(line.startsWith('✓ read_file auth.ts → first second')).toBe(true);
+    expect(line.startsWith('✓ Read(src/auth.ts) → first second')).toBe(true);
     expect(line.endsWith('…')).toBe(true);
     expect(line.length).toBeLessThan(220);
   });
@@ -63,7 +63,7 @@ describe('formatStepLine', () => {
   });
 
   it('indents a settled subagent call too', () => {
-    expect(formatStepLine(done({ result: '' }, { subagentId: 'sub-1' }))).toBe('  ↳ ✓ read_file auth.ts');
+    expect(formatStepLine(done({ result: '' }, { subagentId: 'sub-1' }))).toBe('  ↳ ✓ Read(src/auth.ts)');
   });
 
   it('drops reasoning unless --verbose asked for it', () => {

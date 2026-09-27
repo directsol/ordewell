@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce, type Step } from '../reducer';
 import type { PickerState, TaskView, TuiState } from '../state';
+import { lastMessage } from './chat';
 
 const key = (name: string, char?: string) => ({ type: 'key' as const, key: { name, char } });
 const press = (state: TuiState, name: string, char?: string): Step => reduce(state, key(name, char));
@@ -115,7 +116,7 @@ describe('plan pane — dependency picker (D)', () => {
     const attempted = press(planPane({ selectedTask: 0 }), 'char', 'D');
 
     expect(attempted.state.overlay).toBeNull();
-    expect(attempted.state.messages.at(-1)?.content).toMatch(/no possible dependencies/i);
+    expect(lastMessage(attempted.state)?.text).toMatch(/no possible dependencies/i);
   });
 
   it('drops a stale dependency from the preselection rather than resending it', () => {

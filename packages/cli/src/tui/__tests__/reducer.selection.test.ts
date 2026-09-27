@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initialState, reduce, type Effect, type Step } from '../reducer';
 import { style, width } from '../ansi';
-import type { ChatMessage, TaskView, TuiState } from '../state';
+import type { TaskView, TuiState } from '../state';
+import { chatOf } from './chat';
 
 beforeAll(() => {
   // The copied text is stripped of paint either way; leaving colour on would
@@ -34,9 +35,7 @@ const mouse = (state: TuiState, name: string, col: number, row: number): Step =>
  * shows up as the wrong word rather than as an off-by-one column.
  */
 const twoPanes = (): TuiState => screenState({
-  messages: Array.from({ length: 30 }, (_, i): ChatMessage => ({
-    role: 'user', content: `PANECHAT row ${i} filling the whole chat pane`, timestamp: '',
-  })),
+  conversation: chatOf(...Array.from({ length: 30 }, (_, i): ['user', string] => ['user', `PANECHAT row ${i} filling the whole chat pane`])),
   tasks: Array.from({ length: 20 }, (_, i): TaskView => ({
     id: `t${i}`, order: i + 1, title: `PANEPLAN task ${i}`, type: 'ai', status: 'pending', dependencies: [],
   })),

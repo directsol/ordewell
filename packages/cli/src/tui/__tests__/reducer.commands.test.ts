@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { initialState, reduce, type Effect } from '../reducer';
 import { registerSkillCommands } from '../slash';
 import type { TaskView, TuiState } from '../state';
+import { chatOf, lastMessage, messagesOf } from './chat';
 
 function run(text: string, overrides: Partial<TuiState> = {}) {
   const base = initialState(overrides);
@@ -64,7 +65,7 @@ describe('models and providers', () => {
   it('/key rejects a provider it does not know', () => {
     const { state, effects } = run('/key set notaprovider sk-1');
     expect(effects).toEqual([]);
-    expect(state.messages.at(-1)?.role).toBe('error');
+    expect(lastMessage(state)?.role).toBe('error');
   });
 
   it('/refresh re-discovers runners and catalogs', () => {
@@ -98,7 +99,7 @@ describe('runners and autonomy', () => {
   it('/parallel <n> sets how many tasks run at once; bare /parallel says what it is', () => {
     expect(run('/parallel 8').effects).toEqual([{ type: 'setMaxParallel', limit: 8 }]);
     expect(run('/parallel 8').state.maxParallel).toBe(8);
-    expect(run('/parallel', { maxParallel: 2 }).state.messages.at(-1)?.content).toBe('Up to 2 AI tasks run at once — /parallel <n> changes it.');
+    expect(lastMessage(run('/parallel', { maxParallel: 2 }).state)?.text).toBe('Up to 2 AI tasks run at once — /parallel <n> changes it.');
     expect(run('/parallel 0').effects).toEqual([]);
     expect(run('/parallel many').effects).toEqual([]);
   });
@@ -148,7 +149,7 @@ describe('runners and autonomy', () => {
     const { state, effects } = run('/mouse on');
     expect(effects).toEqual([{ type: 'setMouseCapture', enabled: true }]);
     expect(state.mouseCapture).toBe(true);
-    const said = state.messages.at(-1)!.content;
+    const said = lastMessage(state)!.text;
     expect(said).toContain('wheel');
     expect(said).toMatch(/selects?/);
     expect(said).not.toContain('no longer selects text');
@@ -158,13 +159,13 @@ describe('runners and autonomy', () => {
     const { state, effects } = run('/mouse', { mouseCapture: true });
     expect(effects).toEqual([{ type: 'setMouseCapture', enabled: false }]);
     expect(state.mouseCapture).toBe(false);
-    expect(state.messages.at(-1)!.content).toContain("terminal's own");
+    expect(lastMessage(state)!.text).toContain("terminal's own");
   });
 
   it('/mouse rejects an argument that is neither on nor off', () => {
     const { state, effects } = run('/mouse sometimes');
     expect(effects).toEqual([]);
-    expect(state.messages.at(-1)).toMatchObject({ role: 'error' });
+    expect(lastMessage(state)).toMatchObject({ role: 'error' });
   });
 });
 
@@ -188,23 +189,23 @@ describe('sessions', () => {
   });
 
   it('/new asks for confirmation when there is a plan to lose', () => {
-    const { state } = run('/new', { ...planned, messages: [{ role: 'user', content: 'x', timestamp: '' }] });
+    const { state } = run('/new', { ...planned, conversation: chatOf(['user', 'x']) });
     expect(state.overlay).toMatchObject({ kind: 'confirm', action: { kind: 'new-session' } });
     expect(state.sessionId).toBe('session-1');
   });
 
   it('/new confirmed clears the plan and transcript, and stops the old session', () => {
-    const { state } = run('/new', { ...planned, messages: [{ role: 'user', content: 'x', timestamp: '' }] });
+    const { state } = run('/new', { ...planned, conversation: chatOf(['user', 'x']) });
     const confirmed = reduce(state, { type: 'key', key: { name: 'enter' } });
     expect(confirmed.state.overlay).toBeNull();
     expect(confirmed.state.sessionId).toBeNull();
     expect(confirmed.state.tasks).toEqual([]);
-    expect(confirmed.state.messages).toEqual([]);
+    expect(messagesOf(confirmed.state)).toEqual([]);
     expect(confirmed.effects).toEqual([{ type: 'closeSession', sessionId: 'session-1' }]);
   });
 
   it('/new cancelled with escape leaves the session untouched', () => {
-    const { state } = run('/new', { ...planned, messages: [{ role: 'user', content: 'x', timestamp: '' }] });
+    const { state } = run('/new', { ...planned, conversation: chatOf(['user', 'x']) });
     const cancelled = reduce(state, { type: 'key', key: { name: 'escape' } });
     expect(cancelled.state.overlay).toBeNull();
     expect(cancelled.state.sessionId).toBe('session-1');
@@ -226,7 +227,7 @@ describe('execution', () => {
   it('/run refuses when there is no plan yet', () => {
     const { state, effects } = run('/run');
     expect(effects).toEqual([]);
-    expect(state.messages.at(-1)?.role).toBe('error');
+    expect(lastMessage(state)?.role).toBe('error');
   });
 
   it('/approve marks the plan approved and starts it', () => {
@@ -270,7 +271,7 @@ describe('task control', () => {
   it('reports a task id that is not in the plan', () => {
     const { state, effects } = run('/retry nope', planned);
     expect(effects).toEqual([]);
-    expect(state.messages.at(-1)?.role).toBe('error');
+    expect(lastMessage(state)?.role).toBe('error');
   });
 
   it('/add-task adds a task with the given title', () => {
@@ -337,7 +338,7 @@ describe('skill commands', () => {
     registerSkillCommands([{ name: 'grilling', description: 'Grill the plan' }]);
     const { state, effects } = run('/grilling');
     expect(effects).toEqual([{ type: 'startConversation', goal: '/grilling' }]);
-    expect(state.messages.at(-1)).toMatchObject({ role: 'user', content: '/grilling' });
+    expect(lastMessage(state)).toMatchObject({ role: 'user', text: '/grilling' });
   });
 
   it('sends a skill command to an existing session as a message, not a command', () => {
@@ -367,11 +368,11 @@ describe('system commands', () => {
   it('reports an unknown command instead of sending it to the planner', () => {
     const { state, effects } = run('/nonsense');
     expect(effects).toEqual([]);
-    expect(state.messages.at(-1)?.role).toBe('error');
+    expect(lastMessage(state)?.role).toBe('error');
   });
 
   it('never echoes a command into the transcript as a user turn', () => {
     const { state } = run('/help');
-    expect(state.messages.some((m) => m.role === 'user')).toBe(false);
+    expect(messagesOf(state).some((m) => m.role === 'user')).toBe(false);
   });
 });

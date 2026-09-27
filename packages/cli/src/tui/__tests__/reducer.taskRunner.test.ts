@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce, type Step } from '../reducer';
 import type { PickerState, TaskView, TuiState } from '../state';
+import { lastMessage } from './chat';
 
 const key = (name: string, char?: string) => ({ type: 'key' as const, key: { name, char } });
 const press = (state: TuiState, name: string, char?: string): Step => reduce(state, key(name, char));
@@ -73,7 +74,7 @@ describe('plan pane — runner picker (R)', () => {
     const after = press(state, 'char', 'R').state;
 
     expect(after.overlay).toBeNull();
-    expect(after.messages.at(-1)!.content).toMatch(/manual/i);
+    expect(lastMessage(after)!.text).toMatch(/manual/i);
   });
 });
 
@@ -113,7 +114,7 @@ describe('plan pane — mode picker (M)', () => {
     const after = press(state, 'char', 'M').state;
 
     expect(after.overlay).toBeNull();
-    expect(after.messages.at(-1)!.content).toMatch(/no modes/i);
+    expect(lastMessage(after)!.text).toMatch(/no modes/i);
   });
 });
 
@@ -155,7 +156,7 @@ describe('/task-runner and /task-mode', () => {
     const after = runSlash('/task-runner 1 nope', { ...planPane(), focus: 'chat' });
 
     expect(after.effects).toEqual([]);
-    expect(after.state.messages.at(-1)!.content).toMatch(/nope/);
+    expect(lastMessage(after.state)!.text).toMatch(/nope/);
   });
 
   it('/task-mode with a mode assigns it directly', () => {
@@ -170,6 +171,6 @@ describe('/task-runner and /task-mode', () => {
     const after = runSlash('/task-mode 1 agent', { ...planPane(), focus: 'chat' });
 
     expect(after.effects).toEqual([]);
-    expect(after.state.messages.at(-1)!.content).toMatch(/agent/);
+    expect(lastMessage(after.state)!.text).toMatch(/agent/);
   });
 });
