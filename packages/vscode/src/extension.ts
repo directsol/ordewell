@@ -30,7 +30,6 @@ let currentPlan: LegacyPlanState = createEmptyPlan();
 let currentGoal: string = '';
 let isGeneratingPlan = false;
 let currentResearchAbort: AbortController | null = null;
-let lastPlannerContent: string | null = null;
 let outputChannel: vscode.OutputChannel;
 let pendingRunners: import('@ordewell/core').RunnerId[] | undefined;
 
@@ -122,8 +121,6 @@ function getGenPlan(): boolean { return isGeneratingPlan; }
 function setGenPlan(v: boolean) { isGeneratingPlan = v; }
 function getAbort(): AbortController | null { return currentResearchAbort; }
 function setAbort(c: AbortController | null) { currentResearchAbort = c; }
-function getPlannerContent(): string | null { return lastPlannerContent; }
-function setPlannerContent(c: string | null) { lastPlannerContent = c; }
 
 export async function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('Ordewell');
@@ -155,7 +152,6 @@ export async function activate(context: vscode.ExtensionContext) {
         settingsService, getCurrentPlan: getPlan, setCurrentPlan: setPlan, getCurrentGoal: getGoal,
         setCurrentGoal: setGoal, isGeneratingPlan: getGenPlan, setGeneratingPlan: setGenPlan,
         getResearchAbort: getAbort, setResearchAbort: setAbort,
-        getLastPlannerContent: getPlannerContent, setLastPlannerContent: setPlannerContent,
         persistState: () => persistState(persistDeps()), saveCurrentSession: () => saveCurrentSession(persistDeps()), log,
       }),
       modelResolver,
@@ -246,7 +242,6 @@ function planDeps() {
     getCurrentGoal: getGoal, setCurrentGoal: setGoal,
     isGeneratingPlan: getGenPlan, setGeneratingPlan: setGenPlan,
     getResearchAbort: getAbort, setResearchAbort: setAbort,
-    getLastPlannerContent: getPlannerContent, setLastPlannerContent: setPlannerContent,
     persistState: () => persistState(persistDeps()),
     saveCurrentSession: () => saveCurrentSession(persistDeps()),
     log,
@@ -261,7 +256,6 @@ function commandDeps() {
     getCurrentGoal: getGoal, setCurrentGoal: setGoal,
     isGeneratingPlan: getGenPlan, setGeneratingPlan: setGenPlan,
     getResearchAbort: getAbort, setResearchAbort: setAbort,
-    setLastPlannerContent: setPlannerContent,
     handleApprovePlan: () => handleApprovePlan(planDeps()),
     handleStartPlanning: (text: string) => handleStartPlanning(text, planDeps(), pendingRunners),
     sendRunnerAndModels,
@@ -575,11 +569,10 @@ function setupChatListener(context: vscode.ExtensionContext): void {
         void sendRunnerAndModels().catch((err) => log(`Background model refresh failed: ${err}`));
         // Replay the persisted dialogue so a reloaded webview shows the full
         // chat, not just the plan. restoreChat goes first: it clears any stale
-        // stopped/busy state before the plan message arrives.
-        const history = currentPlan.conversationHistory ?? [];
-        if (history.length > 0 || currentPlan.tasks.length > 0) {
-          chatProvider.restoreChat(history, currentPlan.tasks.length > 0);
-        }
+        // stopped/busy state before the plan message arrives. A turn still
+        // streaming has not been saved yet, so its live view is sent instead.
+        if (isGeneratingPlan) chatProvider.conversation.resync();
+        else chatProvider.restoreChat(currentPlan);
         if (currentPlan.tasks.length > 0) {
           chatProvider.showPlan(currentPlan);
           if (currentGoal) chatProvider.setGoal(currentGoal);
@@ -605,6 +598,7 @@ function setupChatListener(context: vscode.ExtensionContext): void {
         const text = msg.text ?? '';
         const ctx = msg.actionContext;
         const incomingRunners = msg.runners;
+        if (msg.typed && text.trim()) chatProvider.conversation.note('user', text);
 
         if (ctx) {
           switch (ctx.type) {
@@ -803,6 +797,10 @@ function setupChatListener(context: vscode.ExtensionContext): void {
         await handleIsolationAction(msg.action, msg.taskId, planDeps());
         break;
 
+      case 'addNote':
+        chatProvider.conversation.note('system', msg.text);
+        break;
+
       case 'toggleSkill':
         if (msg.skillId === 'tdd') settingsService.setTdd(msg.enabled);
         else if (msg.skillId === 'verify') settingsService.setVerification(msg.enabled);
@@ -828,11 +826,7 @@ function setupChatListener(context: vscode.ExtensionContext): void {
         isGeneratingPlan = false;
         currentResearchAbort?.abort();
         session.aiServiceInstance.reset();
-        if (lastPlannerContent) {
-          chatProvider.sendPlannerInterrupted(lastPlannerContent);
-          chatProvider.setState('planDraft');
-        }
-        lastPlannerContent = null;
+        chatProvider.conversation.stop();
         log('Research stopped');
         break;
 
@@ -840,7 +834,6 @@ function setupChatListener(context: vscode.ExtensionContext): void {
         isGeneratingPlan = false;
         currentResearchAbort?.abort();
         session.aiServiceInstance.reset();
-        lastPlannerContent = null;
         // Full core reset — not just the AI service. Anything short of this
         // leaves the previous session's tasks in the Session's PlanStore, and
         // the planner presents them as the current plan in the next chat.
@@ -849,6 +842,7 @@ function setupChatListener(context: vscode.ExtensionContext): void {
         currentPlan = createEmptyPlan();
         currentGoal = '';
         chatProvider.setState('empty');
+        chatProvider.conversation.reset();
         chatProvider.setGoal('');
         const { clearState } = await import('@ordewell/core');
         clearState(fsAdapter.getWorkspaceRoot());

@@ -20,7 +20,7 @@ const SHELL_REQUEST: Extract<SessionMessage, { type: 'approval_request' }> = {
 function minimalDeps(): PlanManagerDeps {
   return {
     session: { resolveApproval: vi.fn().mockReturnValue(true) } as unknown as PlanManagerDeps['session'],
-    chatProvider: { sendNewMessage: vi.fn() } as unknown as PlanManagerDeps['chatProvider'],
+    chatProvider: { conversation: { receive: vi.fn(), note: vi.fn() } } as unknown as PlanManagerDeps['chatProvider'],
     isGeneratingPlan: () => false,
   } as unknown as PlanManagerDeps;
 }
@@ -112,7 +112,7 @@ describe('VS Code approval prompt retirement (T5/T4)', () => {
     await new Promise((r) => setTimeout(r, 10)); // flush microtasks for handleApprovalMessage to resume
 
     expect(resolveApproval).toHaveBeenCalledWith('ap-1', true);
-    const notify = vi.mocked((deps.chatProvider as unknown as { sendNewMessage: (t: string) => void }).sendNewMessage);
-    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/no longer actionable/i), expect.any(String));
+    const notify = vi.mocked((deps.chatProvider as unknown as { conversation: { note: (role: string, t: string) => void } }).conversation.note);
+    expect(notify).toHaveBeenCalledWith('system', expect.stringMatching(/no longer actionable/i));
   });
 });

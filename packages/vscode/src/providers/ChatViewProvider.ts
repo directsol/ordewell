@@ -1,107 +1,13 @@
 import * as vscode from 'vscode';
-import { AiProvider, ConversationMessage, LegacyPlanState, Task, DiscoveredModel, ResearchProgress, RunnerId, TaskStatus, TaskIsolation, IsolationHandoff, IsolationMergeResult } from '@ordewell/core';
+import type { AiProvider, LegacyPlanState, Task, DiscoveredModel, RunnerId, TaskStatus, TaskIsolation, IsolationHandoff, IsolationMergeResult } from '@ordewell/core';
+import { ConversationViewHost, type SavedConversation } from '../ConversationViewHost';
+import type { ChatState, HostToWebview, ModelOption, PlannerBackend, RunnerMeta, RunnerModeMeta, WebviewToHost } from '../shared/protocol';
 
-type ChatWebviewMessage =
-  | {
-      type: 'sendMessage';
-      text: string;
-      runners?: RunnerId[];
-      actionContext?: {
-        type: 'approve' | 'reject' | 'retry' | 'skip' | 'cancel' | 'execute' | 'merge' | 'split' | 'addTask';
-        taskId?: string;
-      };
-    }
-  | {
-      type: 'sendSystemCommand';
-      command: 'cancel' | 'skip' | 'forceStart' | 'runTask' | 'markComplete' | 'markIncomplete' | 'stopExecution' | 'executePlan';
-      taskId?: string;
-    }
-  | { type: 'ready' }
-  /** A per-task model dropdown opened — re-discover so a stale/degraded catalog self-heals. */
-  | { type: 'refreshModels' }
-  | { type: 'stopResearch' }
-  | { type: 'newSession' }
-  | { type: 'toggleSkill'; skillId: string; enabled: boolean }
-  /** Who plans (ADR-0009) — a vendor provider id or one of the harness planners. */
-  | { type: 'setPlanner'; provider: string }
-  /** The planner's own model and thinking effort, a pair so neither can outlive the other. */
-  | { type: 'setPlannerModel'; modelId: string; effort?: string }
-  /**
-   * An action on an isolated run, from a task's conflict indicator or the
-   * handoff card. Reviewing, merging, discarding and cleaning up are all
-   * asymmetric operations the host alone can confirm and perform.
-   */
-  | { type: 'isolationAction'; action: 'reviewDiff' | 'merge' | 'discard' | 'cleanup' | 'resolveConflict'; taskId?: string };
-
-/** One selectable planner backend, with the reason it can't be picked when it can't. */
-export interface PlannerBackend {
-  id: string;
-  label: string;
-  kind: 'harness' | 'vendor';
-  /** Harness planners only: the runner whose catalog supplies this planner's models. */
-  runner?: string;
-  usable: boolean;
-  reason?: string;
-}
-
-export interface RunnerMeta {
-  id: string;
-  displayName: string;
-  enabled: boolean;
-}
+export type { PlannerBackend, RunnerMeta } from '../shared/protocol';
 
 // The union core owns, not a copy of it: a hand-maintained duplicate silently
 // diverged the moment ADR-0009 added the three harness planners.
 type ApiProvider = AiProvider;
-
-type ExtensionChatMessage =
-  | { type: 'setState'; state: 'empty' | 'researching' | 'planDraft' | 'approved' | 'error' }
-  | { type: 'newMessage'; message: { role: string; content: string; timestamp: string } }
-  | { type: 'planUpdated'; plan: LegacyPlanState }
-  | { type: 'streamToken'; token: string }
-  | { type: 'researchProgress'; step: ResearchProgress }
-  | { type: 'executionStatus'; taskId: string; status: TaskStatus }
-  | { type: 'taskOutput'; taskId: string; text: string }
-  | { type: 'taskIdle'; taskId: string; idleSince: string | null }
-  | { type: 'queueStatus'; count: number }
-  | { type: 'showError'; error: string }
-  | { type: 'focusTask'; taskId: string }
-  | { type: 'setModels'; models: DiscoveredModel[] }
-  | { type: 'setRunners'; runners: RunnerMeta[] }
-  // `unavailable` lists toggles that have no meaning for the current planner
-  // backend — hidden rather than silently ignored (ADR-0009, T8).
-  | { type: 'setSkillToggles'; toggles: Record<string, boolean>; unavailable?: string[] }
-  /** Discovered skills (global ~/.ordewell/skills/ + workspace .ordewell/skills/, workspace shadows global) for the /skill-name suggestion dropdown. */
-  | { type: 'setSkills'; skills: { name: string; description: string }[] }
-  | { type: 'plannerInterrupted'; message: { role: string; content: string; timestamp: string } }
-  | { type: 'researchStream'; steps: string[]; isActive: boolean }
-  | { type: 'setConfiguredProviders'; providers: ApiProvider[] }
-  | { type: 'setModelOptions'; modelOptions: { id: string; label: string; provider: string; apiProvider?: AiProvider; description?: string; pricing?: string }[] }
-  | { type: 'setModelsByRunner'; modelsByRunner: Partial<Record<RunnerId, DiscoveredModel[]>> }
-  | { type: 'setModesByRunner'; modesByRunner: Record<string, { id: string; label: string; description: string; cliValue?: string; autonomous?: boolean }[]> }
-  | { type: 'setModelConfig'; modelConfig: { orchestrator: string; orchestratorProvider?: string } }
-  | { type: 'setPlannerBackends'; backends: PlannerBackend[]; provider: string; runner?: string; effort?: string }
-  | { type: 'setModelApiMapping'; modelApiMapping: Record<string, ApiProvider[]> }
-  | { type: 'setModelDiscoveryErrors'; errors: Record<string, string> }
-  | { type: 'planApproved' }
-  | { type: 'showWarnings'; warnings: string; pendingTasks: Task[] }
-  | { type: 'checkpoint'; taskId: string; taskTitle: string; summary: string }
-  | { type: 'setGoal'; goal: string }
-  // Per-task isolation state (ADR-0013) — sent only for tasks that have one, so
-  // a shared-root plan's cards stay quiet (US34).
-  | { type: 'taskIsolation'; taskId: string; isolation: TaskIsolation }
-  // The end-of-run handoff: each repo's integration branch and base, and what
-  // landed, with the actions the host performs on request.
-  | { type: 'isolationHandoff'; repos: IsolationHandoff['repos']; landed: IsolationHandoff['landed'] }
-  // What "Merge all" did: all-or-nothing per repo, or which repos one landed in
-  // before it stopped. A group of one reports its single merge as before.
-  | { type: 'isolationMergeResult'; result: IsolationMergeResult }
-  // The run's isolation is gone (discarded or the plan restarted); the handoff
-  // card and every conflict indicator clear.
-  | { type: 'isolationCleared' }
-  | { type: 'restoreChat'; history: ConversationMessage[]; hasPlan: boolean }
-  | { type: 'conversationReplaced'; history: ConversationMessage[]; hasPlan: boolean }
-  | { type: 'conversationBusy'; busy: boolean };
 
 function getNonce(): string {
   let text = '';
@@ -112,9 +18,11 @@ function getNonce(): string {
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
-  private _onMessage = new vscode.EventEmitter<ChatWebviewMessage>();
+  private _onMessage = new vscode.EventEmitter<WebviewToHost>();
   readonly onMessage = this._onMessage.event;
   private _pendingTasks: Task[] | null = null;
+  /** The planner conversation as the webview draws it; every planner event and local notice goes through here. */
+  readonly conversation = new ConversationViewHost((msg) => this.postMessage(msg));
 
   constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -124,15 +32,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'dist', 'webviews')],
     };
-    webviewView.webview.onDidReceiveMessage((msg: ChatWebviewMessage) => this._onMessage.fire(msg));
+    webviewView.webview.onDidReceiveMessage((msg: WebviewToHost) => this._onMessage.fire(msg));
     this.renderHtml(webviewView);
   }
 
-  postMessage(msg: ExtensionChatMessage): void { this._view?.webview.postMessage(msg); }
-  setState(state: 'empty' | 'researching' | 'planDraft' | 'approved' | 'error'): void { this.postMessage({ type: 'setState', state }); }
+  postMessage(msg: HostToWebview): void { this._view?.webview.postMessage(msg); }
+  setState(state: ChatState): void { this.postMessage({ type: 'setState', state }); }
   showError(error: string): void { this.postMessage({ type: 'showError', error }); }
-  streamToken(token: string): void { this.postMessage({ type: 'streamToken', token }); }
-  sendResearchProgress(step: ResearchProgress): void { this.postMessage({ type: 'researchProgress', step }); }
   sendPlanUpdated(plan: LegacyPlanState): void { this._cachedPlan = plan; this.postMessage({ type: 'planUpdated', plan }); }
   showQueueStatus(count: number): void { this.postMessage({ type: 'queueStatus', count }); }
   focusTask(taskId: string): void { this.postMessage({ type: 'focusTask', taskId }); }
@@ -151,35 +57,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   setSkills(skills: { name: string; description: string }[]): void {
     this.postMessage({ type: 'setSkills', skills });
   }
-  /** A planner conversation message (ADR-0002) — rendered as an assistant chat bubble. */
-  sendNewMessage(content: string, timestamp?: string): void {
-    this.postMessage({ type: 'newMessage', message: { role: 'assistant', content, timestamp: timestamp ?? new Date().toISOString() } });
-  }
-  sendPlannerInterrupted(content: string): void {
-    this.postMessage({
-      type: 'plannerInterrupted',
-      message: { role: 'planner', content, timestamp: new Date().toISOString() },
-    });
-  }
-  sendResearchStream(steps: string[], isActive: boolean): void {
-    this.postMessage({ type: 'researchStream', steps, isActive });
-  }
   /**
-   * Rebuild the webview timeline from the persisted planner dialogue. The
-   * single restore path for session load, webview reload, and window restore —
-   * it also clears any stuck stop/busy state client-side.
+   * A session was loaded, or the webview reconnected: its plan, task output and
+   * isolation state are dropped along with any stuck busy state, and the
+   * conversation is rebuilt from what the session saved.
    */
-  restoreChat(history: ConversationMessage[], hasPlan: boolean): void {
-    this.postMessage({ type: 'restoreChat', history, hasPlan });
+  restoreChat(saved: SavedConversation): void {
+    this.postMessage({ type: 'restoreChat' });
+    this.conversation.reload(saved);
   }
 
   /**
-   * Redraw only the transcript, after a compaction edited it. Unlike
+   * Redraw only the conversation, after a compaction edited it. Unlike
    * `restoreChat` this leaves the plan, task output and isolation state alone,
    * because a compaction is allowed while a run is executing.
    */
-  replaceConversation(history: ConversationMessage[], hasPlan: boolean): void {
-    this.postMessage({ type: 'conversationReplaced', history, hasPlan });
+  replaceConversation(saved: SavedConversation): void {
+    this.conversation.reload(saved);
   }
   /** Lock the input while core is refusing planner messages (a compaction in flight). */
   setConversationBusy(busy: boolean): void {
@@ -189,6 +83,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   showPlan(plan: LegacyPlanState): void { this.sendPlanUpdated(plan); }
   showWarnings(message: string, pendingTasks: Task[]): void {
     this._pendingTasks = pendingTasks;
+    this.conversation.note('system', `Plan modification warnings:\n${message}`);
     this.postMessage({ type: 'showWarnings', warnings: message, pendingTasks });
   }
 
@@ -234,7 +129,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this._modelsByRunner = modelsByRunner;
     this.postMessage({ type: 'setModelsByRunner', modelsByRunner });
   }
-  setModesByRunner(modesByRunner: Record<string, { id: string; label: string; description: string; cliValue?: string; autonomous?: boolean }[]>): void {
+  setModesByRunner(modesByRunner: Record<string, RunnerModeMeta[]>): void {
     this._modesByRunner = modesByRunner;
     this.postMessage({ type: 'setModesByRunner', modesByRunner });
   }
@@ -250,7 +145,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this._modelConfig = cfg;
     this.postMessage({ type: 'setModelConfig', modelConfig: cfg });
   }
-  setModelOptions(options: { id: string; label: string; provider: string; apiProvider?: AiProvider; description?: string; pricing?: string }[]): void {
+  setModelOptions(options: ModelOption[]): void {
     this._modelOptions = options;
     this.postMessage({ type: 'setModelOptions', modelOptions: options });
   }
@@ -273,11 +168,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private _modelsByRunner: Partial<Record<RunnerId, DiscoveredModel[]>> = {};
-  private _modesByRunner: Record<string, { id: string; label: string; description: string; cliValue?: string; autonomous?: boolean }[]> = {};
+  private _modesByRunner: Record<string, RunnerModeMeta[]> = {};
   private _runnerList: { id: string; displayName: string }[] = [];
   private _enabledRunnerIds: string[] = [];
   private _modelConfig: { orchestrator: string; orchestratorProvider?: string } | null = null;
-  private _modelOptions: { id: string; label: string; provider: string; apiProvider?: AiProvider; description?: string; pricing?: string }[] = [];
+  private _modelOptions: ModelOption[] = [];
   private _configuredProviders: ApiProvider[] = [];
   private _modelApiMapping: Record<string, ApiProvider[]> = {};
   private _modelDiscoveryErrors: Record<string, string> = {};

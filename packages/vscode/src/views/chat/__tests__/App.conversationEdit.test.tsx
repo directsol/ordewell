@@ -1,13 +1,8 @@
 import React from 'react';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, act, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import App from '../App';
-
-function send(msg: unknown) {
-  act(() => {
-    window.dispatchEvent(new MessageEvent('message', { data: msg }));
-  });
-}
+import { hostBridge, post as send } from './hostBridge';
 
 const plan = {
   tasks: [{ id: 't1', order: 1, title: 'Only task', description: '', type: 'ai' as const, status: 'pending' as const, dependencies: [], subtasks: [], assignedRunner: 'claude-code', completionMarker: 'm1', taskMode: 'build' }],
@@ -20,17 +15,21 @@ const plan = {
 const textarea = () => document.querySelector('.chat-input-row textarea') as HTMLTextAreaElement;
 
 describe('App — a compaction redraws the transcript', () => {
-  beforeEach(() => render(<App />));
+  let host: ReturnType<typeof hostBridge>;
+  beforeEach(() => {
+    render(<App />);
+    host = hostBridge();
+  });
 
   it('replaces the transcript but keeps the plan and its task output', () => {
-    send({ type: 'restoreChat', hasPlan: true, history: [
+    host.provider.restoreChat({ conversationHistory: [
       { role: 'user', content: 'the goal', timestamp: '2026-01-01T00:00:00Z' },
       { role: 'user', content: 'a message about to be condensed', timestamp: '2026-01-01T00:00:01Z' },
     ] });
     send({ type: 'planUpdated', plan });
     send({ type: 'taskOutput', taskId: 't1', text: 'still running output' });
 
-    send({ type: 'conversationReplaced', hasPlan: true, history: [
+    host.provider.replaceConversation({ conversationHistory: [
       { role: 'user', content: 'the goal', timestamp: '2026-01-01T00:00:00Z' },
     ] });
 
@@ -41,7 +40,7 @@ describe('App — a compaction redraws the transcript', () => {
   });
 
   it('shows a compaction summary as a visible notice, not as something the planner just said', () => {
-    send({ type: 'conversationReplaced', hasPlan: false, history: [
+    host.provider.replaceConversation({ conversationHistory: [
       { role: 'assistant', content: 'Conversation condensed: …\n\nWe agreed on a REST API.', timestamp: '2026-01-01T00:00:00Z', kind: 'compaction' },
       { role: 'user', content: 'and auth?', timestamp: '2026-01-01T00:00:01Z' },
     ] });

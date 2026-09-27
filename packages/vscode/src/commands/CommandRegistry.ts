@@ -36,7 +36,6 @@ export interface CommandDeps {
   setGeneratingPlan: (v: boolean) => void;
   getResearchAbort: () => AbortController | null;
   setResearchAbort: (c: AbortController | null) => void;
-  setLastPlannerContent: (c: string | null) => void;
   handleApprovePlan: () => Promise<void>;
   handleStartPlanning: (text: string) => Promise<void>;
   sendRunnerAndModels: () => Promise<void>;
@@ -83,7 +82,7 @@ function applyLoadedSession(
   deps.setCurrentGoal(loaded.meta.goal);
   // restoreChat first — it resets any stuck stop/busy state in the webview
   // before the plan and goal messages land.
-  deps.chatProvider.restoreChat(loaded.plan.conversationHistory ?? [], loaded.plan.tasks.length > 0);
+  deps.chatProvider.restoreChat(loaded.plan);
   deps.chatProvider.setGoal(loaded.meta.goal);
   if (loaded.plan.tasks.length > 0) deps.chatProvider.planGenerated(loaded.plan);
   replayIsolation(deps.session, deps.chatProvider);
@@ -375,6 +374,7 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
         deps.terminalRunner.stopAll();
         deps.setCurrentPlan(createEmptyPlan());
         deps.chatProvider.setState('empty');
+        deps.chatProvider.conversation.reset();
         clearState(deps.fsAdapter.getWorkspaceRoot());
       }
     }),
@@ -401,7 +401,6 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       deps.setGeneratingPlan(false);
       deps.getResearchAbort()?.abort();
       deps.setResearchAbort(null);
-      deps.setLastPlannerContent(null);
       // Full core reset — clearing only host-side state leaves the previous
       // session's tasks and live planner conversation inside the Session,
       // which then leak into the next planning chat as the "current plan".
@@ -410,6 +409,7 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       deps.setCurrentPlan(createEmptyPlan());
       deps.setCurrentGoal('');
       deps.chatProvider.setState('empty');
+      deps.chatProvider.conversation.reset();
       deps.chatProvider.setGoal('');
       clearState(deps.fsAdapter.getWorkspaceRoot());
       deps.log('New session started');

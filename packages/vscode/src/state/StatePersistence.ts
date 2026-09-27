@@ -64,6 +64,7 @@ export function restoreState(deps: PersistenceDeps): void {
     if (saved.queuedMessages && saved.queuedMessages.length > 0) {
       deps.session.setQueuedMessages(saved.queuedMessages);
     }
+    deps.chatProvider.conversation.reload(saved);
     if (saved.tasks.length > 0) {
       deps.chatProvider.setState('planDraft');
       deps.chatProvider.showPlan(saved);

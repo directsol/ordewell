@@ -1,15 +1,9 @@
 import React from 'react';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, act, fireEvent, screen } from '@testing-library/react';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { render, fireEvent, screen } from '@testing-library/react';
+import type { ConversationMessage, SessionMessage } from '@ordewell/core';
 import App from '../App';
-
-const api = (globalThis as unknown as { __vscodeApi: { postMessage: ReturnType<typeof vi.fn> } }).__vscodeApi;
-
-function send(msg: unknown) {
-  act(() => {
-    window.dispatchEvent(new MessageEvent('message', { data: msg }));
-  });
-}
+import { api, hostBridge, post as send, rowKinds } from './hostBridge';
 
 const t1 = {
   id: 't1', order: 1, title: 'Add rate limiting', description: '', type: 'ai' as const,
@@ -17,6 +11,12 @@ const t1 = {
   completionMarker: 'm1', taskMode: 'build',
 };
 const t2 = { ...t1, id: 't2', order: 2, title: 'Return 429s' };
+
+const marker = (content: string, timestamp: string): ConversationMessage => ({ role: 'assistant', content, timestamp, kind: 'plan_generated' });
+
+/** How the session announces a plan: the transcript it carries gains a marker. */
+const planGenerated = (...history: ConversationMessage[]): SessionMessage =>
+  ({ type: 'plan_generated', plan: { conversationHistory: history }, goal: '', runners: [] }) as unknown as SessionMessage;
 
 const plan = {
   tasks: [t1],
@@ -32,7 +32,14 @@ const plan = {
  * generated. The chat keeps a chip per revision pointing at it.
  */
 describe('plan dock', () => {
-  beforeEach(() => render(<App />));
+  let host: ReturnType<typeof hostBridge>;
+  beforeEach(() => {
+    render(<App />);
+    host = hostBridge();
+  });
+
+  const first = marker('Plan generated with 1 task.', '2026-01-01T00:00:01Z');
+  const second = marker('Plan updated — now 2 tasks.', '2026-01-01T00:00:03Z');
 
   it('mounts the plan in the dock and never inside the scrolling message list', () => {
     send({ type: 'planUpdated', plan });
@@ -52,7 +59,9 @@ describe('plan dock', () => {
   });
 
   it('drops a chip in the chat for the plan, and another for each revision', () => {
+    host.session(planGenerated(first));
     send({ type: 'planUpdated', plan });
+    host.session(planGenerated(first, second));
     send({ type: 'planUpdated', plan: { ...plan, tasks: [t1, t2] } });
 
     const chips = [...document.querySelectorAll('.plan-revision-chip')].map((c) => c.textContent);
@@ -60,19 +69,14 @@ describe('plan dock', () => {
   });
 
   it('puts the revision chip after the message that caused it', () => {
-    const textarea = document.querySelector('.chat-input-row textarea') as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: 'drop the last task' } });
-    fireEvent.keyDown(textarea, { key: 'Enter' });
+    host.session({ type: 'planner_turn_started', turnId: 't', prompt: 'drop the last task' }, planGenerated(first));
     send({ type: 'planUpdated', plan });
 
-    const rows = [...document.querySelectorAll('.message-list > *')];
-    const userIdx = rows.findIndex((r) => r.classList.contains('chat-msg-user'));
-    const chipIdx = rows.findIndex((r) => r.classList.contains('plan-revision-chip-row'));
-    expect(userIdx).toBeGreaterThanOrEqual(0);
-    expect(chipIdx).toBeGreaterThan(userIdx);
+    expect(rowKinds()).toEqual(['chat-msg', 'plan-revision-chip-row']);
   });
 
   it('does not chip or reopen for a status tick during execution', () => {
+    host.session(planGenerated(first));
     send({ type: 'planUpdated', plan });
     fireEvent.click(document.querySelector('.plan-dock-bar')!);
     expect(document.querySelector('.plan-dock')!.classList.contains('collapsed')).toBe(true);
@@ -93,6 +97,7 @@ describe('plan dock', () => {
   });
 
   it('reopens the dock from a revision chip', () => {
+    host.session(planGenerated(first));
     send({ type: 'planUpdated', plan });
     fireEvent.click(document.querySelector('.plan-dock-bar')!);
     expect(document.querySelector('.plan-dock')!.classList.contains('collapsed')).toBe(true);
@@ -130,26 +135,25 @@ describe('plan dock', () => {
   });
 
   it('replays one chip per persisted revision marker, in order', () => {
-    send({
-      type: 'restoreChat',
-      hasPlan: true,
-      history: [
+    host.provider.restoreChat({
+      conversationHistory: [
         { role: 'user', content: 'add rate limiting', timestamp: '2026-01-01T00:00:00Z' },
-        { role: 'assistant', content: 'Plan generated with 1 task.', timestamp: '2026-01-01T00:00:01Z', kind: 'plan_generated' },
+        first,
         { role: 'user', content: 'split the last one', timestamp: '2026-01-01T00:00:02Z' },
-        { role: 'assistant', content: 'Plan updated — now 2 tasks.', timestamp: '2026-01-01T00:00:03Z', kind: 'plan_generated' },
+        second,
       ],
     });
 
-    // The trailing scroll sentinel is classless — it is not a timeline row.
-    const kinds = [...document.querySelectorAll('.message-list > [class]')]
-      .map((r) => (r.classList.contains('plan-revision-chip-row') ? 'chip' : 'msg'));
-    expect(kinds).toEqual(['msg', 'chip', 'msg', 'chip']);
+    expect(rowKinds()).toEqual(['chat-msg', 'plan-revision-chip-row', 'chat-msg', 'plan-revision-chip-row']);
+    expect([...document.querySelectorAll('.plan-revision-chip')].map((c) => c.textContent)).toEqual(['Plan generated · 1 task', 'Plan updated · 2 tasks']);
   });
 
   it('takes the dock and the chips away with the session', () => {
+    host.session(planGenerated(first));
     send({ type: 'planUpdated', plan });
+    // What the host does for a new session.
     send({ type: 'setState', state: 'empty' });
+    host.provider.conversation.reset();
 
     expect(document.querySelector('.plan-dock')).toBeNull();
     expect(document.querySelector('.plan-revision-chip')).toBeNull();

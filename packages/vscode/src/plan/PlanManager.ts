@@ -8,7 +8,6 @@ import type { ChatViewProvider } from '../providers/ChatViewProvider';
 import { VsCodeConfig } from '../adapters/VsCodeConfig';
 import { VsCodeFileSystem } from '../adapters/VsCodeFileSystem';
 import { VsCodeTerminalRunner } from '../adapters/VsCodeTerminalRunner';
-import { routePlannerStream } from '../PlannerStreamRouter';
 import { handleApprovalMessage, handleApprovalDecidedMessage } from '../approvals';
 import { handleIsolationBlocked, handleIsolationHandoff } from './isolation';
 
@@ -48,8 +47,6 @@ export interface PlanManagerDeps {
   setGeneratingPlan: (v: boolean) => void;
   getResearchAbort: () => AbortController | null;
   setResearchAbort: (c: AbortController | null) => void;
-  getLastPlannerContent: () => string | null;
-  setLastPlannerContent: (c: string | null) => void;
   persistState: () => void;
   saveCurrentSession: () => void;
   log: (msg: string) => void;
@@ -112,10 +109,8 @@ export function reportPlannerError(err: unknown, deps: PlanManagerDeps): void {
     err.name === 'APIUserAbortError' ||
     /aborted/i.test(err.message)
   );
-  if (isAbort) {
-    deps.chatProvider.sendPlannerInterrupted('');
-    return;
-  }
+  // The stop already ended the turn on screen.
+  if (isAbort) return;
   const message = err instanceof Error ? err.message : String(err);
   deps.chatProvider.showError(`Planner failed: ${message}`);
 }
@@ -163,7 +158,6 @@ export async function handleStartPlanning(
   try {
     deps.setGeneratingPlan(true);
     deps.setResearchAbort(new AbortController());
-    deps.setLastPlannerContent(null);
 
     const plan = await deps.session.startPlanning(userDescription, runners, {
       signal: deps.getResearchAbort()?.signal,
@@ -400,12 +394,7 @@ export function handleSessionMessage(
   msg: import('@ordewell/core').SessionMessage,
   deps: PlanManagerDeps,
 ): void {
-  const token = msg.type === 'plan_token' ? msg.token : msg.type === 'planner_text_delta' ? msg.text : null;
-  if (token !== null && deps.isGeneratingPlan()) {
-    const current = deps.getLastPlannerContent() ?? '';
-    deps.setLastPlannerContent(current + token);
-  }
-  if (routePlannerStream(msg, deps.chatProvider, deps.isGeneratingPlan())) return;
+  deps.chatProvider.conversation.receive(msg);
   if (msg.type === 'approval_request') {
     // Fire and forget: the Session's research loop is already awaiting the
     // answer, and blocking the broadcast seam would stall every other message.
@@ -439,7 +428,7 @@ export function handleSessionMessage(
         }
       },
       resolve: (approvalId, granted) => deps.session.resolveApproval(approvalId, granted),
-      notifyWebview: (text) => deps.chatProvider.sendNewMessage(text, new Date().toISOString()),
+      notifyWebview: (text) => deps.chatProvider.conversation.note('system', text),
     });
     return;
   }
@@ -456,13 +445,10 @@ export function handleSessionMessage(
     return;
   }
   if (msg.type === 'approval_decided') {
-    handleApprovalDecidedMessage(msg, (text) => deps.chatProvider.sendNewMessage(text, new Date().toISOString()));
+    handleApprovalDecidedMessage(msg, (text) => deps.chatProvider.conversation.note('system', text));
     return;
   }
   switch (msg.type) {
-    case 'planner_message':
-      if (deps.isGeneratingPlan()) deps.chatProvider.sendNewMessage(msg.content, msg.timestamp);
-      break;
     case 'checkpoint':
       deps.chatProvider.showCheckpoint(msg.taskId, msg.taskTitle, msg.summary);
       break;
@@ -518,10 +504,10 @@ export function handleSessionMessage(
     case 'isolation_handoff':
       handleIsolationHandoff({ repos: msg.repos, landed: msg.landed }, deps);
       break;
-    // Handled by `routePlannerStream` above (it returns before the switch), or
-    // not rendered by this surface at all — the turn-scoped planner stream waits
-    // for the shared view (#53). Named so a new SessionMessage variant fails to
-    // compile until someone decides what it means here.
+    // Drawn by the conversation view above, or not by this surface at all.
+    // Named so a new SessionMessage variant fails to compile until someone
+    // decides what it means here.
+    case 'planner_message':
     case 'plan_token':
     case 'planner_text_delta':
     case 'plan_thinking':

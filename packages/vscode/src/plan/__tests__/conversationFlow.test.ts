@@ -121,7 +121,7 @@ describe('fork, rewind and compact through the VS Code conversation module', () 
     expect(condensed[0]).toMatchObject({ kind: 'compaction' });
     expect(condensed[0].content).toContain(SUMMARY);
     expect(condensed.slice(1).map((m) => m.content)).toEqual(['add streaming', 'Tasks updated.', 'keep it dependency-free', 'Noted.']);
-    expect(chat.replaceConversation.mock.lastCall![0][0]).toMatchObject({ kind: 'compaction' });
+    expect(chat.replaceConversation.mock.lastCall![0].conversationHistory[0]).toMatchObject({ kind: 'compaction' });
 
     await rewindConversation(deps(), '0');
     expect(chat.showError).toHaveBeenCalledWith(expect.stringMatching(/Could not rewind.*condensed/));
