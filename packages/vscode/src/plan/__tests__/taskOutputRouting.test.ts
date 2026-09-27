@@ -6,7 +6,7 @@ import type { SessionMessage } from '@ordewell/core';
 function deps(): PlanManagerDeps & { chatProvider: { sendTaskOutput: ReturnType<typeof vi.fn> } } {
   return {
     session: {} as PlanManagerDeps['session'],
-    chatProvider: { sendTaskOutput: vi.fn(), sendNewMessage: vi.fn(), showCheckpoint: vi.fn() },
+    chatProvider: { sendTaskOutput: vi.fn(), showCheckpoint: vi.fn(), conversation: { receive: vi.fn() } },
     isGeneratingPlan: () => false,
   } as unknown as PlanManagerDeps & { chatProvider: { sendTaskOutput: ReturnType<typeof vi.fn> } };
 }
@@ -32,12 +32,5 @@ describe('task_output routing (F8)', () => {
       ['t1', 'second\n'],
       ['t2', 'other\n'],
     ]);
-  });
-
-  it('does not claim the message as a planner-stream variant', () => {
-    const d = deps();
-    handleSessionMessage(output('t1', 'x'), d);
-
-    expect(d.chatProvider.sendNewMessage).not.toHaveBeenCalled();
   });
 });

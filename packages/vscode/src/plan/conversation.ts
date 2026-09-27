@@ -62,7 +62,7 @@ export async function forkConversation(deps: ConversationDeps): Promise<void> {
  */
 function showConversation(plan: NonNullable<Session['planState']>, deps: ConversationDeps): void {
   deps.setCurrentPlan(plan);
-  deps.chatProvider.replaceConversation(plan.conversationHistory ?? [], plan.tasks.length > 0);
+  deps.chatProvider.replaceConversation(plan);
   deps.persistState();
 }
 

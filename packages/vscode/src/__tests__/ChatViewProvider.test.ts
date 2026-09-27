@@ -95,12 +95,38 @@ describe('ChatViewProvider.resendAllState', () => {
   });
 });
 
-describe('ChatViewProvider conversation edits', () => {
-  it('redraws only the transcript — a restoreChat would also wipe a running task\'s output', () => {
+describe('ChatViewProvider conversation reloads', () => {
+  const history = [
+    { role: 'user' as const, content: 'goal', timestamp: '2026-01-01T00:00:00Z' },
+    { role: 'assistant' as const, content: 'Plan generated with 1 task.', timestamp: '2026-01-01T00:00:02Z', kind: 'plan_generated' as const },
+  ];
+  const researchLog = [
+    { id: 'r1', tool: 'read_file' as const, args: '{"path":"a.ts"}', result: 'x', timestamp: '2026-01-01T00:00:01Z', success: true, outcome: 'success' as const },
+  ];
+
+  it('reopens a session with its research and plan markers, not just the transcript', () => {
     const { provider, posted } = providerWithCapture();
-    const history = [{ role: 'user' as const, content: 'goal', timestamp: '2026-01-01T00:00:00Z' }];
-    provider.replaceConversation(history, true);
-    expect(posted).toEqual([{ type: 'conversationReplaced', history, hasPlan: true }]);
+    provider.restoreChat({ conversationHistory: history, researchLog });
+
+    expect(posted).toEqual([
+      { type: 'restoreChat' },
+      {
+        type: 'conversationPatch',
+        order: ['b1', 'b2', 'b3'],
+        changed: [
+          expect.objectContaining({ type: 'message', role: 'user', text: 'goal' }),
+          expect.objectContaining({ type: 'tool', headline: { name: 'Read', keyArg: 'a.ts' }, status: 'ok' }),
+          expect.objectContaining({ type: 'plan', status: 'generated', taskCount: 1 }),
+        ],
+      },
+    ]);
+  });
+
+  it('redraws only the conversation after a compaction — a restoreChat would also wipe a running task\'s output', () => {
+    const { provider, posted } = providerWithCapture();
+    provider.replaceConversation({ conversationHistory: history, researchLog });
+
+    expect(posted.map((m) => m.type)).toEqual(['conversationPatch']);
   });
 
   it('tells the webview when to lock and free the input', () => {

@@ -1,12 +1,13 @@
 import React from 'react';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, act, fireEvent } from '@testing-library/react';
+import type { ResearchStep, SessionMessage } from '@ordewell/core';
 import App from '../App';
+import { api, hostBridge, post, rowKinds } from './hostBridge';
+import type { HostToWebview } from '../../../shared/protocol';
 
-function send(msg: unknown) {
-  act(() => {
-    window.dispatchEvent(new MessageEvent('message', { data: msg }));
-  });
+function send(msg: HostToWebview) {
+  post(msg);
 }
 
 const plan = {
@@ -17,96 +18,135 @@ const plan = {
   lastUpdated: new Date().toISOString(),
 };
 
-describe('chat plan flow', () => {
-  beforeEach(() => render(<App />));
+const TURN = 'turn-1';
+const turnStarted = (prompt?: string): SessionMessage => ({ type: 'planner_turn_started', turnId: TURN, ...(prompt ? { prompt } : {}) });
+const turnEnded = (outcome: 'message' | 'plan' | 'stopped' = 'message'): SessionMessage => ({ type: 'planner_turn_ended', turnId: TURN, outcome });
+const delta = (text: string, segmentId = 's1'): SessionMessage => ({ type: 'planner_text_delta', turnId: TURN, segmentId, text });
+const thought = (text: string): SessionMessage => ({ type: 'planner_thinking_delta', turnId: TURN, text });
+const reply = (content: string, turnId: string | undefined = TURN): SessionMessage => ({ type: 'planner_message', content, timestamp: '', ...(turnId ? { turnId } : {}) });
+const call = (tool: string, args: object, toolCallId?: string, subagentId?: string): SessionMessage => ({
+  type: 'research_step', tool, args: JSON.stringify(args), turnId: TURN, ...(toolCallId ? { toolCallId } : {}), ...(subagentId ? { subagentId } : {}),
+});
+const done = (step: Partial<ResearchStep> & Pick<ResearchStep, 'tool' | 'args' | 'result'>): SessionMessage => ({
+  type: 'research_step_done', turnId: TURN, step: { id: 's', timestamp: '', success: true, outcome: 'success', ...step },
+});
 
-  it('renders task cards inline in planner message after plan generation', () => {
-    send({ type: 'researchProgress', progress: { type: 'tool_call', tool: 'read_file', toolArgs: '{}' } });
-    send({ type: 'streamToken', token: '{"tasks":[{"title":"Only task"' });
+const textarea = () => document.querySelector('.chat-input-row textarea') as HTMLTextAreaElement;
+function type(text: string) {
+  fireEvent.change(textarea(), { target: { value: text } });
+  fireEvent.keyDown(textarea(), { key: 'Enter' });
+}
+const processing = () => document.querySelector('.send-btn.processing') !== null;
+
+describe('chat plan flow', () => {
+  let host: ReturnType<typeof hostBridge>;
+  beforeEach(() => {
+    render(<App />);
+    host = hostBridge();
+  });
+
+  it('shows the plan\'s task cards once it is generated', () => {
+    host.session(turnStarted('plan it'), { type: 'plan_token', turnId: TURN, token: '{"tasks":[{"title":"Only task"' });
     send({ type: 'planUpdated', plan });
 
     expect(screen.getByText('Only task')).toBeTruthy();
     expect(document.querySelector('.plan-card-group')).toBeTruthy();
   });
 
-  it('shows thinking activities inline during research instead of spinner when activities exist', () => {
-    send({ type: 'researchProgress', progress: { type: 'thinking', text: 'Analyzing...' } });
-    // Activities are shown inline in the researcher chat message, not a bare spinner
-    expect(document.querySelector('.activity-think')).toBeTruthy();
+  it('says a plan is being built while its envelope streams', () => {
+    host.session(turnStarted('plan it'), { type: 'plan_token', turnId: TURN, token: '{"tasks":' });
+
+    expect(screen.getByText('Building plan…')).toBeTruthy();
   });
 
-  it('shows stop button during research and send button normally', () => {
+  it('draws the planner\'s thinking as it streams, as one collapsed line', () => {
+    host.session(turnStarted(), thought('Analyzing the repo.'));
+
+    expect(document.querySelector('.activity-think-head')!.textContent).toContain('Thinking…');
+    expect(document.querySelector('.activity-think-pre')).toBeNull();
+  });
+
+  it('locks the input for the length of a planner turn', () => {
     expect(document.querySelector('.send-btn')).toBeTruthy();
-    expect(document.querySelector('.send-btn.processing')).toBeNull();
+    expect(processing()).toBe(false);
 
-    send({ type: 'researchProgress', progress: { type: 'thinking', text: 'Analyzing...' } });
-    expect(document.querySelector('.send-btn.processing')).toBeTruthy();
+    host.session(turnStarted());
+    expect(processing()).toBe(true);
 
-    send({ type: 'planUpdated', plan });
-    expect(document.querySelector('.send-btn.processing')).toBeNull();
+    host.session(turnEnded());
+    expect(processing()).toBe(false);
   });
 
-  it('nests a spawned research subagent (issue #34) as its own expandable block with its inner tool call inside', () => {
-    const subagentId = 'sub-1';
-    send({ type: 'researchProgress', progress: { type: 'tool_call', tool: 'spawn_research_agent', toolArgs: JSON.stringify({ prompt: 'explore auth' }), subagentId } });
-    // The subagent block appears immediately, collapsed and running.
-    expect(document.querySelector('.activity-subagent')).toBeTruthy();
-    expect(document.querySelector('.activity-subagent-badge')).toBeTruthy();
-    expect(document.querySelector('.activity-subagent-label')!.textContent).toContain('explore auth');
+  it('streams the reply as it arrives and settles it in place', () => {
+    host.session(turnStarted('hi'), delta('Reading **the'));
+    expect(document.querySelector('.chat-msg-planner.streaming .chat-msg-content')!.textContent).toBe('Reading **the');
 
-    // An inner tool call from within the subagent nests under it, not the top-level list.
-    send({ type: 'researchProgress', progress: { type: 'tool_call', tool: 'read_file', toolArgs: JSON.stringify({ path: 'src/auth.ts' }), subagentId } });
-    expect(document.querySelectorAll('.chat-msg-activities > .activity-subagent').length).toBe(1);
-    fireEvent.click(document.querySelector('.activity-subagent-toggle')!);
-    expect(document.querySelector('.activity-subagent-body .activity-tool-call')).toBeTruthy();
-
-    // Its result folds into the nested tool_call, not a top-level activity.
-    const step = { id: 's1', tool: 'read_file' as const, args: JSON.stringify({ path: 'src/auth.ts' }), result: 'contents', timestamp: '' };
-    send({ type: 'researchProgress', progress: { type: 'tool_result', step, subagentId } });
-    expect(document.querySelector('.activity-subagent-body .activity-tool-icon')!.textContent).toBe('✓');
-
-    // The subagent's own completion marks it done and attaches its digest.
-    const spawnStep = { id: 'sp1', tool: 'spawn_research_agent' as const, args: JSON.stringify({ prompt: 'explore auth' }), result: 'Digest: uses JWT.', timestamp: '' };
-    send({ type: 'researchProgress', progress: { type: 'tool_result', step: spawnStep, subagentId } });
-    expect(document.querySelector('.activity-subagent-icon')!.textContent).toBe('✓');
-    expect(document.querySelector('.activity-subagent-badge')).toBeNull();
-    expect(document.querySelector('.activity-subagent-body .activity-think-toggle')).toBeTruthy();
+    host.session(delta(' code**.'), reply('Reading **the code**.'), turnEnded());
+    const settled = document.querySelectorAll('.chat-msg-planner');
+    expect(settled).toHaveLength(1);
+    expect(settled[0].classList.contains('streaming')).toBe(false);
+    expect(settled[0].querySelector('strong')!.textContent).toBe('the code');
   });
 
-  it('lands each result on its own line across a parallel same-tool round', () => {
-    const step = (id: string, path: string, toolCallId: string) => ({
-      id, tool: 'read_file' as const, args: JSON.stringify({ path }), result: `${path} body`,
-      timestamp: '', success: true, outcome: 'success' as const, toolCallId,
-    });
+  it('turns the spawn call into one subagent card with its brief, status and digest — its own calls stay inside it', () => {
+    host.session(turnStarted(), call('spawn_research_agent', { prompt: 'explore auth' }, 'c-spawn', 'sub-1'));
+    expect(rowKinds()).toEqual(['cmd-row']);
 
-    send({ type: 'researchProgress', progress: { type: 'tool_call', tool: 'read_file', toolArgs: JSON.stringify({ path: 'src/a.ts' }), toolCallId: 'tc-1' } });
-    send({ type: 'researchProgress', progress: { type: 'tool_call', tool: 'read_file', toolArgs: JSON.stringify({ path: 'src/b.ts' }), toolCallId: 'tc-2' } });
+    host.session(
+      { type: 'subagent_started', turnId: TURN, subagentId: 'sub-1', brief: 'explore auth' },
+      call('read_file', { path: 'src/auth.ts' }, 'c-read', 'sub-1'),
+    );
+    expect(document.querySelector('.subagent-card-status')!.textContent).toBe('running…');
+    expect(rowKinds()).toEqual(['subagent-card']);
+
+    host.session(
+      done({ tool: 'read_file', args: '{"path":"src/auth.ts"}', result: 'contents', toolCallId: 'c-read', subagentId: 'sub-1' }),
+      { type: 'subagent_finished', turnId: TURN, subagentId: 'sub-1', outcome: 'done', digest: 'Digest: uses JWT.' },
+    );
+    expect(document.querySelector('.subagent-card-brief')!.textContent).toBe('explore auth');
+    expect(document.querySelector('.subagent-card-status')!.textContent).toBe('done');
+    expect(document.querySelector('.subagent-card-digest')!.textContent).toBe('Digest: uses JWT.');
+    expect(document.querySelector('.subagent-card-steps')).toBeNull();
+  });
+
+  it('lands each result on its own row across a parallel same-tool round', () => {
+    host.session(turnStarted(), call('read_file', { path: 'src/a.ts' }, 'tc-1'), call('read_file', { path: 'src/b.ts' }, 'tc-2'));
     // Out of order: the second call settles first.
-    send({ type: 'researchProgress', progress: { type: 'tool_result', step: step('s2', 'src/b.ts', 'tc-2'), toolCallId: 'tc-2' } });
+    host.session(done({ tool: 'read_file', args: '{"path":"src/b.ts"}', result: 'b body', toolCallId: 'tc-2' }));
 
-    const names = Array.from(document.querySelectorAll('.activity-tool-name')).map((n) => n.textContent);
-    const icons = Array.from(document.querySelectorAll('.activity-tool-icon')).map((n) => n.textContent);
-    expect(names).toEqual(['read_file', 'read_file b.ts']);
-    expect(icons).toEqual(['⚙', '✓']);
+    const rows = () => [...document.querySelectorAll('.cmd-row')].map((r) => [r.querySelector('.cmd-row-head')!.textContent, r.getAttribute('data-status')]);
+    expect(rows()).toEqual([['Read(src/a.ts)', 'pending'], ['Read(src/b.ts)', 'ok']]);
 
-    send({ type: 'researchProgress', progress: { type: 'tool_result', step: step('s1', 'src/a.ts', 'tc-1'), toolCallId: 'tc-1' } });
-    expect(Array.from(document.querySelectorAll('.activity-tool-name')).map((n) => n.textContent))
-      .toEqual(['read_file a.ts', 'read_file b.ts']);
+    host.session(done({ tool: 'read_file', args: '{"path":"src/a.ts"}', result: 'a body', toolCallId: 'tc-1' }));
+    expect(rows()).toEqual([['Read(src/a.ts)', 'ok'], ['Read(src/b.ts)', 'ok']]);
   });
 
-  it('shows a refused command as refused and keeps its output one click away', () => {
-    const step = {
-      id: 's1', tool: 'bash' as const, args: JSON.stringify({ command: 'rm -rf /' }),
-      result: 'Command refused: writes belong to the runners.',
-      timestamp: '', success: false, outcome: 'refused' as const, toolCallId: 'tc-1',
-    };
+  it('shows a refused command as refused, with the reason in its preview', () => {
+    const args = { command: 'rm -rf /' };
+    host.session(
+      turnStarted(), call('bash', args, 'tc-1'),
+      done({ tool: 'bash', args: JSON.stringify(args), result: 'Command refused: writes belong to the runners.', success: false, outcome: 'refused', toolCallId: 'tc-1' }),
+    );
 
-    send({ type: 'researchProgress', progress: { type: 'tool_call', tool: 'bash', toolArgs: step.args, toolCallId: 'tc-1' } });
-    send({ type: 'researchProgress', progress: { type: 'tool_result', step, toolCallId: 'tc-1' } });
+    const row = document.querySelector('.cmd-row')!;
+    expect(row.getAttribute('data-status')).toBe('denied');
+    expect(row.querySelector('.cmd-row-outcome')!.textContent).toBe('refused');
+    expect(row.querySelector('.cmd-row-preview')!.textContent).toContain('Command refused');
+  });
 
-    expect(document.querySelector('.activity-tool-icon')!.textContent).toBe('⊘');
-    fireEvent.click(document.querySelector('.activity-tool-toggle')!);
-    expect(document.querySelector('.activity-tool-pre')!.textContent).toContain('Command refused');
+  it('keeps streamed prose and commands in the order they happened', () => {
+    host.session(
+      turnStarted(), delta('Let me look at the config first.', 's1'), call('read_file', { path: 'a' }),
+      delta('Now I need to find the tests.', 's2'), call('grep', { pattern: 'x' }),
+    );
+
+    expect(rowKinds()).toEqual(['chat-msg', 'cmd-row', 'chat-msg', 'cmd-row']);
+  });
+
+  it('keeps reasoning and commands interleaved in arrival order', () => {
+    host.session(turnStarted(), thought('Scanning the repo…'), call('list_dir', { path: '.' }), { type: 'planner_thinking_delta', turnId: TURN, segmentId: 'k2', text: 'Checking entry points…' });
+
+    expect(rowKinds()).toEqual(['activity-think', 'cmd-row', 'activity-think']);
   });
 
   it('shows runner output inside the task card once execution starts', () => {
@@ -130,14 +170,12 @@ describe('chat plan flow', () => {
   });
 
   it('does not render radio tile runner-choice UI', () => {
-    send({ type: 'setEnabledRunnerIds', enabledRunnerIds: ['claude-code', 'opencode'] });
-    send({ type: 'setRunnerList', runnerList: [{ id: 'claude-code', displayName: 'Claude Code' }, { id: 'opencode', displayName: 'OpenCode' }] });
+    send({ type: 'setRunners', runners: [{ id: 'claude-code', displayName: 'Claude Code', enabled: true }, { id: 'opencode', displayName: 'OpenCode', enabled: true }] });
     expect(document.querySelector('.runner-choice')).toBeNull();
   });
 
   it('renders runner toggle pills', () => {
-    send({ type: 'setEnabledRunnerIds', enabledRunnerIds: ['claude-code'] });
-    send({ type: 'setRunnerList', runnerList: [{ id: 'claude-code', displayName: 'Claude Code' }] });
+    send({ type: 'setRunners', runners: [{ id: 'claude-code', displayName: 'Claude Code', enabled: true }] });
 
     const pill = document.querySelector('.runner-pill.on');
     expect(pill).toBeTruthy();
@@ -145,8 +183,7 @@ describe('chat plan flow', () => {
   });
 
   it('renders TDD skill pill and toggles it via postMessage', () => {
-    const vscodeApi = (globalThis as unknown as { __vscodeApi: { postMessage: import('vitest').Mock } }).__vscodeApi;
-    vscodeApi.postMessage.mockClear();
+    api.postMessage.mockClear();
 
     send({ type: 'setSkillToggles', toggles: { tdd: false, verify: false } });
     const tddButton = Array.from(document.querySelectorAll('.skill-toggle-pill')).find(
@@ -156,34 +193,30 @@ describe('chat plan flow', () => {
     expect(tddButton.classList.contains('off')).toBeTruthy();
 
     act(() => { fireEvent.click(tddButton); });
-    expect(vscodeApi.postMessage).toHaveBeenCalledWith(
+    expect(api.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'toggleSkill', skillId: 'tdd', enabled: true }),
     );
   });
 
-  it('renders PRD markdown as a planner chat message', () => {
-    send({ type: 'newMessage', message: { role: 'assistant', content: '## PRD\n\nAs a user, I want to log in', timestamp: new Date().toISOString() } });
-    const contentEl = document.querySelector('.chat-msg-content');
+  it('renders a reply sent outside a turn (a PRD) as a planner chat message', () => {
+    host.session(reply('## PRD\n\nAs a user, I want to log in', undefined));
+    const contentEl = document.querySelector('.chat-msg-planner .chat-msg-content');
     expect(contentEl?.textContent).toContain('As a user, I want to log in');
-    expect(screen.queryByText('Proceed with this PRD')).toBeNull();
-    expect(screen.queryByText('Revise PRD')).toBeNull();
   });
 
   it('renders Execute Plan button on plan draft', () => {
     send({ type: 'planUpdated', plan });
-    const executeBtn = screen.queryByText('Execute Plan');
-    expect(executeBtn).toBeTruthy();
+    expect(screen.queryByText('Execute Plan')).toBeTruthy();
   });
 
   it('Run Task requests single-task execution and the plan control becomes Stop while it runs', () => {
-    const vscodeApi = (globalThis as unknown as { __vscodeApi: { postMessage: import('vitest').Mock } }).__vscodeApi;
-    vscodeApi.postMessage.mockClear();
+    api.postMessage.mockClear();
     send({ type: 'planUpdated', plan });
 
     fireEvent.click(screen.getByText('Only task'));
     fireEvent.click(screen.getByText('Run Task'));
 
-    expect(vscodeApi.postMessage).toHaveBeenCalledWith(
+    expect(api.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'sendSystemCommand', command: 'runTask', taskId: 't1' }),
     );
 
@@ -196,234 +229,164 @@ describe('chat plan flow', () => {
   });
 
   it('sends "proceed" text as plain sendMessage without actionContext (pure chat)', () => {
-    const vscodeApi = (globalThis as unknown as { __vscodeApi: { postMessage: import('vitest').Mock } }).__vscodeApi;
-    vscodeApi.postMessage.mockClear();
-
+    api.postMessage.mockClear();
     send({ type: 'planUpdated', plan });
 
-    const textarea = document.querySelector('.chat-input-row textarea') as HTMLTextAreaElement;
-    expect(textarea).toBeTruthy();
-    fireEvent.change(textarea, { target: { value: 'proceed' } });
-    fireEvent.keyDown(textarea, { key: 'Enter' });
+    type('proceed');
 
-    expect(vscodeApi.postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'sendMessage', text: 'proceed' })
-    );
-    const call = vscodeApi.postMessage.mock.calls.find(
-      (c: [{ type: string, text: string, actionContext?: unknown }]) => c[0].type === 'sendMessage' && c[0].text === 'proceed'
-    );
-    expect(call).toBeTruthy();
-    expect(call[0].actionContext).toBeUndefined();
+    const sent = api.postMessage.mock.calls.map((c) => c[0]).find((m) => m.type === 'sendMessage' && m.text === 'proceed');
+    expect(sent).toBeTruthy();
+    expect(sent.actionContext).toBeUndefined();
   });
 
-  it('renders planner questions as chat messages, not system messages', () => {
-    send({ type: 'newMessage', message: { role: 'assistant', content: 'What language should be used?', timestamp: new Date().toISOString() } });
-    expect(screen.getByText('What language should be used?')).toBeTruthy();
-    expect(document.querySelector('.prd-answer-input')).toBeNull();
+  it('asks the host to show what the user typed — the conversation is the host\'s', () => {
+    api.postMessage.mockClear();
+    type('build a login page');
+
+    expect(api.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'sendMessage', text: 'build a login page', typed: true }));
+    // Nothing is drawn until the host says so.
+    expect(document.querySelector('.chat-msg-user')).toBeNull();
   });
 
   it('renders a grilling interview question in the planner bubble, not the user bubble', () => {
-    const textarea = document.querySelector('.chat-input-row textarea') as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: 'build a login page' } });
-    fireEvent.keyDown(textarea, { key: 'Enter' });
-
-    send({ type: 'newMessage', message: { role: 'assistant', content: 'Should sessions use JWT or cookies?', timestamp: new Date().toISOString() } });
+    host.session(turnStarted('build a login page'), reply('Should sessions use JWT or cookies?'), turnEnded());
 
     const questionEl = screen.getByText('Should sessions use JWT or cookies?').closest('.chat-msg');
     expect(questionEl?.classList.contains('chat-msg-planner')).toBe(true);
-    expect(questionEl?.classList.contains('chat-msg-user')).toBe(false);
-  });
-
-  it('interleaves streamed prose and commands in execution order (prose folds into thinking dropdowns)', () => {
-    send({ type: 'streamToken', token: 'Let me look at the config first.' });
-    send({ type: 'researchProgress', progress: { type: 'tool_call', tool: 'read_file', toolArgs: '{}' } });
-    send({ type: 'streamToken', token: 'Now I need to find the tests.' });
-    send({ type: 'researchProgress', progress: { type: 'tool_call', tool: 'grep', toolArgs: '{}' } });
-
-    const kinds = Array.from(document.querySelectorAll('.chat-msg-activities > *')).map((el) =>
-      el.classList.contains('activity-think') ? 'think' : 'tool',
-    );
-    expect(kinds).toEqual(['think', 'tool', 'think', 'tool']);
-    // The folded prose no longer pools below the activity list.
-    const bubbleText = document.querySelector('.chat-msg-planner .chat-msg-content');
-    expect(bubbleText?.textContent ?? '').toBe('');
-  });
-
-  it('keeps reasoning-channel thinking and commands interleaved in arrival order', () => {
-    send({ type: 'researchProgress', progress: { type: 'thinking', text: 'Scanning the repo…' } });
-    send({ type: 'researchProgress', progress: { type: 'tool_call', tool: 'list_directory', toolArgs: '{}' } });
-    send({ type: 'researchProgress', progress: { type: 'thinking', text: 'Checking entry points…' } });
-
-    const kinds = Array.from(document.querySelectorAll('.chat-msg-activities > *')).map((el) =>
-      el.classList.contains('activity-think') ? 'think' : 'tool',
-    );
-    expect(kinds).toEqual(['think', 'tool', 'think']);
-  });
-
-  it('thinking dropdown streams collapsed, opens on click, and collapses again from title or text', () => {
-    send({ type: 'researchProgress', progress: { type: 'thinking', text: 'Deep in thought…' } });
-
-    // Collapsed by default, even while streaming — the title is the live signal.
-    expect(document.querySelector('.activity-think.expanded')).toBeNull();
-    const toggle = document.querySelector('.activity-think-toggle') as HTMLButtonElement;
-    expect(toggle.textContent).toContain('Thinking…');
-
-    act(() => { fireEvent.click(toggle); });
-    expect(document.querySelector('.activity-think.expanded')).toBeTruthy();
-    expect(document.querySelector('.activity-think-pre')?.textContent).toContain('Deep in thought…');
-
-    // Clicking the opened text collapses it.
-    act(() => { fireEvent.click(document.querySelector('.activity-think-body')!); });
-    expect(document.querySelector('.activity-think.expanded')).toBeNull();
-
-    // And the title toggles it back open.
-    act(() => { fireEvent.click(toggle); });
-    expect(document.querySelector('.activity-think.expanded')).toBeTruthy();
+    expect(screen.getByText('build a login page').closest('.chat-msg')?.classList.contains('chat-msg-user')).toBe(true);
   });
 
   it('keeps the conversation visible when the goal label updates after a plan lands (regression: setGoal used to wipe the timeline)', () => {
-    send({ type: 'newMessage', message: { role: 'assistant', content: 'Here is the outline. Confirm?', timestamp: new Date().toISOString() } });
+    host.session(reply('Here is the outline. Confirm?', undefined));
     send({ type: 'planUpdated', plan });
-    // finishPlannerTurn sends the goal right after the plan — with an empty
-    // goal this used to translate into setState('empty') and erase everything.
     send({ type: 'setGoal', goal: '' });
 
     expect(screen.getByText('Here is the outline. Confirm?')).toBeTruthy();
     expect(document.querySelector('.plan-card-group')).toBeTruthy();
   });
 
-  it('clears the stuck "processing" send button once the planner asks a follow-up question', () => {
-    const textarea = document.querySelector('.chat-input-row textarea') as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: 'build a login page' } });
-    fireEvent.keyDown(textarea, { key: 'Enter' });
+  it('keeps the conversation when the host clears the plan — only the host resets the conversation', () => {
+    host.session(reply('Still here.', undefined));
+    send({ type: 'setState', state: 'empty' });
 
-    send({ type: 'researchProgress', progress: { type: 'thinking', text: 'Analyzing...' } });
-    expect(document.querySelector('.send-btn.processing')).toBeTruthy();
-
-    send({ type: 'newMessage', message: { role: 'assistant', content: 'Should sessions use JWT or cookies?', timestamp: new Date().toISOString() } });
-    expect(document.querySelector('.send-btn.processing')).toBeNull();
+    expect(screen.getByText('Still here.')).toBeTruthy();
   });
 
-  it('drops late newMessage from old session after new session is started', () => {
-    const textarea = document.querySelector('.chat-input-row textarea') as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: 'build a login page' } });
-    fireEvent.keyDown(textarea, { key: 'Enter' });
+  it('clears the "processing" send button once the planner\'s turn ends on a follow-up question', () => {
+    type('build a login page');
+    host.session(turnStarted('build a login page'), thought('Analyzing...'));
+    expect(processing()).toBe(true);
 
-    send({ type: 'streamToken', token: 'Generating plan...' });
-    expect(document.querySelector('.send-btn.processing')).toBeTruthy();
-
-    // Start a new session via /new — during processing this shows a confirm dialog
-    fireEvent.change(textarea, { target: { value: '/new' } });
-    fireEvent.keyDown(textarea, { key: 'Enter' });
-    const confirmBtn = screen.getByText('New Session');
-    const vscodeApi = (globalThis as unknown as { __vscodeApi: { postMessage: import('vitest').Mock } }).__vscodeApi;
-    vscodeApi.postMessage.mockClear();
-    fireEvent.click(confirmBtn);
-    expect(vscodeApi.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'newSession' }));
-
-    // The processing state should be cleared immediately
-    expect(document.querySelector('.send-btn.processing')).toBeNull();
-
-    // A late newMessage from the old session's dying LLM stream must not appear
-    send({ type: 'newMessage', message: { role: 'assistant', content: 'Stale message from old session', timestamp: new Date().toISOString() } });
-    expect(screen.queryByText('Stale message from old session')).toBeNull();
+    host.session(reply('Should sessions use JWT or cookies?'), turnEnded());
+    expect(processing()).toBe(false);
   });
 
-  it('drops late plannerInterrupted from old session after new session is started', () => {
-    const textarea = document.querySelector('.chat-input-row textarea') as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: 'build a login page' } });
-    fireEvent.keyDown(textarea, { key: 'Enter' });
+  it('frees the input at once on /new, and the old session\'s late output never lands', () => {
+    type('build a login page');
+    host.session(turnStarted('build a login page'), delta('Generating plan...'));
+    expect(processing()).toBe(true);
 
-    send({ type: 'streamToken', token: 'Generating plan...' });
-
-    // Start a new session via /new — confirm the dialog
-    fireEvent.change(textarea, { target: { value: '/new' } });
-    fireEvent.keyDown(textarea, { key: 'Enter' });
+    type('/new');
+    api.postMessage.mockClear();
     fireEvent.click(screen.getByText('New Session'));
+    expect(api.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'newSession' }));
+    expect(processing()).toBe(false);
 
-    // A late plannerInterrupted from the old session must not un-gate streams
-    send({ type: 'plannerInterrupted', message: { role: 'planner', content: 'Stale interrupt', timestamp: new Date().toISOString() } });
-    expect(screen.queryByText('Stale interrupt')).toBeNull();
+    // What the host does for newSession, then the dying stream's last words.
+    host.provider.conversation.reset();
+    host.session(delta(' stale token'), reply('Stale message from old session'));
 
-    // A late streamToken from the old session must also be dropped
-    send({ type: 'streamToken', token: 'stale token' });
-    expect(screen.queryByText('stale token')).toBeNull();
+    expect(screen.queryByText(/Generating plan|stale token|Stale message/)).toBeNull();
   });
 
   it('shows stop button in plan cards and input bar during execution (isExecuting derived from plan status)', () => {
-    const runningPlan = { ...plan, status: 'running' as const };
-    send({ type: 'planUpdated', plan: runningPlan });
+    send({ type: 'planUpdated', plan: { ...plan, status: 'running' as const } });
 
-    // The plan card Stop button should be visible
     expect(screen.queryByText('Stop')).toBeTruthy();
-
-    // The input bar send/stop button should be in processing (stop) mode
-    expect(document.querySelector('.send-btn.processing')).toBeTruthy();
+    expect(processing()).toBe(true);
   });
 
   it('sends stopExecution when stop button is clicked during execution', () => {
-    const vscodeApi = (globalThis as unknown as { __vscodeApi: { postMessage: import('vitest').Mock } }).__vscodeApi;
-    vscodeApi.postMessage.mockClear();
+    api.postMessage.mockClear();
+    send({ type: 'planUpdated', plan: { ...plan, status: 'running' as const } });
 
-    const runningPlan = { ...plan, status: 'running' as const };
-    send({ type: 'planUpdated', plan: runningPlan });
+    act(() => { fireEvent.click(document.querySelector('.send-btn.processing')!); });
 
-    // Click the stop button in the input bar
-    const stopBtn = document.querySelector('.send-btn.processing') as HTMLButtonElement;
-    expect(stopBtn).toBeTruthy();
-    act(() => { fireEvent.click(stopBtn); });
-
-    expect(vscodeApi.postMessage).toHaveBeenCalledWith(
+    expect(api.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'sendSystemCommand', command: 'stopExecution' }),
     );
   });
 
-  it('sends stopResearch when stop button is clicked during planner research', () => {
-    const vscodeApi = (globalThis as unknown as { __vscodeApi: { postMessage: import('vitest').Mock } }).__vscodeApi;
-    vscodeApi.postMessage.mockClear();
+  it('stops the planner turn: stopResearch goes to the host and the input frees at once', () => {
+    api.postMessage.mockClear();
+    host.session(turnStarted(), thought('Analyzing...'));
 
-    send({ type: 'researchProgress', progress: { type: 'thinking', text: 'Analyzing...' } });
+    act(() => { fireEvent.click(document.querySelector('.send-btn.processing')!); });
 
-    const stopBtn = document.querySelector('.send-btn.processing') as HTMLButtonElement;
-    expect(stopBtn).toBeTruthy();
-    act(() => { fireEvent.click(stopBtn); });
-
-    expect(vscodeApi.postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'stopResearch' }),
-    );
+    expect(api.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'stopResearch' }));
+    expect(processing()).toBe(false);
   });
 
-  it('does not duplicate the planner message when stop is followed by plannerInterrupted', () => {
-    // Start a planner turn with streaming content
-    send({ type: 'streamToken', token: 'Partial response...' });
-    expect(document.querySelector('.send-btn.processing')).toBeTruthy();
+  it('keeps what streamed before a stop, once, and drops what arrives after it', () => {
+    host.session(turnStarted('explain'), delta('Partial response...'));
+    act(() => { fireEvent.click(document.querySelector('.send-btn.processing')!); });
 
-    // Click stop
-    const stopBtn = document.querySelector('.send-btn.processing') as HTMLButtonElement;
-    act(() => { fireEvent.click(stopBtn); });
+    // What the host does for stopResearch, then the backend noticing late.
+    host.provider.conversation.stop();
+    host.session(delta(' and more'), reply('Partial response... and more'), turnEnded('stopped'));
 
-    // Host responds with plannerInterrupted containing the full content
-    send({ type: 'plannerInterrupted', message: { role: 'planner', content: 'Partial response...', timestamp: new Date().toISOString() } });
+    const planner = [...document.querySelectorAll('.chat-msg-planner .chat-msg-content')].map((el) => el.textContent);
+    expect(planner).toEqual(['Partial response...']);
+    expect(document.querySelector('.chat-msg-planner.streaming')).toBeNull();
+  });
 
-    // There should be exactly ONE planner message with the content, not two
-    const plannerMessages = document.querySelectorAll('.chat-msg-planner .chat-msg-content');
-    let count = 0;
-    plannerMessages.forEach((el) => {
-      if (el.textContent?.includes('Partial response...')) count++;
-    });
-    expect(count).toBe(1);
+  it('ignores a plan that lands between the stop click and the host closing the turn', () => {
+    host.session(turnStarted('plan it'));
+    act(() => { fireEvent.click(document.querySelector('.send-btn.processing')!); });
+    send({ type: 'planUpdated', plan });
+    expect(document.querySelector('.plan-card-group')).toBeNull();
+
+    host.provider.conversation.stop();
+    send({ type: 'planUpdated', plan });
+    expect(document.querySelector('.plan-card-group')).toBeTruthy();
   });
 
   it('asks for confirmation on /new when there is content even if not processing', () => {
-    // Send a plan to populate content
     send({ type: 'planUpdated', plan });
-
-    const textarea = document.querySelector('.chat-input-row textarea') as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: '/new' } });
-    fireEvent.keyDown(textarea, { key: 'Enter' });
-
-    // Confirmation dialog should appear
+    type('/new');
     expect(screen.getByText('New Session')).toBeTruthy();
+  });
+});
+
+describe('input watchdog', () => {
+  let host: ReturnType<typeof hostBridge>;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    render(<App />);
+    host = hostBridge();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const wait = (ms: number) => act(() => { vi.advanceTimersByTime(ms); });
+
+  it('frees the input after a long silence mid-turn, and says so in the conversation', () => {
+    host.session(turnStarted());
+    api.postMessage.mockClear();
+
+    wait(125_000);
+
+    expect(processing()).toBe(false);
+    expect(api.postMessage).toHaveBeenCalledWith({ type: 'addNote', text: expect.stringContaining('stopped responding') });
+  });
+
+  it('stays locked while a quiet planner keeps sending liveness', () => {
+    host.session(turnStarted());
+    for (let i = 0; i < 5; i++) {
+      wait(30_000);
+      host.session({ type: 'planner_liveness' });
+    }
+
+    expect(processing()).toBe(true);
   });
 });
 
@@ -474,8 +437,7 @@ describe('planner bar', () => {
   });
 
   it('tells the user what to install when no runner is detected', () => {
-    send({ type: 'setEnabledRunnerIds', enabledRunnerIds: [] });
-    send({ type: 'setRunnerList', runnerList: [] });
+    send({ type: 'setRunners', runners: [] });
     expect(document.querySelector('.setup-block-empty')?.textContent).toContain('Claude Code');
   });
 

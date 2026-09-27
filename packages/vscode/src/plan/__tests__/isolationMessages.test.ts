@@ -7,6 +7,7 @@ import type { IsolationView, TaskIsolation } from '@ordewell/core';
 function deps() {
   const chatProvider = {
     sendTaskIdle: vi.fn(),
+    conversation: { receive: vi.fn() },
     sendTaskIsolation: vi.fn(),
     showIsolationHandoff: vi.fn(),
     showIsolationMergeResult: vi.fn(),

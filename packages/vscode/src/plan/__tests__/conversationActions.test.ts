@@ -208,7 +208,7 @@ describe('compact', () => {
     await compactConversation(deps);
 
     expect(setCurrentPlan).toHaveBeenCalledWith(session.planState);
-    expect(chatProvider.replaceConversation).toHaveBeenCalledWith(summarised, false);
+    expect(chatProvider.replaceConversation).toHaveBeenCalledWith(session.planState);
     expect(persistState).toHaveBeenCalledTimes(1);
     expect(showInformationMessage.mock.calls[0][0]).toContain('4');
   });

@@ -235,17 +235,6 @@ body {
   word-break: break-word;
 }
 
-.chat-msg-time {
-  font-size: 10px;
-  color: var(--text-muted);
-  margin-top: 4px;
-  display: block;
-}
-
-.chat-msg-user .chat-msg-time {
-  color: rgba(255, 255, 255, 0.6);
-}
-
 /* ---- ChatMessage: inline working indicator ---- */
 
 .chat-msg-spinner {
@@ -266,6 +255,7 @@ body {
 }
 
 .chat-msg-working {
+  padding: 6px 14px;
   font-size: 12px;
   color: var(--text-muted);
   display: flex;
@@ -289,174 +279,57 @@ body {
   margin-bottom: 3px;
 }
 
-/* ---- ChatMessage: Thinking section ---- */
+/* ---- Conversation blocks (#51): thinking, command rows, subagent cards ---- */
 
-.chat-msg-thinking {
-  margin-top: 6px;
-  border: 1px solid var(--border-muted);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-
-.chat-msg-thinking.expanded {
-  border-color: var(--border-color);
-}
-
-.chat-msg-thinking-toggle {
-  display: flex;
+.chat-msg-error {
   align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 5px 10px;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-family: inherit;
+  padding: 4px 14px;
+}
+
+.chat-msg-error .chat-msg-content {
   font-size: 11px;
-  color: var(--text-muted);
-  transition: background var(--transition-fast);
-}
-
-.chat-msg-thinking-toggle:hover {
-  background: var(--bg-hover);
-}
-
-.chat-msg-thinking-chevron {
-  font-size: 8px;
-  width: 12px;
-  flex-shrink: 0;
-}
-
-.chat-msg-thinking-body {
-  padding: 0 10px 8px 24px;
-}
-
-.chat-msg-thinking-step {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-secondary);
-  padding: 2px 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.chat-msg-thinking-step::before {
-  content: '\2514\2500 ';
-  color: var(--text-muted);
-}
-
-/* ---- Activity Blocks (sequential thinking / tool calls) ---- */
-
-.chat-msg-activities {
-  margin-top: 8px;
-  border: 1px solid var(--border-muted);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  background: var(--bg-tertiary);
-}
-
-.activity-think {
-  border-bottom: 1px solid var(--border-subtle);
-}
-.activity-think:last-child {
-  border-bottom: none;
-}
-
-.activity-think.expanded {
-  border-bottom-color: var(--border-color);
-}
-
-.activity-think-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 5px 10px;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 11px;
-  color: var(--text-muted);
-  transition: background var(--transition-fast);
-}
-
-.activity-think-toggle:hover {
-  background: var(--bg-hover);
-}
-
-.activity-think-chevron {
-  font-size: 8px;
-  width: 12px;
-  flex-shrink: 0;
-  opacity: 0.7;
-}
-
-.activity-think-body {
-  padding: 0 10px 8px 24px;
-  /* The whole opened text is a collapse target. */
-  cursor: pointer;
-}
-
-.activity-think-pre {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-secondary);
+  color: var(--vscode-errorForeground, var(--red));
+  text-align: center;
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.5;
 }
 
-.activity-tool-call {
-  border-bottom: 1px solid var(--border-subtle);
+/* The reply is still arriving. */
+.chat-msg-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 12px;
+  margin-left: 2px;
+  vertical-align: -1px;
+  background: var(--text-secondary);
+  animation: chat-cursor-blink 1s steps(2, start) infinite;
 }
 
-.activity-tool-call.expanded {
-  border-bottom-color: var(--border-color);
+@keyframes chat-cursor-blink {
+  to { visibility: hidden; }
 }
 
-.activity-tool-toggle {
+.activity-think,
+.cmd-row,
+.subagent-card {
+  margin: 2px 14px;
+  font-size: 11px;
+}
+
+.activity-think-head {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 4px 10px;
-  border: none;
-  background: transparent;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-secondary);
-  text-align: left;
-  transition: background var(--transition-fast);
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-muted);
 }
 
-.activity-tool-toggle:not(:disabled) {
-  cursor: pointer;
-}
-
-.activity-tool-toggle:not(:disabled):hover {
-  background: var(--bg-hover);
-}
-
-.activity-tool-chevron,
-.activity-tool-chevron-spacer {
-  font-size: 8px;
-  width: 12px;
+.activity-think-label {
   flex-shrink: 0;
-  opacity: 0.7;
+  font-style: italic;
 }
 
-.activity-tool-icon {
-  color: var(--accent);
-  font-size: 11px;
-  flex-shrink: 0;
-}
-
-/* `flex: 1; min-width: 0` is what makes the ellipsis engage: a nowrap span
-   defaults to min-width:auto and refuses to shrink below its text, pushing the
-   outcome badge out of the row instead of clipping the name. */
-.activity-tool-name {
+.activity-think-line {
   flex: 1;
   min-width: 0;
   white-space: nowrap;
@@ -464,162 +337,178 @@ body {
   text-overflow: ellipsis;
 }
 
-/* Refused / denied / failed / not-executed calls read as an exception, not a
-   result — the glyph alone was too quiet, so the outcome drives colour too. */
-.activity-tool-outcome {
-  flex-shrink: 0;
-  padding-left: 8px;
-  font-size: 10px;
-  color: var(--orange);
-}
-
-.activity-tool-call[data-outcome='pending'] .activity-tool-icon {
-  animation: activity-tool-pulse 1.4s ease-in-out infinite;
-}
-
-.activity-tool-call[data-outcome='success'] .activity-tool-icon {
-  color: var(--green);
-}
-
-/* The command ran and failed — an error. Distinct from refused/denied, which
-   are envelope boundaries and keep the default orange. */
-.activity-tool-call[data-outcome='failure'] .activity-tool-icon,
-.activity-tool-call[data-outcome='failure'] .activity-tool-outcome {
-  color: var(--red);
-}
-
-.activity-tool-call[data-outcome='refused'] .activity-tool-icon,
-.activity-tool-call[data-outcome='denied'] .activity-tool-icon {
-  color: var(--orange);
-}
-
-/* Never ran, so it is absence rather than failure. */
-.activity-tool-call[data-outcome='not_executed'] .activity-tool-icon,
-.activity-tool-call[data-outcome='not_executed'] .activity-tool-outcome {
-  color: var(--text-muted);
-}
-
-@keyframes activity-tool-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-
-.activity-tool-body {
-  padding: 0 10px 8px 24px;
-  cursor: pointer;
-}
-
-.activity-tool-pre {
+.activity-think-pre,
+.cmd-row-preview,
+.cmd-row-args,
+.cmd-row-output {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.5;
-  max-height: 240px;
+}
+
+.activity-think-pre {
+  margin-top: 2px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border-muted);
+}
+
+.cmd-row-header {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cmd-row-icon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+/* `flex: 1; min-width: 0` is what makes the ellipsis engage: a nowrap element
+   defaults to min-width:auto and refuses to shrink below its text, pushing the
+   outcome out of the row instead of clipping the argument. */
+.cmd-row-head {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Refused / denied / failed / cut-short calls read as an exception, not a
+   result — the glyph alone was too quiet, so the status drives colour too. */
+.cmd-row-outcome {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--orange);
+}
+
+.cmd-row[data-status='pending'] .cmd-row-icon {
+  animation: cmd-row-pulse 1.4s ease-in-out infinite;
+}
+
+.cmd-row[data-status='ok'] .cmd-row-icon {
+  color: var(--green);
+}
+
+/* The command ran and failed — an error. Distinct from refused/denied, which
+   are envelope boundaries and keep the default orange. */
+.cmd-row[data-status='error'] .cmd-row-icon,
+.cmd-row[data-status='error'] .cmd-row-outcome {
+  color: var(--red);
+}
+
+.cmd-row[data-status='denied'] .cmd-row-icon {
+  color: var(--orange);
+}
+
+/* Never finished, so it is absence rather than failure. */
+.cmd-row[data-status='interrupted'] .cmd-row-icon,
+.cmd-row[data-status='interrupted'] .cmd-row-outcome {
+  color: var(--text-muted);
+}
+
+@keyframes cmd-row-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.cmd-row-preview,
+.cmd-row-args,
+.cmd-row-output {
+  margin: 2px 0 0 17px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border-muted);
+}
+
+.cmd-row-args {
+  color: var(--text-muted);
+}
+
+.cmd-row-output {
+  max-height: 320px;
   overflow-y: auto;
 }
 
-.activity-subagent {
-  border-bottom: 1px solid var(--border-subtle);
-  border-left: 2px solid var(--accent);
-}
-.activity-subagent:last-child {
-  border-bottom: none;
-}
-
-.activity-subagent.expanded {
-  border-bottom-color: var(--border-color);
-}
-
-.activity-subagent-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 5px 10px;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 11px;
-  color: var(--text-secondary);
-  transition: background var(--transition-fast);
-}
-
-.activity-subagent-toggle:hover {
-  background: var(--bg-hover);
-}
-
-.activity-subagent-chevron {
-  font-size: 8px;
-  width: 12px;
-  flex-shrink: 0;
-  opacity: 0.7;
-}
-
-.activity-subagent-icon {
-  color: var(--accent);
-  font-size: 11px;
-  flex-shrink: 0;
-}
-
-.activity-subagent-label {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
-  text-align: left;
-}
-
-.activity-subagent-badge {
+.cmd-row-more {
+  display: block;
+  margin-left: 27px;
   font-size: 10px;
   color: var(--text-muted);
-  flex-shrink: 0;
 }
 
-.activity-subagent-body {
-  padding-left: 14px;
-  background: var(--bg-secondary);
+.subagent-card {
+  padding: 5px 10px;
+  border: 1px solid var(--border-muted);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
 }
 
-.activity-tool-result {
+.subagent-card[data-status='failed'] {
+  border-left-color: var(--red);
+}
+
+.subagent-card[data-status='stopped'] {
+  border-left-color: var(--text-muted);
+}
+
+.subagent-card-header {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 6px;
-  padding: 3px 10px 3px 26px;
-  border-bottom: 1px solid var(--border-subtle);
-  font-family: var(--font-sans);
-  font-size: 11px;
-  color: var(--text-muted);
+  min-width: 0;
 }
 
-.activity-tool-result-text {
+.subagent-card-title {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.subagent-card-brief {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* ---- ChatMessage: Interrupted state ---- */
-
-.chat-msg-interrupted .chat-msg-bubble {
-  border-style: dashed;
-  border-color: var(--orange);
+.subagent-card-model,
+.subagent-card-status {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-muted);
 }
 
-.chat-msg-interrupted-label {
-  display: inline-flex;
-  align-items: center;
-  font-size: 9px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--orange);
-  background: var(--orange-subtle);
-  border: 1px solid rgba(210, 153, 29, 0.25);
-  border-radius: 3px;
-  padding: 1px 5px;
+.subagent-card-steps {
+  margin: 4px 0;
+}
+
+/* Nested rows sit inside the card's own padding. */
+.subagent-card-steps .activity-think,
+.subagent-card-steps .cmd-row,
+.subagent-card-steps .chat-msg {
+  margin: 2px 0;
+  padding: 0;
+}
+
+.subagent-card-digest {
   margin-top: 4px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.plan-revision-chip:disabled {
+  cursor: default;
+  opacity: 0.75;
 }
 
 /* ---- Old chat-message (keep for backward compat during transition) ---- */

@@ -1,22 +1,17 @@
-import React, { useState, type ReactNode } from 'react';
-import type { Message } from '@ordewell/core';
-import { activityIcon, outcomeLabel, type Activity } from '../activity';
+import React from 'react';
+import type { DisplayBlock, MessageBlock, PlanBlock, SubagentBlock, SubagentStatus, ThinkingDisplayBlock, ToolBlock, ToolStatus } from '@ordewell/core';
+import { outputLines, outputPreview } from '@ordewell/core/plan-utils';
 
-export type { Activity };
+/*
+ * The planner conversation (#51 display blocks) as the webview draws it.
+ * Whether thinking, command and subagent blocks show their detail is one
+ * switch for the whole conversation, like the TUI's ctrl+o — so no block here
+ * opens on its own.
+ */
 
-interface ChatMessageProps {
-  message?: Message;
-  role?: 'user' | 'planner' | 'system';
-  isQueued?: boolean;
-  children?: ReactNode;
-  actions?: ReactNode;
-  /** The planner turn is still streaming — thinking blocks render open with live text. */
-  streaming?: boolean;
-  interrupted?: boolean;
-  activities?: Activity[];
-}
+const PREVIEW_LINES = 3;
 
-function renderMarkdown(text: string): string {
+export function renderMarkdown(text: string): string {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -27,197 +22,166 @@ function renderMarkdown(text: string): string {
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 }
 
-function formatTime(ts: number): string {
-  const d = new Date(ts);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-/**
- * A thinking dropdown. Collapsed by default — including while its text is
- * still streaming in (the title shows "Thinking…" as the live signal).
- * The title toggles it; clicking anywhere in the opened text collapses it.
- */
-function ThinkingBlock({ activity, streaming, label = 'Thinking' }: { activity: Activity; streaming: boolean; label?: string }) {
-  const [open, setOpen] = useState(false);
-
-  return (
-    <div className={`activity-think${open ? ' expanded' : ''}`}>
-      <button
-        className="activity-think-toggle"
-        onClick={() => setOpen(!open)}
-      >
-        <span className="activity-think-chevron">{open ? '▼' : '▶'}</span>
-        {label}{streaming ? '…' : ''}
-      </button>
-      {open && (
-        <div className="activity-think-body" onClick={() => setOpen(false)} title="Click to collapse">
-          <pre className="activity-think-pre">{activity.text.trim()}</pre>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * A spawned research subagent's own process, nested inside the planner's
- * timeline (opencode-style). Collapsed by default; expands to the subagent's
- * own tool calls (rendered through ActivityBlock, so nested thinking is
- * itself independently expandable) plus its final digest.
- */
-function SubagentBlock({ activity }: { activity: Activity }) {
-  const [open, setOpen] = useState(false);
-  const children = activity.children ?? [];
-
-  return (
-    <div className={`activity-subagent${open ? ' expanded' : ''}`}>
-      <button className="activity-subagent-toggle" onClick={() => setOpen(!open)}>
-        <span className="activity-subagent-chevron">{open ? '▼' : '▶'}</span>
-        <span className="activity-subagent-icon">{activityIcon(activity)}</span>
-        <span className="activity-subagent-label">Subagent: {activity.text}</span>
-        {!activity.done && <span className="activity-subagent-badge">running…</span>}
-      </button>
-      {open && (
-        <div className="activity-subagent-body">
-          {children.map((child) => (
-            <ActivityBlock key={child.id} activity={child} streaming={false} />
-          ))}
-          {activity.resultText && (
-            <ThinkingBlock activity={{ id: `${activity.id}-digest`, type: 'thinking', text: activity.resultText }} streaming={false} label="Digest" />
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ActivityBlock({ activity, streaming }: { activity: Activity; streaming: boolean }) {
-  if (activity.type === 'thinking') {
-    return <ThinkingBlock activity={activity} streaming={streaming} />;
+export default function ChatMessage({ block }: { block: MessageBlock }) {
+  if (block.role === 'system' || block.role === 'error') {
+    return (
+      <div className={`chat-msg chat-msg-${block.role}`}>
+        <span className="chat-msg-content">{block.text}</span>
+      </div>
+    );
   }
-  if (activity.type === 'subagent') {
-    return <SubagentBlock activity={activity} />;
-  }
-  return <ToolCallBlock activity={activity} />;
-}
-
-/**
- * A command execution: one line, spinner while pending, outcome icon and
- * summary once done. The result body expands under a chevron — the same
- * affordance a subagent's digest uses, so "what did that command actually
- * return?" is answerable without leaving the chat.
- */
-function ToolCallBlock({ activity }: { activity: Activity }) {
-  const [open, setOpen] = useState(false);
-  const label = outcomeLabel(activity.outcome);
-  const expandable = !!activity.resultText;
-
-  // The glyph alone did not separate a refused `rm` from a successful one at a
-  // glance; the outcome also drives colour, through this attribute.
-  const outcome = activity.done ? (activity.outcome ?? 'success') : 'pending';
-
-  return (
-    <div className={`activity-tool-call${open ? ' expanded' : ''}`} data-outcome={outcome}>
-      <button
-        className="activity-tool-toggle"
-        onClick={() => expandable && setOpen(!open)}
-        disabled={!expandable}
-        title={expandable ? (open ? 'Hide output' : 'Show output') : activity.text}
-      >
-        {/* A call with nothing to expand still reserves the chevron column, or
-            rows with and without output would not line up. */}
-        {expandable
-          ? <span className="activity-tool-chevron">{open ? '▼' : '▶'}</span>
-          : <span className="activity-tool-chevron-spacer" aria-hidden="true" />}
-        <span className="activity-tool-icon">{activityIcon(activity)}</span>
-        <span className="activity-tool-name">{activity.text}</span>
-        {label && <span className="activity-tool-outcome">{label}</span>}
-      </button>
-      {open && activity.resultText && (
-        <div className="activity-tool-body" onClick={() => setOpen(false)} title="Click to collapse">
-          <pre className="activity-tool-pre">{activity.resultText}</pre>
+  if (block.role === 'user') {
+    return (
+      <div className="chat-msg chat-msg-user">
+        <div className="chat-msg-bubble">
+          <div className="chat-msg-content">{block.text}</div>
         </div>
-      )}
+      </div>
+    );
+  }
+  return (
+    <div className={`chat-msg chat-msg-planner${block.streaming ? ' streaming' : ''}`}>
+      <div className="chat-msg-bubble">
+        <div className="chat-msg-content" dangerouslySetInnerHTML={{ __html: renderMarkdown(block.text.trim()) }} />
+        {block.streaming && <span className="chat-msg-cursor" aria-hidden="true" />}
+      </div>
     </div>
   );
 }
 
-export default function ChatMessage({ message, role: _explicitRole, isQueued, children, actions, streaming, interrupted, activities }: ChatMessageProps) {
-  if (!message) return null;
-
-  const isSystem = message.role === 'system';
-  const isUser = message.role === 'user';
-  const trimmedContent = isUser ? message.content : message.content.trim();
-  const content = isUser ? trimmedContent : renderMarkdown(trimmedContent);
-  // Prose still streaming in is not yet a message: it is the model narrating
-  // (or emitting plan JSON), so it renders as a live thinking dropdown and
-  // only becomes the message text once the turn finalizes.
-  const liveProse: Activity | null = !isUser && streaming && trimmedContent
-    ? { id: 'live-prose', type: 'thinking', text: message.content }
-    : null;
-  const effectiveActivities = liveProse ? [...(activities ?? []), liveProse] : (activities ?? []);
-  const showContent = !streaming && !!trimmedContent;
-  const isEmptyStreamingTurn = streaming && effectiveActivities.length === 0;
-
-  const classNames = [
-    'chat-msg',
-    `chat-msg-${message.role}`,
-    interrupted ? 'chat-msg-interrupted' : '',
-  ].filter(Boolean).join(' ');
-
+export function ThinkingBlock({ block, expanded }: { block: ThinkingDisplayBlock; expanded: boolean }) {
+  const text = block.text.trim();
   return (
-    <div className={classNames}>
-      {isQueued && isUser && (
-        <span className="chat-msg-queued-badge">queued</span>
-      )}
-      {isSystem ? (
-        <span className="chat-msg-content">{message.content}</span>
-      ) : (
+    <div className={`activity-think${expanded ? ' expanded' : ''}`}>
+      <div className="activity-think-head">
+        <span className="activity-think-label">Thinking{block.streaming ? '…' : ''}</span>
+        {!expanded && <span className="activity-think-line">{text.split('\n')[0]}</span>}
+      </div>
+      {expanded && <pre className="activity-think-pre">{text}</pre>}
+    </div>
+  );
+}
+
+const STATUS_ICON: Record<ToolStatus, string> = {
+  pending: '⚙',
+  ok: '✓',
+  error: '✗',
+  denied: '⊘',
+  interrupted: '–',
+};
+
+// `status` alone reads a refused command and a denied path the same way; the
+// finer outcome says which.
+function outcomeLabel(block: ToolBlock): string {
+  if (block.outcome && block.outcome !== 'success') return block.outcome === 'not_executed' ? 'not executed' : block.outcome;
+  return block.status === 'interrupted' ? 'interrupted' : '';
+}
+
+function prettyArgs(args: string): string {
+  try {
+    return JSON.stringify(JSON.parse(args), null, 2);
+  } catch {
+    return args;
+  }
+}
+
+export function CommandRow({ block, expanded }: { block: ToolBlock; expanded: boolean }) {
+  const label = outcomeLabel(block);
+  const preview = outputPreview(block.output, PREVIEW_LINES);
+  return (
+    <div className={`cmd-row${expanded ? ' expanded' : ''}`} data-status={block.status}>
+      <div className="cmd-row-header">
+        <span className="cmd-row-icon">{STATUS_ICON[block.status]}</span>
+        <code className="cmd-row-head">{block.headline.name}({block.headline.keyArg})</code>
+        {label && <span className="cmd-row-outcome">{label}</span>}
+      </div>
+      {expanded ? (
         <>
-          <div className="chat-msg-bubble">
-            {/* Activities (thinking, command executions) come first — they happen
-                before the planner's message text, and the order is preserved. */}
-            {effectiveActivities.length > 0 && (
-              <div className="chat-msg-activities">
-                {effectiveActivities.map((act, i) => (
-                  <ActivityBlock
-                    key={act.id}
-                    activity={act}
-                    streaming={!!streaming && i === effectiveActivities.length - 1}
-                  />
-                ))}
-              </div>
-            )}
-            {isEmptyStreamingTurn && (
-              <div className="chat-msg-content chat-msg-working">
-                <span className="chat-msg-spinner" /> Working&hellip;
-              </div>
-            )}
-            {showContent && (
-              <div
-                className="chat-msg-content"
-                dangerouslySetInnerHTML={isUser ? undefined : { __html: content }}
-              >
-                {isUser ? content : undefined}
-              </div>
-            )}
-            {!isUser && children && (
-              <div className="chat-msg-artifacts">
-                {children}
-              </div>
-            )}
-            {interrupted && (
-              <span className="chat-msg-interrupted-label">Interrupted</span>
-            )}
-            {!isUser && !streaming && <span className="chat-msg-time">{formatTime(message.timestamp)}</span>}
-          </div>
-          {isUser && <span className="chat-msg-time">{formatTime(message.timestamp)}</span>}
-          {actions && (
-            <div className="chat-msg-actions">
-              {actions}
-            </div>
+          <pre className="cmd-row-args">{prettyArgs(block.args)}</pre>
+          {block.output && <pre className="cmd-row-output">{outputLines(block.output).join('\n')}</pre>}
+        </>
+      ) : preview.lines.length > 0 && (
+        <>
+          <pre className="cmd-row-preview">{preview.lines.join('\n')}</pre>
+          {preview.hiddenLineCount > 0 && (
+            <span className="cmd-row-more">+{preview.hiddenLineCount} line{preview.hiddenLineCount === 1 ? '' : 's'}</span>
           )}
         </>
       )}
+    </div>
+  );
+}
+
+const SUBAGENT_STATUS: Record<SubagentStatus, string> = {
+  running: 'running…',
+  done: 'done',
+  failed: 'failed',
+  stopped: 'stopped',
+};
+
+export function SubagentCard({ block, expanded }: { block: SubagentBlock; expanded: boolean }) {
+  return (
+    <div className={`subagent-card${expanded ? ' expanded' : ''}`} data-status={block.status}>
+      <div className="subagent-card-header">
+        <span className="subagent-card-title">Agent</span>
+        <span className="subagent-card-brief">{block.brief}</span>
+        {block.model && <span className="subagent-card-model">{block.model}</span>}
+        <span className="subagent-card-status">{SUBAGENT_STATUS[block.status]}</span>
+      </div>
+      {expanded && block.children.length > 0 && (
+        <div className="subagent-card-steps">
+          {block.children.map((child) => <Block key={child.id} block={child} expanded onShowPlan={noop} />)}
+        </div>
+      )}
+      {block.digest && <div className="subagent-card-digest">{block.digest}</div>}
+    </div>
+  );
+}
+
+function planLabel(block: PlanBlock): string {
+  if (block.status === 'building') return 'Building plan…';
+  const count = block.taskCount === undefined ? '' : ` · ${block.taskCount} task${block.taskCount === 1 ? '' : 's'}`;
+  return `Plan ${block.status}${count}`;
+}
+
+function PlanMarker({ block, onShowPlan }: { block: PlanBlock; onShowPlan: () => void }) {
+  return (
+    <div className="plan-revision-chip-row">
+      <button type="button" className="plan-revision-chip" onClick={onShowPlan} title="Show the plan" disabled={block.status === 'building'}>
+        {planLabel(block)}
+      </button>
+    </div>
+  );
+}
+
+function noop(): void {}
+
+function Block({ block, expanded, onShowPlan }: { block: DisplayBlock; expanded: boolean; onShowPlan: () => void }) {
+  switch (block.type) {
+    case 'message':
+      return <ChatMessage block={block} />;
+    case 'thinking':
+      return <ThinkingBlock block={block} expanded={expanded} />;
+    case 'tool':
+      return <CommandRow block={block} expanded={expanded} />;
+    case 'subagent':
+      return <SubagentCard block={block} expanded={expanded} />;
+    case 'plan':
+      return <PlanMarker block={block} onShowPlan={onShowPlan} />;
+    // The approval card and the token line are drawn by the next change (#53);
+    // until then the host still notes each approval decision as a system line.
+    case 'approval':
+    case 'usage':
+      return null;
+  }
+}
+
+const MemoBlock = React.memo(Block);
+
+export function ConversationBlocks({ blocks, detailAll, onShowPlan }: { blocks: readonly DisplayBlock[]; detailAll: boolean; onShowPlan: () => void }) {
+  return (
+    <div className="conversation">
+      {blocks.map((block) => <MemoBlock key={block.id} block={block} expanded={detailAll} onShowPlan={onShowPlan} />)}
     </div>
   );
 }

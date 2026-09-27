@@ -2,8 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import EmptyState from './components/EmptyState';
 import GetStarted from './components/GetStarted';
 import ChatInput from './components/ChatInput';
-import ChatMessage from './components/ChatMessage';
-import { applyToolResult, previewResult, type Activity } from './activity';
+import { ConversationBlocks } from './components/ChatMessage';
 import { appendTaskOutput, type TaskOutputMap } from './taskOutput';
 import ModelSelector, { API_PROVIDER_LABELS } from './components/ModelSelector';
 import PlanCardGroup from './components/PlanCardGroup';
@@ -13,12 +12,13 @@ import type { RunnerMode } from './components/TaskCard';
 import type { TaskDraft } from './components/NewTaskCard';
 import { LegacyPlanState, DiscoveredModel, TaskModelAssignment, RunnerId, IsolationHandoff, IsolationMergeResult, TaskIsolation } from '@ordewell/core';
 import type { AiProvider } from '@ordewell/core';
-import { summarizeToolCall } from '@ordewell/core/plan-utils';
 import { isPlanRevision, planSummaryLabel, nextDock } from './planDock';
-import type { RunnerMeta, PlannerBackend } from '../../providers/ChatViewProvider';
+import { DetailContext } from './detail';
+import type { HostToWebview, PlannerBackend, RunnerMeta, WebviewToHost } from '../../shared/protocol';
+import { applyConversationPatch, EMPTY_PATCHED_VIEW, patchedBlocks, type PatchedView } from '../../shared/conversationPatch';
 
 declare function acquireVsCodeApi(): {
-  postMessage(message: unknown): void;
+  postMessage(message: WebviewToHost): void;
   getState(): unknown;
   setState(state: unknown): void;
 };
@@ -30,67 +30,12 @@ interface RunnerInfo {
   displayName: string;
 }
 
-/**
- * One entry in the strictly sequential chat timeline. Everything the user
- * sees — their requests, the planner's thinking, its command executions, and its
- * messages — renders top-to-bottom in arrival order.
- *
- * The plan itself is NOT one of these. It is a live, editable artifact, so it is
- * mounted once in the dock; what appears in the timeline is a `planRevision`
- * chip per commit, which is what makes a chat-driven edit visible at the point
- * in the conversation that caused it.
- */
-type TimelineItem =
-  | { id: string; kind: 'user'; text: string; timestamp: number }
-  | { id: string; kind: 'planner'; activities: Activity[]; text: string; streaming: boolean; interrupted?: boolean; timestamp: number }
-  | { id: string; kind: 'system'; text: string; timestamp: number }
-  | { id: string; kind: 'planRevision'; label: string; timestamp: number };
-
-let idCounter = 0;
-function nextId(prefix: string): string {
-  idCounter += 1;
-  return `${prefix}-${Date.now()}-${idCounter}`;
-}
-
-type HistoryEntry = { role: string; content: string; timestamp: string; kind?: string };
-
-function timelineFromHistory(history: HistoryEntry[], hasPlan: boolean): TimelineItem[] {
-  const items: TimelineItem[] = [];
-  for (const m of history) {
-    const ts = new Date(m.timestamp).getTime() || Date.now();
-    if (m.kind === 'plan_generated') {
-      // Every marker gets its own chip. Folding them into one anchor
-      // (which is what the plan-as-chat-message layout had to do) threw
-      // away the order the plan was revised in — the one thing the
-      // transcript is for.
-      const first = !items.some((i) => i.kind === 'planRevision');
-      items.push({
-        id: nextId('revision'),
-        kind: 'planRevision',
-        label: `Plan ${first ? 'generated' : 'updated'}`,
-        timestamp: ts,
-      });
-      continue;
-    }
-    // A compaction summary is the host's notice of what it kept, not something
-    // the planner just said.
-    if (m.kind === 'system' || m.kind === 'compaction') {
-      items.push({ id: nextId('sys'), kind: 'system', text: m.content, timestamp: ts });
-    } else if (m.role === 'user') {
-      items.push({ id: nextId('user'), kind: 'user', text: m.content, timestamp: ts });
-    } else {
-      items.push({ id: nextId('planner'), kind: 'planner', activities: [], text: m.content, streaming: false, timestamp: ts });
-    }
-  }
-  // Sessions saved before plan markers existed: one chip at the end.
-  if (hasPlan && !items.some((i) => i.kind === 'planRevision')) {
-    items.push({ id: nextId('revision'), kind: 'planRevision', label: 'Plan generated', timestamp: Date.now() });
-  }
-  return items;
-}
-
 export default function App() {
-  const [timeline, setTimeline] = useState<TimelineItem[]>([]);
+  /** The planner conversation, held by the host and patched in here (#53). */
+  const [conversation, setConversation] = useState<PatchedView>(EMPTY_PATCHED_VIEW);
+  const blocks = useMemo(() => patchedBlocks(conversation), [conversation]);
+  const [detailAll, setDetailAll] = useState(false);
+  const detail = useMemo(() => ({ detailAll, setDetailAll }), [detailAll]);
   const [plan, setPlan] = useState<LegacyPlanState | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const [isResearchActive, setIsResearchActive] = useState(false);
@@ -144,12 +89,11 @@ export default function App() {
   const processingRef = useRef(false);
   const stoppedRef = useRef(false);
   const sessionClearedRef = useRef(false);
-  const stopFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastActivityRef = useRef(Date.now());
   const planRef = useRef(plan);
   planRef.current = plan;
-  const timelineRef = useRef(timeline);
-  timelineRef.current = timeline;
+  const blocksRef = useRef(blocks);
+  blocksRef.current = blocks;
   const userPinnedToBottomRef = useRef(true);
 
   const isGenerating = isResearchActive || isExecuting;
@@ -177,52 +121,19 @@ export default function App() {
     if (userPinnedToBottomRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [timeline]);
-
-  /** Mutate the trailing streaming planner item (creating one if needed). */
-  const updateActivePlanner = useCallback((fn: (item: Extract<TimelineItem, { kind: 'planner' }>) => Extract<TimelineItem, { kind: 'planner' }>) => {
-    setTimeline((prev) => {
-      const last = prev[prev.length - 1];
-      if (last && last.kind === 'planner' && last.streaming) {
-        return [...prev.slice(0, -1), fn(last)];
-      }
-      const fresh: Extract<TimelineItem, { kind: 'planner' }> = {
-        id: nextId('planner'), kind: 'planner', activities: [], text: '', streaming: true, timestamp: Date.now(),
-      };
-      return [...prev, fn(fresh)];
-    });
-  }, []);
-
-  /** Stop streaming on the trailing planner item, optionally replacing its text. */
-  const finalizePlanner = useCallback((opts?: { text?: string; interrupted?: boolean; dropIfEmpty?: boolean }) => {
-    setTimeline((prev) => {
-      const last = prev[prev.length - 1];
-      if (!last || last.kind !== 'planner' || !last.streaming) {
-        // No active turn (e.g. a message pushed by the host after a reload) —
-        // append it as a fresh, completed planner message.
-        if (opts?.text) {
-          return [...prev, { id: nextId('planner'), kind: 'planner', activities: [], text: opts.text, streaming: false, timestamp: Date.now() }];
-        }
-        return prev;
-      }
-      const text = opts?.text !== undefined ? opts.text : last.text;
-      if (opts?.dropIfEmpty && !text.trim() && last.activities.length === 0) {
-        return prev.slice(0, -1);
-      }
-      return [...prev.slice(0, -1), { ...last, text, streaming: false, interrupted: opts?.interrupted ?? last.interrupted }];
-    });
-  }, []);
+  }, [blocks]);
 
   useEffect(() => {
-    const handler = (event: MessageEvent) => {
+    const handler = (event: MessageEvent<HostToWebview>) => {
       const msg = event.data;
       lastActivityRef.current = Date.now();
       switch (msg.type) {
         case 'setState':
+          // The conversation is not cleared here: the host owns it and resets
+          // it itself when the session really is new.
           if (msg.state === 'empty') {
             setError('');
             setPlan(null);
-            setTimeline([]);
             setCheckpoint(null);
             setTaskOutput({});
             setTaskIdle({});
@@ -235,7 +146,6 @@ export default function App() {
           setIsExecuting(msg.state === 'approved');
           break;
 
-        case 'showPlan':
         case 'planUpdated': {
           if (stoppedRef.current) break;
           const incoming: LegacyPlanState | null = msg.plan ?? null;
@@ -245,24 +155,12 @@ export default function App() {
             setIsExecuting(incoming.status === 'running');
           }
           if (incoming && incoming.tasks && incoming.tasks.length > 0) {
-            // The streamed text was the plan JSON — the task cards replace it.
-            finalizePlanner({ text: '', dropIfEmpty: true });
-            // One `planUpdated` carries two different events. A revision earns a
-            // chip and opens the dock; a status tick during execution must do
-            // neither, or a running plan would spam the transcript and fight a
-            // user who collapsed the dock.
+            // One `planUpdated` carries two different events. A revision opens
+            // the dock; a status tick during execution must not, or a running
+            // plan would fight a user who collapsed it. The conversation's plan
+            // marker comes from the host with the view.
             const previous = planRef.current?.tasks ?? [];
             if (isPlanRevision(previous, incoming.tasks)) {
-              setTimeline((prev) => {
-                const first = !prev.some((i) => i.kind === 'planRevision');
-                const count = incoming.tasks.length;
-                return [...prev, {
-                  id: nextId('revision'),
-                  kind: 'planRevision',
-                  label: `Plan ${first ? 'generated' : 'updated'} · ${count} task${count === 1 ? '' : 's'}`,
-                  timestamp: Date.now(),
-                }];
-              });
               setDockExpanded((v) => nextDock(v, 'plan-revised'));
             } else {
               setDockExpanded((v) => nextDock(v, 'plan-progressed'));
@@ -271,25 +169,12 @@ export default function App() {
           break;
         }
 
-        case 'newMessage': {
-          // A planner conversation message (question, outline, PRD preview…).
-          // It finalizes the streaming turn: the streamed text and the final
-          // content are the same message.
-          if (sessionClearedRef.current) break;
-          finalizePlanner({ text: msg.message.content });
-          setIsResearchActive(false);
-          // A completed turn ends any prior stop-gate — later streams belong
-          // to new turns and must render.
-          stoppedRef.current = false;
-          break;
-        }
-
         case 'restoreChat': {
-          // Authoritative timeline rebuild from the persisted dialogue (session
-          // load, webview reload, window restore). Also clears stuck state: a
-          // restore always leaves the chat usable. The plan is cleared here so a
-          // session with no tasks does not keep the previously-loaded session's
-          // plan cards — a follow-up planUpdated/showPlan repopulates it when
+          // A session was (re)loaded (session load, webview reload, window
+          // restore); its conversation follows as a patch. Also clears stuck
+          // state: a restore always leaves the chat usable. The plan is cleared
+          // here so a session with no tasks does not keep the previously-loaded
+          // session's plan cards — a follow-up planUpdated repopulates it when
           // the restored session has tasks.
           stoppedRef.current = false;
           sessionClearedRef.current = false;
@@ -303,15 +188,22 @@ export default function App() {
           setHandoff(null);
           setMergeResult(null);
           setDockExpanded((v) => nextDock(v, 'session-reset'));
-          setTimeline(timelineFromHistory(msg.history ?? [], !!msg.hasPlan));
           break;
         }
 
-        // A compaction edited the dialogue mid-session. Unlike
-        // restoreChat this must not clear the plan or a running task's output.
-        case 'conversationReplaced':
-          setError('');
-          setTimeline(timelineFromHistory(msg.history ?? [], !!msg.hasPlan));
+        case 'conversationPatch':
+          setConversation((prev) => applyConversationPatch(prev, msg));
+          break;
+
+        // The stop gate lasts until the host has closed the stopped turn; a
+        // new turn is never gated.
+        case 'plannerTurn':
+          stoppedRef.current = false;
+          setIsResearchActive(msg.active);
+          break;
+
+        // Nothing to draw: arriving at all is what keeps the watchdog quiet.
+        case 'plannerLiveness':
           break;
 
         case 'conversationBusy':
@@ -323,21 +215,12 @@ export default function App() {
           // A modify that produced warnings still ends the turn — without this
           // the input stayed disabled forever.
           setIsResearchActive(false);
-          finalizePlanner({ dropIfEmpty: true });
-          setTimeline((prev) => [...prev, { id: nextId('sys'), kind: 'system', text: `Plan modification warnings:\n${msg.warnings ?? ''}`, timestamp: Date.now() }]);
           break;
 
         case 'showError':
           if (sessionClearedRef.current) break;
-          setError(msg.error || msg.message || '');
+          setError(msg.error);
           setIsResearchActive(false);
-          finalizePlanner({ dropIfEmpty: true });
-          break;
-
-        case 'streamToken':
-          if (stoppedRef.current) break;
-          setIsResearchActive(true);
-          updateActivePlanner((item) => ({ ...item, text: item.text + msg.token }));
           break;
 
         case 'taskOutput':
@@ -367,133 +250,6 @@ export default function App() {
           setTaskIsolation({});
           setHandoff(null);
           setMergeResult(null);
-          break;
-
-        case 'researchProgress': {
-          if (stoppedRef.current) break;
-          const progress = msg.step || msg.progress;
-          setIsResearchActive(true);
-
-          if (progress.type === 'thinking' && progress.text) {
-            updateActivePlanner((item) => {
-              if (progress.subagentId) {
-                // Reasoning from within a subagent nests under its own block,
-                // independently expandable — never the top-level thinking trace.
-                const idx = item.activities.findIndex((a) => a.id === progress.subagentId && a.type === 'subagent');
-                if (idx >= 0) {
-                  const subagent = item.activities[idx];
-                  const children = subagent.children ?? [];
-                  const last = children[children.length - 1];
-                  const nextChildren = last && last.type === 'thinking'
-                    ? [...children.slice(0, -1), { ...last, text: last.text + progress.text }]
-                    : [...children, { id: nextId('think'), type: 'thinking' as const, text: progress.text }];
-                  const next = [...item.activities];
-                  next[idx] = { ...subagent, children: nextChildren };
-                  return { ...item, activities: next };
-                }
-              }
-              const last = item.activities[item.activities.length - 1];
-              if (last && last.type === 'thinking') {
-                return { ...item, activities: [...item.activities.slice(0, -1), { ...last, text: last.text + progress.text }] };
-              }
-              return { ...item, activities: [...item.activities, { id: nextId('think'), type: 'thinking', text: progress.text }] };
-            });
-          }
-          if (progress.type === 'tool_call' && progress.tool) {
-            updateActivePlanner((item) => {
-              // Prose streamed before a command is the model thinking out loud
-              // (models without a reasoning channel narrate between tool calls).
-              // Fold it into a thinking dropdown at this point in the timeline,
-              // so commands and thinking stay interleaved in execution order
-              // instead of all prose pooling below the activity list.
-              let activities = item.activities;
-              let text = item.text;
-              if (text.trim()) {
-                const last = activities[activities.length - 1];
-                activities = last && last.type === 'thinking'
-                  ? [...activities.slice(0, -1), { ...last, text: `${last.text}\n${text}` }]
-                  : [...activities, { id: nextId('think'), type: 'thinking' as const, text }];
-                text = '';
-              }
-
-              if (progress.subagentId && progress.tool === 'spawn_research_agent') {
-                // Initiating call for a new research subagent (issue #34): its own
-                // expandable block, nested activities collected as they arrive.
-                const label = summarizeToolCall(progress.tool, progress.toolArgs || '{}');
-                return {
-                  ...item, text,
-                  activities: [...activities, { id: progress.subagentId, type: 'subagent' as const, text: label, children: [] }],
-                };
-              }
-
-              if (progress.subagentId) {
-                // An inner tool call made by that subagent — nest it under its block.
-                const idx = activities.findIndex((a) => a.id === progress.subagentId && a.type === 'subagent');
-                if (idx >= 0) {
-                  const subagent = activities[idx];
-                  const child: Activity = { id: nextId('call'), type: 'tool_call', text: `${progress.tool}`, tool: progress.tool, toolArgs: progress.toolArgs, toolCallId: progress.toolCallId };
-                  const next = [...activities];
-                  next[idx] = { ...subagent, children: [...(subagent.children ?? []), child] };
-                  return { ...item, text, activities: next };
-                }
-              }
-
-              return {
-                ...item,
-                text,
-                activities: [...activities, {
-                  // A harness planner's own tool name wins over the member it
-                  // mapped to, so the card says `Edit`, never `agent_tool`.
-                  id: nextId('call'), type: 'tool_call' as const, text: progress.toolLabel || `${progress.tool}`, tool: progress.tool, toolArgs: progress.toolArgs, toolCallId: progress.toolCallId,
-                }],
-              };
-            });
-          }
-          if (progress.type === 'tool_result' && progress.step) {
-            const step = progress.step;
-            const update = {
-              tool: step.tool,
-              toolCallId: progress.toolCallId ?? step.toolCallId,
-              summary: summarizeToolCall(step.tool, step.args, step.toolLabel),
-              resultText: previewResult(step.result ?? ''),
-              outcome: step.outcome,
-              fallbackId: step.id || nextId('result'),
-            };
-            // Fold the result into its command line — one entry per execution.
-            updateActivePlanner((item) => {
-              if (progress.subagentId) {
-                const idx = item.activities.findIndex((a) => a.id === progress.subagentId && a.type === 'subagent');
-                if (idx >= 0) {
-                  const subagent = item.activities[idx];
-                  const next = [...item.activities];
-                  next[idx] = step.tool === 'spawn_research_agent'
-                    // The subagent's own completion: mark done, attach its digest.
-                    ? { ...subagent, done: true, outcome: step.outcome, resultText: step.result }
-                    // An inner tool result: fold into the matching pending child.
-                    : { ...subagent, children: applyToolResult(subagent.children ?? [], update) };
-                  return { ...item, activities: next };
-                }
-              }
-              return { ...item, activities: applyToolResult(item.activities, update) };
-            });
-          }
-          if (progress.type === 'plan_token' && progress.planToken) {
-            updateActivePlanner((item) => ({ ...item, text: item.text + progress.planToken }));
-          }
-          break;
-        }
-
-        case 'plannerInterrupted':
-          if (sessionClearedRef.current) break;
-          if (stopFallbackRef.current) { clearTimeout(stopFallbackRef.current); stopFallbackRef.current = null; }
-          setIsResearchActive(false);
-          if (msg.message?.content) {
-            finalizePlanner({ text: msg.message.content, interrupted: true });
-          } else {
-            finalizePlanner({ interrupted: true, dropIfEmpty: true });
-          }
-          // The interrupted turn is closed; stop gating subsequent streams.
-          stoppedRef.current = false;
           break;
 
         case 'setModels':
@@ -551,29 +307,12 @@ export default function App() {
           break;
         }
 
-        case 'setEnabledRunnerIds': {
-          const ids = msg.enabledRunnerIds ?? [];
-          setEnabledRunnerIds(ids);
-          setRunners((prev) => {
-            if (ids.length === 1) return ids;
-            if (ids.length === 0) return ['claude-code'];
-            const valid = prev.filter((r) => ids.includes(r));
-            return valid.length > 0 ? valid : ids;
-          });
-          break;
-        }
-
-        case 'setRunnerList': {
-          setRunnerList(msg.runnerList ?? []);
-          break;
-        }
-
         case 'executionStatus':
           if (msg.status === 'in_progress') setIsExecuting(true);
           break;
 
         case 'queueStatus':
-          setQueueCount(msg.count ?? msg.queueCount ?? 0);
+          setQueueCount(msg.count);
           break;
 
         case 'setGoal':
@@ -606,7 +345,7 @@ export default function App() {
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [finalizePlanner, updateActivePlanner]);
+  }, []);
 
   useEffect(() => {
     vscode.postMessage({ type: 'ready' });
@@ -615,12 +354,13 @@ export default function App() {
   }, []);
 
   const pushSystem = useCallback((text: string) => {
-    setTimeline((prev) => [...prev, { id: nextId('sys'), kind: 'system', text, timestamp: Date.now() }]);
+    vscode.postMessage({ type: 'addNote', text });
   }, []);
 
   // Watchdog: if the planner is "working" but nothing has arrived from the
-  // host for a long stretch (a terminal message was lost, the turn died
-  // silently), unlock the input instead of leaving the chat bricked. The
+  // host for a long stretch (a turn's end was lost, the turn died silently),
+  // unlock the input instead of leaving the chat bricked. A harness planner
+  // quiet on screen still sends liveness, so only real silence trips it; the
   // window is generous — non-streaming providers can legitimately stay quiet
   // for a minute while a model thinks.
   const WATCHDOG_MS = 120_000;
@@ -630,21 +370,14 @@ export default function App() {
     const timer = setInterval(() => {
       if (Date.now() - lastActivityRef.current < WATCHDOG_MS) return;
       setIsResearchActive(false);
-      finalizePlanner({ interrupted: true, dropIfEmpty: true });
-      setTimeline((prev) => [...prev, {
-        id: nextId('sys'), kind: 'system',
-        text: 'The planner stopped responding, so the input was re-enabled. Your last message may not have been processed — try sending it again.',
-        timestamp: Date.now(),
-      }]);
+      pushSystem('The planner stopped responding, so the input was re-enabled. Your last message may not have been processed — try sending it again.');
     }, 5_000);
     return () => clearInterval(timer);
-  }, [isResearchActive, finalizePlanner]);
+  }, [isResearchActive, pushSystem]);
 
   const handleNewSession = useCallback(() => {
     stoppedRef.current = true;
     sessionClearedRef.current = true;
-    if (stopFallbackRef.current) { clearTimeout(stopFallbackRef.current); stopFallbackRef.current = null; }
-    setTimeline([]);
     setPlan(null);
     setIsResearchActive(false);
     setIsExecuting(false);
@@ -666,7 +399,7 @@ export default function App() {
       return;
     }
     if (text === '/new') {
-      const hasContent = timelineRef.current.length > 0 || planRef.current !== null;
+      const hasContent = blocksRef.current.length > 0 || planRef.current !== null;
       if ((hasContent || processingRef.current) && !showNewSessionConfirm) {
         setShowNewSessionConfirm(true);
         return;
@@ -684,19 +417,18 @@ export default function App() {
     if (text.startsWith('retry ')) {
       const taskId = text.slice(6).trim();
       setPrefill(undefined);
-      setTimeline((prev) => [...prev, { id: nextId('user'), kind: 'user', text, timestamp: Date.now() }]);
       vscode.postMessage({
         type: 'sendMessage',
         text: text.trim(),
         runners,
         actionContext: { type: 'retry', taskId },
+        typed: true,
       });
       return;
     }
 
     if (text.startsWith('/')) {
-      setTimeline((prev) => [...prev, { id: nextId('user'), kind: 'user', text, timestamp: Date.now() }]);
-      vscode.postMessage({ type: 'sendMessage', text, runners });
+      vscode.postMessage({ type: 'sendMessage', text, runners, typed: true });
       return;
     }
 
@@ -706,15 +438,10 @@ export default function App() {
     stoppedRef.current = false;
     sessionClearedRef.current = false;
     setError('');
-    // Append the user's request and open a streaming planner turn right below
-    // it — everything stays strictly top-to-bottom.
-    setTimeline((prev) => [
-      ...prev,
-      { id: nextId('user'), kind: 'user', text, timestamp: Date.now() },
-      { id: nextId('planner'), kind: 'planner', activities: [], text: '', streaming: true, timestamp: Date.now() },
-    ]);
+    // Locked at once rather than when the turn opens: the host may take a
+    // moment to start it, and a second send in between would race the first.
     setIsResearchActive(true);
-    vscode.postMessage({ type: 'sendMessage', text, runners });
+    vscode.postMessage({ type: 'sendMessage', text, runners, typed: true });
   }, [runners, handleNewSession, showNewSessionConfirm]);
 
   const handleToggleRunner = useCallback((runnerId: RunnerId) => {
@@ -881,19 +608,6 @@ export default function App() {
     } else {
       setIsResearchActive(false);
       vscode.postMessage({ type: 'stopResearch' });
-      // Fallback: if the host doesn't send plannerInterrupted within 1.5s
-      // (e.g. no lastPlannerContent was accumulated), finalize locally so the
-      // streaming bubble doesn't stay open forever.
-      if (stopFallbackRef.current) clearTimeout(stopFallbackRef.current);
-      stopFallbackRef.current = setTimeout(() => {
-        setTimeline((prev) => {
-          const last = prev[prev.length - 1];
-          if (last && last.kind === 'planner' && last.streaming) {
-            return [...prev.slice(0, -1), { ...last, streaming: false, interrupted: true }];
-          }
-          return prev;
-        });
-      }, 1500);
     }
   }, [isExecuting, pushSystem]);
 
@@ -946,6 +660,8 @@ export default function App() {
     vscode.postMessage({ type: 'isolationAction', action, taskId });
   }, []);
 
+  const handleShowPlan = useCallback(() => setDockExpanded((v) => nextDock(v, 'user-expanded')), []);
+
   const handleResolveConflict = useCallback((taskId: string) => {
     handleIsolationAction('resolveConflict', taskId);
   }, [handleIsolationAction]);
@@ -953,7 +669,7 @@ export default function App() {
   const getPlaceholder = (): string => {
     if (isResearchActive || isExecuting) return 'AI is working...';
     if (plan && plan.tasks.length > 0) return 'Modify the plan...';
-    if (timeline.some((i) => i.kind === 'planner')) return 'Reply to the planner...';
+    if (blocks.some((b) => b.type === 'message' && b.role === 'planner')) return 'Reply to the planner...';
     return 'Describe what you want to build...';
   };
 
@@ -1043,7 +759,8 @@ export default function App() {
     [plan],
   );
 
-  const hasContent = timeline.length > 0 || isResearchActive || isExecuting || !!error;
+  const hasContent = blocks.length > 0 || isResearchActive || isExecuting || !!error;
+  const streaming = blocks.some((b) => (b.type === 'message' || b.type === 'thinking') && b.streaming);
 
   /**
    * The plan, mounted once. Not a timeline entry: it is the live control surface
@@ -1151,6 +868,7 @@ export default function App() {
   };
 
   return (
+    <DetailContext.Provider value={detail}>
     <div className="chat-container">
       <div className="setup-panel">
         <button
@@ -1334,37 +1052,17 @@ export default function App() {
           </div>
         )}
 
-        {timeline.map((item) => {
-          if (item.kind === 'planRevision') {
-            return (
-              <div key={item.id} className="plan-revision-chip-row">
-                <button
-                  type="button"
-                  className="plan-revision-chip"
-                  onClick={() => setDockExpanded((v) => nextDock(v, 'user-expanded'))}
-                  title="Show the plan"
-                >
-                  {item.label}
-                </button>
-              </div>
-            );
-          }
-          if (item.kind === 'user') {
-            return <ChatMessage key={item.id} message={{ id: item.id, role: 'user', content: item.text, timestamp: item.timestamp }} />;
-          }
-          if (item.kind === 'system') {
-            return <ChatMessage key={item.id} message={{ id: item.id, role: 'system', content: item.text, timestamp: item.timestamp }} />;
-          }
-          return (
-            <ChatMessage
-              key={item.id}
-              message={{ id: item.id, role: 'planner', content: item.text, timestamp: item.timestamp }}
-              activities={item.activities}
-              streaming={item.streaming}
-              interrupted={item.interrupted}
-            />
-          );
-        })}
+        <ConversationBlocks
+          blocks={blocks}
+          detailAll={detailAll}
+          onShowPlan={handleShowPlan}
+        />
+
+        {isResearchActive && !streaming && (
+          <div className="chat-msg-working">
+            <span className="chat-msg-spinner" /> Working&hellip;
+          </div>
+        )}
 
         <div ref={messagesEndRef} />
       </div>
@@ -1384,5 +1082,6 @@ export default function App() {
         skills={skills}
       />
     </div>
+    </DetailContext.Provider>
   );
 }
