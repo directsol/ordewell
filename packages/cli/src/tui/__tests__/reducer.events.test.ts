@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce } from '../reducer';
 import type { TuiState } from '../state';
+import { lastMessage } from './chat';
 
 const send = (state: TuiState, action: Parameters<typeof reduce>[1]) => reduce(state, action).state;
 
@@ -126,8 +127,10 @@ describe('planUpdated', () => {
 
 describe('planner conversation', () => {
   it('shows the planner question as an assistant turn; planUpdated settles the spinner', () => {
-    const asked = send({ ...initialState(), status: 'planning' }, { type: 'plannerMessage', content: 'Which DB?' });
-    expect(asked.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'Which DB?' });
+    const asked = send({ ...initialState(), status: 'planning' }, {
+      type: 'sessionMessage', message: { type: 'planner_message', content: 'Which DB?', timestamp: '2026-09-27T10:00:00.000Z' },
+    });
+    expect(lastMessage(asked)).toMatchObject({ role: 'planner', text: 'Which DB?' });
 
     // `planUpdated` is the action that ends a turn — see `converse`, which
     // dispatches the turn's text first and this settle after it, so a queued
@@ -137,10 +140,12 @@ describe('planner conversation', () => {
   });
 
   it('shows research progress on the spinner and in the transcript', () => {
-    const s = send({ ...initialState(), status: 'planning' }, { type: 'researchStep', summary: 'grep auth' });
-    expect(s.busyLabel).toBe('grep auth');
-    expect(s.messages).toEqual([
-      expect.objectContaining({ role: 'research', content: 'grep auth' }),
+    const s = send({ ...initialState(), status: 'planning' }, {
+      type: 'sessionMessage', message: { type: 'research_step', tool: 'grep', args: '{"pattern":"auth"}' },
+    });
+    expect(s.busyLabel).toBe('Grep(auth)');
+    expect(s.conversation.blocks).toEqual([
+      expect.objectContaining({ type: 'tool', headline: { name: 'Grep', keyArg: 'auth' }, status: 'pending' }),
     ]);
   });
 });
@@ -171,7 +176,7 @@ describe('execution', () => {
       summary: { total: 2, completed: 2, failed: 0 },
     });
     expect(s.status).toBe('idle');
-    expect(s.messages.at(-1)?.content).toContain('2/2');
+    expect(lastMessage(s)?.text).toContain('2/2');
   });
 
   it('counts the pane when a stop arrives without a tally', () => {
@@ -188,7 +193,7 @@ describe('execution', () => {
     });
 
     expect(s.status).toBe('idle');
-    expect(s.messages.at(-1)?.content).toBe('Execution stopped — 1/2 tasks complete · 1 failed.');
+    expect(lastMessage(s)?.text).toBe('Execution stopped — 1/2 tasks complete · 1 failed.');
   });
 });
 
@@ -280,13 +285,13 @@ describe('loaded data', () => {
 describe('messages from the runtime', () => {
   it('shows a failure as an error turn and clears any spinner', () => {
     const s = send({ ...initialState(), status: 'planning' }, { type: 'failed', message: 'boom' });
-    expect(s.messages.at(-1)).toMatchObject({ role: 'error', content: 'boom' });
+    expect(lastMessage(s)).toMatchObject({ role: 'error', text: 'boom' });
     expect(s.status).toBe('idle');
   });
 
   it('shows a notice as a system turn', () => {
     const s = send(initialState(), { type: 'notice', message: 'Model set to x/y' });
-    expect(s.messages.at(-1)).toMatchObject({ role: 'system', content: 'Model set to x/y' });
+    expect(lastMessage(s)).toMatchObject({ role: 'system', text: 'Model set to x/y' });
   });
 
   it('records a resize', () => {

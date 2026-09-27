@@ -1,7 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { initialState, reduce } from '../reducer';
+import { initialState, reduce, type Action } from '../reducer';
 import { render } from '../render';
-import type { ChatMessage, TuiState } from '../state';
+import { stripAnsi, style } from '../ansi';
+import type { TuiState } from '../state';
+import { chatOf, lastMessage, messagesOf } from './chat';
+
+/** The planner's settled reply, as the session broadcasts it. */
+const reply = (content: string, sessionId?: string): Action => ({
+  type: 'sessionMessage',
+  message: { type: 'planner_message', content, timestamp: '2026-09-27T10:00:00.000Z' },
+  ...(sessionId ? { sessionId } : {}),
+});
+
+/** The chat pane as plain text, paint stripped. */
+const painted = (state: TuiState): string => render(state).map(stripAnsi).join('\n');
 
 const typing = (text: string) => ({
   ...initialState(),
@@ -26,7 +38,7 @@ describe('reduce — typing', () => {
     });
     expect(effects).toEqual([]);
     expect(state.editor.text).toBe('see: line1\nline2');
-    expect(state.messages).toEqual([]);
+    expect(messagesOf(state)).toEqual([]);
   });
 });
 
@@ -39,7 +51,7 @@ describe('reduce — submitting a goal', () => {
   it('echoes the goal into the transcript and clears the input', () => {
     const { state } = reduce(typing('add a login page'), { type: 'key', key: { name: 'enter' } });
     expect(state.editor.text).toBe('');
-    expect(state.messages.at(-1)).toMatchObject({ role: 'user', content: 'add a login page' });
+    expect(lastMessage(state)).toMatchObject({ role: 'user', text: 'add a login page' });
   });
 
   it('marks the session busy while the planner works', () => {
@@ -50,7 +62,7 @@ describe('reduce — submitting a goal', () => {
   it('ignores an empty submit', () => {
     const { state, effects } = reduce(initialState(), { type: 'key', key: { name: 'enter' } });
     expect(effects).toEqual([]);
-    expect(state.messages).toEqual([]);
+    expect(messagesOf(state)).toEqual([]);
   });
 
   it('answers the planner instead of restarting once a conversation is open', () => {
@@ -110,19 +122,15 @@ describe('reduce — multi-line input navigation', () => {
   it('alt-enter also inserts a newline instead of submitting, for terminals that cannot report shift-enter', () => {
     const { state } = reduce(typing('hello'), { type: 'key', key: { name: 'alt-enter' } });
     expect(state.editor.text).toBe('hello\n');
-    expect(state.messages).toHaveLength(0);
+    expect(messagesOf(state)).toHaveLength(0);
   });
 });
 
 describe('reduce — stale session results', () => {
   it('drops a plannerMessage that arrives after /new has moved on to a fresh session', () => {
     const afterNew = { ...initialState(), sessionId: 'session-2' };
-    const { state } = reduce(afterNew, {
-      type: 'plannerMessage',
-      content: 'stray follow-up from the old session',
-      sessionId: 'session-1',
-    });
-    expect(state.messages).toHaveLength(0);
+    const { state } = reduce(afterNew, reply('stray follow-up from the old session', 'session-1'));
+    expect(messagesOf(state)).toHaveLength(0);
     expect(state).toBe(afterNew);
   });
 
@@ -136,96 +144,112 @@ describe('reduce — stale session results', () => {
     expect(state.tasks).toHaveLength(0);
   });
 
-  it('still applies a planUpdated/plannerMessage carrying the current session id', () => {
+  it('still applies a planUpdated/planner reply carrying the current session id', () => {
     const s = { ...initialState(), sessionId: 'session-2' };
-    const { state } = reduce(s, { type: 'plannerMessage', content: 'hi', sessionId: 'session-2' });
-    expect(state.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'hi' });
+    const { state } = reduce(s, reply('hi', 'session-2'));
+    expect(lastMessage(state)).toMatchObject({ role: 'planner', text: 'hi' });
   });
 
   it('applies an untagged result (no sessionId) as before, for call sites that do not scope it', () => {
     const s = initialState();
-    const { state } = reduce(s, { type: 'plannerMessage', content: 'hi' });
-    expect(state.messages.at(-1)).toMatchObject({ content: 'hi' });
+    const { state } = reduce(s, reply('hi'));
+    expect(lastMessage(state)).toMatchObject({ text: 'hi' });
   });
 
-  it('turns a tab in a planner turn into a space, the same as a pasted one', () => {
-    const s = initialState();
-    const { state } = reduce(s, { type: 'plannerMessage', content: 'columns:\tname\tage' });
-    expect(state.messages.at(-1)).toMatchObject({ content: 'columns: name age' });
+  // Kept as it came — the turn matches it against what was sent — and made
+  // safe to paint where it is drawn.
+  describe('text from outside, drawn', () => {
+    const plain = (state: TuiState) => {
+      style.enabled = false;
+      try {
+        return painted(state);
+      } finally {
+        style.enabled = true;
+      }
+    };
+
+    it('turns a tab in a planner turn into a space, the same as a pasted one', () => {
+      const { state } = reduce(initialState(), reply('columns:\tname\tage'));
+      expect(plain(state)).toContain('columns: name age');
+      expect(plain(state)).not.toContain('\t');
+    });
+
+    it('strips the terminal control codes a coding agent`s output carries', () => {
+      const { state } = reduce(initialState(), reply('build failed\x07 \x1b[2Kretry\r ok \x1b[10Cshifted \x1b]0;title\x07 \x1b[31mred'));
+      const frame = render(state).join('\n');
+      expect(plain(state)).toContain('build failed retry');
+      expect(plain(state)).toContain('ok shifted  red');
+      for (const code of ['\x07', '\x1b[2K', '\x1b[10C', '\x1b]0']) expect(frame).not.toContain(code);
+    });
+
+    it('strips them from an error turn too — a failing runner is where they come from', () => {
+      const { state } = reduce(initialState(), { type: 'failed', message: 'exit 1\x07\x1b[1;31m' });
+      expect(plain(state)).toContain('✗ exit 1');
+      for (const code of ['\x07', '\x1b[1;31m']) expect(render(state).join('\n')).not.toContain(code);
+    });
+
+    it('strips them from streamed reasoning', () => {
+      const { state } = reduce(initialState(), {
+        type: 'sessionMessage',
+        message: { type: 'plan_thinking', text: 'weighing\x07 options\x1b[2J' },
+      });
+      expect(plain(state)).toContain('weighing options');
+      for (const code of ['\x07', '\x1b[2J']) expect(render(state).join('\n')).not.toContain(code);
+    });
   });
 
   it('still dedups a repeated turn that carries a tab', () => {
     const s = { ...initialState(), sessionId: 's1' };
-    const once = reduce(s, { type: 'plannerMessage', content: 'a\tb', sessionId: 's1' }).state;
-    const { state } = reduce(once, { type: 'plannerMessage', content: 'a\tb', sessionId: 's1' });
-    expect(state.messages.filter((m) => m.role === 'assistant')).toHaveLength(1);
-  });
-
-  it('strips the terminal control codes a coding agent`s output carries', () => {
-    const s = initialState();
-    const { state } = reduce(s, {
-      type: 'plannerMessage',
-      content: 'build failed\x07 \x1b[2Kretry\r ok \x1b[10Cshifted \x1b]0;title\x07 \x1b[31mred',
-    });
-    expect(state.messages.at(-1)?.content).toBe('build failed retry\n ok shifted  red');
-  });
-
-  it('strips them from an error turn too — a failing runner is where they come from', () => {
-    const { state } = reduce(initialState(), { type: 'failed', message: 'exit 1\x07\x1b[1;31m' });
-    expect(state.messages.at(-1)).toMatchObject({ role: 'error', content: 'exit 1' });
-  });
-
-  it('strips them from streamed reasoning, which is repainted on every tick', () => {
-    const { state } = reduce(initialState(), { type: 'plannerThinking', text: 'weighing\x07 options\x1b[2J' });
-    expect(state.thinkingLine).toBe('weighing options');
+    const once = reduce(s, reply('a\tb', 's1')).state;
+    const { state } = reduce(once, reply('a\tb', 's1'));
+    expect(messagesOf(state).filter((m) => m.role === 'planner')).toHaveLength(1);
   });
 });
 
 describe('reduce — one planner turn, two delivery paths', () => {
   const spoken = (content: string) =>
-    reduce({ ...initialState(), sessionId: 's1' }, { type: 'plannerMessage', content, sessionId: 's1' }).state;
+    reduce({ ...initialState(), sessionId: 's1' }, reply(content, 's1')).state;
 
   it('speaks a turn that arrives over the socket and again in the REST reply only once', () => {
     const first = spoken('Tasks updated:\n- #3 added');
-    const { state } = reduce(first, {
-      type: 'plannerMessage',
-      content: 'Tasks updated:\n- #3 added',
-      sessionId: 's1',
-    });
-    expect(state.messages.filter((m) => m.role === 'assistant')).toHaveLength(1);
+    const { state } = reduce(first, reply('Tasks updated:\n- #3 added', 's1'));
+    expect(messagesOf(state).filter((m) => m.role === 'planner')).toHaveLength(1);
   });
 
   it('still settles the busy status on the duplicate, since it is the same turn ending', () => {
-    const busy = { ...spoken('Which database?'), status: 'planning' as const, busyLabel: 'reading files', thinkingLine: 'hmm' };
+    const busy = { ...spoken('Which database?'), status: 'planning' as const, busyLabel: 'reading files' };
     // `planUpdated` is the settle: the reply's text (this action) is dispatched
     // first, then the settle follows and ends the turn.
-    const replied = reduce(busy, { type: 'plannerMessage', content: 'Which database?', sessionId: 's1' }).state;
+    const replied = reduce(busy, reply('Which database?', 's1')).state;
     const { state } = reduce(replied, { type: 'planUpdated', plan: { tasks: [] }, sessionId: 's1' });
     expect(state.status).toBe('idle');
     expect(state.busyLabel).toBe('');
-    expect(state.thinkingLine).toBe('');
   });
 
   it('speaks an identical reply again once the user has said something in between', () => {
     const asked = spoken('Which database?');
     const replied = reduce(asked, { type: 'key', key: { name: 'paste', text: 'postgres' } }).state;
     const sent = reduce(replied, { type: 'key', key: { name: 'enter' } }).state;
-    const { state } = reduce(sent, { type: 'plannerMessage', content: 'Which database?', sessionId: 's1' });
-    expect(state.messages.filter((m) => m.role === 'assistant')).toHaveLength(2);
+    const { state } = reduce(sent, reply('Which database?', 's1'));
+    expect(messagesOf(state).filter((m) => m.role === 'planner')).toHaveLength(2);
   });
 
   it('does not confuse a research line landing between the two copies for a new turn', () => {
     const asked = spoken('Which database?');
-    const researched = reduce(asked, { type: 'researchStep', summary: 'read package.json', sessionId: 's1' }).state;
-    const { state } = reduce(researched, { type: 'plannerMessage', content: 'Which database?', sessionId: 's1' });
-    expect(state.messages.filter((m) => m.role === 'assistant')).toHaveLength(1);
+    const researched = reduce(asked, {
+      type: 'sessionMessage',
+      message: { type: 'research_step', tool: 'read_file', args: '{"path":"package.json"}' },
+      sessionId: 's1',
+    }).state;
+    const { state } = reduce(researched, reply('Which database?', 's1'));
+    expect(messagesOf(state).filter((m) => m.role === 'planner')).toHaveLength(1);
   });
 });
 
 describe('reduce — scrolling the transcript', () => {
   /** A transcript several screens deep, so there is room to page through. */
   const longTranscript = (): TuiState => initialState({
-    messages: Array.from({ length: 40 }, (_, i) => ({ role: 'user' as const, content: `m${i}`, timestamp: '' })),
+    conversation: chatOf(...Array.from({ length: 40 }, (_, i): ['user', string] => ['user', `m${i}`])),
   });
 
   it('pageup scrolls back through the transcript', () => {
@@ -259,7 +283,7 @@ describe('reduce — scrolling the transcript', () => {
 
   it('the mouse wheel scrolls back and forward by a small notch', () => {
     const long = initialState({
-      messages: Array.from({ length: 40 }, (_, i) => ({ role: 'user' as const, content: `m${i}`, timestamp: '' })),
+      conversation: chatOf(...Array.from({ length: 40 }, (_, i): ['user', string] => ['user', `m${i}`])),
     });
     const back = reduce(long, { type: 'key', key: { name: 'scrollup' } }).state;
     expect(back.scroll).toBe(3);
@@ -272,10 +296,7 @@ describe('reduce — scrolling the transcript', () => {
    * something to scroll — but far less than twenty notches' worth.
    */
   const shortTranscript = (): TuiState => {
-    const messages: ChatMessage[] = ['one', 'two', 'three'].map((content) => ({
-      role: 'user' as const, content, timestamp: '',
-    }));
-    return initialState({ rows: 10, cols: 40, messages });
+    return initialState({ rows: 10, cols: 40, conversation: chatOf(['user', 'one'], ['user', 'two'], ['user', 'three']) });
   };
 
   const frame = (state: TuiState): string => render(state).join('\n');
@@ -319,7 +340,7 @@ describe('reduce — the wheel scrolls the pane under the pointer', () => {
   const bothPanes = (over: Partial<TuiState> = {}): TuiState => initialState({
     rows: 24,
     cols: 80,
-    messages: Array.from({ length: 40 }, (_, i) => ({ role: 'user' as const, content: `m${i}`, timestamp: '' })),
+    conversation: chatOf(...Array.from({ length: 40 }, (_, i): ['user', string] => ['user', `m${i}`])),
     tasks: Array.from({ length: 30 }, (_, i) => ({
       id: `t${i}`, order: i + 1, title: `Task ${i}`, type: 'ai' as const,
       status: 'pending', dependencies: [], assignedRunner: 'claude-code',
@@ -370,7 +391,7 @@ describe('reduce — the wheel scrolls the pane under the pointer', () => {
     const noPlan = initialState({
       rows: 24,
       cols: 80,
-      messages: Array.from({ length: 40 }, (_, i) => ({ role: 'user' as const, content: `m${i}`, timestamp: '' })),
+      conversation: chatOf(...Array.from({ length: 40 }, (_, i): ['user', string] => ['user', `m${i}`])),
     });
 
     expect(wheel(noPlan, 'scrollup', PLAN_COLUMN).scroll).toBe(3);

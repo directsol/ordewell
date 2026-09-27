@@ -218,17 +218,7 @@ function renderStatus(state: TuiState, cols: number): string {
   const verb = state.status === 'executing' ? 'Executing'
     : state.status === 'researching' ? 'Researching'
     : 'Planning';
-  const head = scrolled + style.yellow(`● ${verb}…${label}`);
-  // The planner's reasoning shares the status row rather than the transcript:
-  // it arrives as a token stream and would otherwise bury the tool log.
-  const thinking = state.thinkingLine.replace(/\s+/g, ' ').trim();
-  if (!thinking) return truncate(head, cols);
-  const room = cols - width(head) - 3;
-  if (room < 12) return truncate(head, cols);
-  // The tail is a slice out of a live stream, so it starts mid-word; the
-  // leading ellipsis says so instead of reading as a sentence that begins there.
-  const tail = thinking.length > room ? `…${thinking.slice(-(room - 1)).trimStart()}` : thinking;
-  return truncate(`${head}${style.grey(` · ${tail}`)}`, cols);
+  return truncate(scrolled + style.yellow(`● ${verb}…${label}`), cols);
 }
 
 /**
@@ -378,9 +368,9 @@ function renderChat(state: TuiState, rows: number, cols: number): string[] {
   // user paged back, in which case the view holds `scroll` lines off the tail.
   // The offset is already clamped where it is written, so the `min` here is a
   // belt against a resize that shrank the content under a live offset.
-  const { lines, anchor, maxScroll } = chatLayout(state, rows, cols);
+  const { lines, footer, anchor, maxScroll } = chatLayout(state, rows, cols);
   const back = Math.min(state.scroll, maxScroll);
-  return fit(lines.slice(0, lines.length - back), rows, anchor);
+  return [...fit(lines.slice(0, lines.length - back), rows - footer.length, anchor), ...footer];
 }
 
 function renderPlan(state: TuiState, rows: number, cols: number): string[] {

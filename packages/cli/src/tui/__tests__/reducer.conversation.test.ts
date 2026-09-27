@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce } from '../reducer';
 import type { TaskView, TuiState } from '../state';
+import { messagesOf } from './chat';
 
 function run(text: string, overrides: Partial<TuiState> = {}) {
   const base = initialState(overrides);
@@ -19,7 +20,7 @@ const targets = [
   { index: 4, preview: 'Streaming', content: 'Streaming\nand also resumable', timestamp: '2026-01-01T00:00:04Z' },
 ];
 
-const lastError = (state: TuiState) => state.messages.filter((m) => m.role === 'error').at(-1)?.content;
+const lastError = (state: TuiState) => messagesOf(state).filter((m) => m.role === 'error').at(-1)?.text;
 
 describe('/fork', () => {
   it('forks the current session', () => {
@@ -309,7 +310,7 @@ describe('/compact', () => {
 
     const { state } = reduce(initialState(planned), { type: 'chatRestored', history, sessionId: 'session-1' });
 
-    expect(state.messages.map((m) => [m.role, m.content])).toEqual([
+    expect(messagesOf(state).map((m) => [m.role, m.text])).toEqual([
       ['system', 'Conversation condensed: …\n\nGoal: a parser'],
       ['user', 'add CSV'],
     ]);
@@ -320,8 +321,10 @@ describe('/compact', () => {
     const history = [{ role: 'assistant' as const, content: summary, timestamp: '2026-01-02T00:00:00Z', kind: 'compaction' as const }];
     let state = reduce(initialState(planned), { type: 'chatRestored', history, sessionId: 'session-1' }).state;
 
-    state = reduce(state, { type: 'plannerMessage', content: summary, sessionId: 'session-1' }).state;
+    state = reduce(state, {
+      type: 'sessionMessage', message: { type: 'planner_message', content: summary, timestamp: '2026-01-02T00:00:02Z' }, sessionId: 'session-1',
+    }).state;
 
-    expect(state.messages).toHaveLength(1);
+    expect(messagesOf(state)).toHaveLength(1);
   });
 });

@@ -3,7 +3,8 @@ import { capConflictFiles } from '@ordewell/core';
 import { initialState, reduce, type Step } from '../reducer';
 import { render } from '../render';
 import { bodyRows, chatBodyLines, chatLayout, chatScrollMax, planOffset, planScrollExtent } from '../layout';
-import type { ChatMessage, TaskView, TuiState } from '../state';
+import type { TaskView, TuiState } from '../state';
+import { chatOf } from './chat';
 
 /**
  * The scroll model, asserted where the user meets it: a key goes in, the frame
@@ -49,10 +50,8 @@ function firstFullyVisibleRow(state: TuiState): number {
 }
 
 const chatState = (lines: number, over: Partial<TuiState> = {}): TuiState => {
-  const messages: ChatMessage[] = Array.from({ length: lines }, (_, i) => ({
-    role: 'user' as const, content: `message ${i + 1}`, timestamp: '',
-  }));
-  return initialState({ rows: 12, cols: 60, messages, ...over });
+  const conversation = chatOf(...Array.from({ length: lines }, (_, i): ['user', string] => ['user', `message ${i + 1}`]));
+  return initialState({ rows: 12, cols: 60, conversation, ...over });
 };
 
 describe('chat pane — no dead notches', () => {
@@ -191,20 +190,20 @@ describe('scrolled-back marker', () => {
 describe('chat body memo', () => {
   it('is still hit when only planScroll and spinnerFrame change', () => {
     const state = chatState(4, { tasks: tasks(3) });
-    const first = chatBodyLines(state.messages, 40);
+    const first = chatBodyLines(state.conversation.blocks, 40, false);
 
     const churned = { ...state, planScroll: 7, spinnerFrame: 4 };
-    expect(chatBodyLines(churned.messages, 40)).toBe(first);
+    expect(chatBodyLines(churned.conversation.blocks, 40, false)).toBe(first);
   });
 
   it('serves the reducer\'s scroll bound from the same entry the renderer paints from', () => {
     const state = chatState(40);
     render(state);
-    const painted = chatBodyLines(state.messages, state.cols);
+    const painted = chatBodyLines(state.conversation.blocks, state.cols, state.detailAll);
 
     chatScrollMax(state);
 
-    expect(chatBodyLines(state.messages, state.cols)).toBe(painted);
+    expect(chatBodyLines(state.conversation.blocks, state.cols, state.detailAll)).toBe(painted);
   });
 });
 

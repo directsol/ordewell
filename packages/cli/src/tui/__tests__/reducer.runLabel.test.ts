@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce } from '../reducer';
 import type { TaskView, TuiState } from '../state';
+import { lastMessage } from './chat';
 
 function task(over: Partial<TaskView> = {}): TaskView {
   return { id: 't1', order: 1, title: 'Add multiply', type: 'ai', status: 'pending', dependencies: [], assignedRunner: 'claude-code', ...over };
@@ -18,8 +19,8 @@ describe('the status line during a run', () => {
   it('logs a started task as a settled line, never a pending research step', () => {
     const { state } = reduce(running(), { type: 'taskStarted', taskId: 't1', title: 'Add multiply', runner: 'claude-code', sessionId: 's1' });
 
-    expect(state.messages.some((m) => m.role === 'research')).toBe(false);
-    expect(state.messages.at(-1)).toMatchObject({ role: 'system', content: 'Started "Add multiply" · claude-code' });
+    expect(state.conversation.blocks.some((b) => b.type === 'tool')).toBe(false);
+    expect(lastMessage(state)).toMatchObject({ role: 'system', text: 'Started "Add multiply" · claude-code' });
     expect(state.busyLabel).toBe('Add multiply · claude-code');
   });
 

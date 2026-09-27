@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createApp } from '../app';
 import type { Effect } from '../reducer';
+import { lastMessage, messagesOf } from './chat';
 
 function harness(over: Parameters<typeof createApp>[0]['initial'] = {}) {
   const frames: string[][] = [];
@@ -45,7 +46,7 @@ describe('createApp', () => {
   it('startup refresh posts no notice', async () => {
     const h = harness();
     h.app.start();
-    expect(h.app.getState().messages).toEqual([]);
+    expect(messagesOf(h.app.getState())).toEqual([]);
   });
 
   it('redraws after every action', async () => {
@@ -72,7 +73,7 @@ describe('createApp', () => {
   it('exposes the current state', () => {
     const h = harness();
     h.app.dispatch({ type: 'notice', message: 'hello' });
-    expect(h.app.getState().messages.at(-1)?.content).toBe('hello');
+    expect(lastMessage(h.app.getState())?.text).toBe('hello');
   });
 
   it('calls onExit when the state says to quit', () => {

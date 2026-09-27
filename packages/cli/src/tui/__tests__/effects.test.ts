@@ -2,7 +2,9 @@ import { describe, it, expect, vi, type Mock } from 'vitest';
 import { runEffect, type EffectDeps, type OrdewellApi } from '../effects';
 import { initialState, reduce, type Action } from '../reducer';
 import type { Effect } from '../reducer';
+import type { SessionMessage } from '@ordewell/core';
 import type { TuiState } from '../state';
+import { chatOf, messagesOf } from './chat';
 
 function harness(api: Partial<OrdewellApi> = {}, over: Partial<EffectDeps> = {}) {
   const actions: Action[] = [];
@@ -87,62 +89,50 @@ describe('planning', () => {
     expect(h.actions[0]).toEqual({ type: 'sessionStarted', sessionId: 'session-new', goal: 'ship it' });
   });
 
-  it('streams research steps into the status line while planning', async () => {
-    let onEvent: (e: any) => void = () => {};
-    const h = harness({
-      streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
-        onEvent = cb;
+  /** A harness whose planning socket the test drives from inside the REST call. */
+  function streaming(call: (emit: (e: unknown) => void) => Promise<unknown>, method: 'startConversation' | 'sendConversationMessage' = 'startConversation') {
+    let emit: (e: unknown) => void = () => {};
+    return harness({
+      streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: unknown) => void) => {
+        emit = cb;
         return { close: vi.fn() };
       }),
-      startConversation: vi.fn().mockImplementation(async () => {
-        onEvent({ type: 'research_step', tool: 'grep', args: '{"pattern":"auth"}' });
-        return { tasks: [] };
-      }),
+      [method]: vi.fn().mockImplementation(() => call(emit)),
     });
+  }
 
-    await runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
-    expect(types(h.actions)).toContain('researchStep');
-  });
+  /** The session messages the stream handed the reducer, in order. */
+  const heard = (actions: Action[]): SessionMessage[] =>
+    actions.flatMap((a) => (a.type === 'sessionMessage' ? [a.message] : []));
 
-  it('translates the whole research stream — call, outcome, and reasoning', async () => {
-    let onEvent: (e: any) => void = () => {};
-    const h = harness({
-      streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
-        onEvent = cb;
-        return { close: vi.fn() };
-      }),
-      startConversation: vi.fn().mockImplementation(async () => {
-        onEvent({ type: 'plan_thinking', text: 'checking the auth module' });
-        onEvent({ type: 'research_step', tool: 'bash', args: '{"command":"rm -rf /"}', toolCallId: 'tc-1' });
-        onEvent({
-          type: 'research_step_done',
-          step: {
-            id: 'rs-1', tool: 'bash', args: '{"command":"rm -rf /"}',
-            result: 'Command refused: writes are the runners\' job.',
-            success: false, outcome: 'refused', toolCallId: 'tc-1', timestamp: '',
-          },
-        });
-        return { tasks: [] };
-      }),
+  it('passes the turn\'s messages to the reducer as they came, one action each', async () => {
+    const step = {
+      id: 'rs-1', tool: 'bash', args: '{"command":"rm -rf /"}', result: 'Command refused: writes are the runners\' job.',
+      success: false, outcome: 'refused', toolCallId: 'tc-1', timestamp: '',
+    };
+    const h = streaming(async (emit) => {
+      emit({ type: 'planner_turn_started', turnId: 't1', prompt: 'x' });
+      emit({ type: 'research_step', tool: 'bash', args: '{"command":"rm -rf /"}', toolCallId: 'tc-1', turnId: 't1' });
+      emit({ type: 'research_step_done', step, turnId: 't1' });
+      emit({ type: 'subagent_started', subagentId: 'sa1', brief: 'look', turnId: 't1' });
+      emit({ type: 'planner_usage', turnId: 't1', totals: { inputTokens: 10 } });
+      emit({ type: 'planner_turn_ended', turnId: 't1', outcome: 'message' });
+      return { tasks: [] };
     });
 
     await runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
 
-    expect(h.actions).toContainEqual({ type: 'plannerThinking', text: 'checking the auth module', sessionId: 'session-new' });
-    expect(h.actions).toContainEqual({
-      type: 'researchStep', summary: 'bash: rm -rf /', toolCallId: 'tc-1', sessionId: 'session-new',
-    });
-    expect(h.actions).toContainEqual({
-      type: 'researchStepDone',
-      summary: 'bash: rm -rf /',
-      toolCallId: 'tc-1',
-      outcome: 'refused',
-      result: 'Command refused: writes are the runners\' job.',
-      sessionId: 'session-new',
-    });
+    expect(h.actions.filter((a) => a.type === 'sessionMessage')).toEqual([
+      { type: 'sessionMessage', message: { type: 'planner_turn_started', turnId: 't1', prompt: 'x' }, sessionId: 'session-new' },
+      { type: 'sessionMessage', message: { type: 'research_step', tool: 'bash', args: '{"command":"rm -rf /"}', toolCallId: 'tc-1', turnId: 't1' }, sessionId: 'session-new' },
+      { type: 'sessionMessage', message: { type: 'research_step_done', step, turnId: 't1' }, sessionId: 'session-new' },
+      { type: 'sessionMessage', message: { type: 'subagent_started', subagentId: 'sa1', brief: 'look', turnId: 't1' }, sessionId: 'session-new' },
+      { type: 'sessionMessage', message: { type: 'planner_usage', turnId: 't1', totals: { inputTokens: 10 } }, sessionId: 'session-new' },
+      { type: 'sessionMessage', message: { type: 'planner_turn_ended', turnId: 't1', outcome: 'message' }, sessionId: 'session-new' },
+    ]);
   });
 
-  it('surfaces a planner question as a message rather than a plan', async () => {
+  it('surfaces a planner question the socket never delivered, from the REST reply', async () => {
     const h = harness({
       startConversation: vi.fn().mockResolvedValue({
         tasks: [],
@@ -154,223 +144,149 @@ describe('planning', () => {
     });
     await runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
 
-    expect(h.actions).toContainEqual({ type: 'plannerMessage', content: 'Which database?', sessionId: 'session-new' });
+    expect(heard(h.actions)).toEqual([expect.objectContaining({ type: 'planner_message', content: 'Which database?' })]);
   });
 
   it('speaks a reply the socket already delivered once, not twice with the REST copy', async () => {
     // The daemon broadcasts the turn and also leaves it as the plan's last
     // assistant entry; the reply is the same one thing either way.
-    let onEvent: (e: any) => void = () => {};
-    const h = harness({
-      streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
-        onEvent = cb;
-        return { close: vi.fn() };
-      }),
-      sendConversationMessage: vi.fn().mockImplementation(async () => {
-        onEvent({ type: 'planner_message', content: 'Tasks updated:\n- #3 added' });
-        return {
-          tasks: [],
-          conversationHistory: [
-            { role: 'user', content: 'add a hardening task' },
-            { role: 'assistant', content: 'Tasks updated:\n- #3 added' },
-          ],
-        };
-      }),
-    });
+    const h = streaming(async (emit) => {
+      emit({ type: 'planner_message', content: 'Tasks updated:\n- #3 added', timestamp: 'x' });
+      return {
+        tasks: [],
+        conversationHistory: [
+          { role: 'user', content: 'add a hardening task' },
+          { role: 'assistant', content: 'Tasks updated:\n- #3 added' },
+        ],
+      };
+    }, 'sendConversationMessage');
 
     await runEffect({ type: 'sendMessage', sessionId: 's1', message: 'add a hardening task' }, h.deps);
 
-    const spoken = h.actions.filter((a) => a.type === 'plannerMessage');
-    expect(spoken).toEqual([{ type: 'plannerMessage', content: 'Tasks updated:\n- #3 added', sessionId: 's1' }]);
+    expect(heard(h.actions)).toEqual([{ type: 'planner_message', content: 'Tasks updated:\n- #3 added', timestamp: 'x' }]);
   });
 
   it('falls back to the REST reply when the socket delivered a different turn', async () => {
-    let onEvent: (e: any) => void = () => {};
-    const h = harness({
-      streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
-        onEvent = cb;
-        return { close: vi.fn() };
-      }),
-      sendConversationMessage: vi.fn().mockImplementation(async () => {
-        onEvent({ type: 'planner_message', content: 'Looking into it.' });
-        return {
-          tasks: [],
-          conversationHistory: [{ role: 'assistant', content: 'Which database?' }],
-        };
-      }),
-    });
+    const h = streaming(async (emit) => {
+      emit({ type: 'planner_message', content: 'Looking into it.', timestamp: 'x' });
+      return { tasks: [], conversationHistory: [{ role: 'assistant', content: 'Which database?' }] };
+    }, 'sendConversationMessage');
 
     await runEffect({ type: 'sendMessage', sessionId: 's1', message: 'x' }, h.deps);
 
-    expect(h.actions.filter((a) => a.type === 'plannerMessage')).toEqual([
-      { type: 'plannerMessage', content: 'Looking into it.', sessionId: 's1' },
-      { type: 'plannerMessage', content: 'Which database?', sessionId: 's1' },
+    expect(heard(h.actions).map((m) => m.type === 'planner_message' && m.content)).toEqual(['Looking into it.', 'Which database?']);
+  });
+
+  it('joins a burst of one stream\'s deltas into a single action', async () => {
+    vi.useFakeTimers();
+    try {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const h = streaming(async (emit) => {
+        emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Hel' });
+        emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'lo' });
+        await gate;
+        return { tasks: [] };
+      });
+
+      const pending = runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(heard(h.actions)).toEqual([{ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Hello' }]);
+
+      release();
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps deltas of different streams apart, in the order they came', async () => {
+    const h = streaming(async (emit) => {
+      emit({ type: 'planner_thinking_delta', turnId: 't1', segmentId: 's1', text: 'weigh' });
+      emit({ type: 'planner_thinking_delta', turnId: 't1', segmentId: 's1', text: 'ing it' });
+      emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'One' });
+      emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's2', text: 'Two' });
+      emit({ type: 'plan_token', turnId: 't1', token: '{"ta' });
+      emit({ type: 'plan_token', turnId: 't1', token: 'sks":' });
+      return { tasks: [] };
+    });
+
+    await runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
+
+    expect(heard(h.actions)).toEqual([
+      { type: 'planner_thinking_delta', turnId: 't1', segmentId: 's1', text: 'weighing it' },
+      { type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'One' },
+      { type: 'planner_text_delta', turnId: 't1', segmentId: 's2', text: 'Two' },
+      { type: 'plan_token', turnId: 't1', token: '{"tasks":' },
     ]);
   });
 
-  it('debounces plan_token deltas into a single plannerToken dispatch', async () => {
-    vi.useFakeTimers();
-    try {
-      let onEvent: (e: any) => void = () => {};
-      let resolveCall: () => void = () => {};
-      const gate = new Promise<void>((resolve) => { resolveCall = resolve; });
-      const h = harness({
-        streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
-          onEvent = cb;
-          return { close: vi.fn() };
-        }),
-        startConversation: vi.fn().mockImplementation(async () => {
-          onEvent({ type: 'plan_token', token: 'Hel' });
-          onEvent({ type: 'plan_token', token: 'lo' });
-          await gate;
-          return { tasks: [] };
-        }),
-      });
-
-      const pending = runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
-      await vi.advanceTimersByTimeAsync(100);
-      expect(h.actions.filter((a) => a.type === 'plannerToken')).toEqual([
-        { type: 'plannerToken', text: 'Hello', sessionId: 'session-new' },
-      ]);
-
-      resolveCall();
-      await pending;
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  // Until the TUI draws the shared view (#52), streamed reply prose joins the
-  // plan_token bubble and the rest of the turn-scoped stream is dropped.
-  it('coalesces planner_text_delta with plan tokens and ignores the other turn events', async () => {
-    vi.useFakeTimers();
-    try {
-      let onEvent: (e: any) => void = () => {};
-      let resolveCall: () => void = () => {};
-      const gate = new Promise<void>((resolve) => { resolveCall = resolve; });
-      const h = harness({
-        streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
-          onEvent = cb;
-          return { close: vi.fn() };
-        }),
-        startConversation: vi.fn().mockImplementation(async () => {
-          onEvent({ type: 'planner_turn_started', turnId: 't1' });
-          onEvent({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Hel' });
-          onEvent({ type: 'planner_usage', turnId: 't1', totals: { inputTokens: 10 } });
-          onEvent({ type: 'plan_token', turnId: 't1', token: 'lo' });
-          onEvent({ type: 'planner_text_retracted', turnId: 't1' });
-          onEvent({ type: 'subagent_started', subagentId: 'sa1', brief: 'look' });
-          onEvent({ type: 'subagent_finished', subagentId: 'sa1', outcome: 'done', digest: 'ok' });
-          onEvent({ type: 'planner_turn_ended', turnId: 't1', outcome: 'message' });
-          await gate;
-          return { tasks: [] };
-        }),
-      });
-
-      const pending = runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
-      await vi.advanceTimersByTimeAsync(100);
-      expect(h.actions.filter((a) => a.type !== 'sessionStarted')).toEqual([
-        { type: 'plannerToken', text: 'Hello', sessionId: 'session-new' },
-      ]);
-
-      resolveCall();
-      await pending;
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  // Streamed thinking keeps the thinking display it had as plan_thinking,
-  // until the TUI draws the shared view (#52).
-  it('shows planner_thinking_delta as planner thinking', async () => {
-    let onEvent: (e: any) => void = () => {};
-    const h = harness({
-      streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
-        onEvent = cb;
-        return { close: vi.fn() };
-      }),
-      startConversation: vi.fn().mockImplementation(async () => {
-        onEvent({ type: 'planner_thinking_delta', turnId: 't1', segmentId: 's1', text: 'weighing it' });
-        return { tasks: [] };
-      }),
+  it('flushes a held burst before any other message lands, preserving order', async () => {
+    const h = streaming(async (emit) => {
+      emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Check' });
+      emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'ing' });
+      emit({ type: 'research_step', tool: 'grep', args: '{"pattern":"auth"}', turnId: 't1' });
+      return { tasks: [] };
     });
 
     await runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
 
-    expect(h.actions).toContainEqual({ type: 'plannerThinking', text: 'weighing it', sessionId: 'session-new' });
+    expect(heard(h.actions).map((m) => m.type)).toEqual(['planner_text_delta', 'research_step']);
+    expect(heard(h.actions)[0]).toMatchObject({ text: 'Checking' });
   });
 
-  it('flushes a pending token burst before a research_step lands, preserving order', async () => {
-    let onEvent: (e: any) => void = () => {};
-    const h = harness({
-      streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
-        onEvent = cb;
-        return { close: vi.fn() };
-      }),
-      startConversation: vi.fn().mockImplementation(async () => {
-        onEvent({ type: 'plan_token', token: 'Check' });
-        onEvent({ type: 'plan_token', token: 'ing' });
-        onEvent({ type: 'research_step', tool: 'grep', args: '{"pattern":"auth"}' });
-        return { tasks: [] };
-      }),
+  it('dispatches a burst still held when the turn fails, ahead of the failure', async () => {
+    const h = streaming(async (emit) => {
+      emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Half a' });
+      throw new Error('no key');
     });
 
     await runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
 
-    const relevant = h.actions.filter((a) => a.type === 'plannerToken' || a.type === 'researchStep');
-    expect(relevant.map((a) => a.type)).toEqual(['plannerToken', 'researchStep']);
-    expect(relevant[0]).toMatchObject({ type: 'plannerToken', text: 'Checking', sessionId: 'session-new' });
+    const order = h.actions.map((a) => a.type).filter((t) => t === 'sessionMessage' || t === 'failed');
+    expect(order).toEqual(['sessionMessage', 'failed']);
   });
 
-  it('a full turn — token burst, a research step, another burst, then the final message — replays through the reducer in arrival order', async () => {
-    let onEvent: (e: any) => void = () => {};
-    const h = harness({
-      streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
-        onEvent = cb;
-        return { close: vi.fn() };
-      }),
-      startConversation: vi.fn().mockImplementation(async () => {
-        onEvent({ type: 'plan_token', token: 'Checking' });
-        onEvent({ type: 'plan_token', token: ' the auth module' });
-        onEvent({ type: 'research_step', tool: 'grep', args: '{"pattern":"auth"}', toolCallId: 'tc-1' });
-        onEvent({ type: 'research_step_done', toolCallId: 'tc-1', step: { tool: 'grep', args: '{"pattern":"auth"}', toolCallId: 'tc-1', outcome: 'ok', result: '3 matches' } });
-        onEvent({ type: 'plan_token', token: 'Found it.' });
-        onEvent({ type: 'planner_message', content: 'Found it in middleware/auth.ts.' });
-        return { tasks: [], conversationHistory: [] };
-      }),
+  it('a full turn replays through the reducer into the conversation it describes', async () => {
+    const h = streaming(async (emit) => {
+      emit({ type: 'planner_turn_started', turnId: 't1', prompt: 'x' });
+      emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: 'Checking' });
+      emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's1', text: ' the auth module' });
+      emit({ type: 'research_step', tool: 'grep', args: '{"pattern":"auth"}', toolCallId: 'tc-1', turnId: 't1' });
+      emit({
+        type: 'research_step_done', turnId: 't1',
+        step: { id: 'rs-1', tool: 'grep', args: '{"pattern":"auth"}', toolCallId: 'tc-1', success: true, outcome: 'success', result: '3 matches', timestamp: '' },
+      });
+      emit({ type: 'planner_text_delta', turnId: 't1', segmentId: 's2', text: 'Found it.' });
+      emit({ type: 'planner_message', content: 'Found it in middleware/auth.ts.', timestamp: '', turnId: 't1' });
+      emit({ type: 'planner_turn_ended', turnId: 't1', outcome: 'message' });
+      return { tasks: [], conversationHistory: [] };
     });
 
     await runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
 
     let state: TuiState = { ...initialState(), sessionId: 'session-new' };
-    for (const action of h.actions) {
-      ({ state } = reduce(state, action));
-    }
+    for (const action of h.actions) ({ state } = reduce(state, action));
 
-    expect(state.messages.map((m) => m.role)).toEqual(['assistant', 'research', 'assistant']);
-    expect(state.messages[0]).toMatchObject({ content: 'Checking the auth module', streaming: true });
-    expect(state.messages[2]).toMatchObject({ content: 'Found it in middleware/auth.ts.' });
-    expect(state.messages[2].streaming).toBeFalsy();
+    expect(state.conversation.blocks).toMatchObject([
+      { type: 'message', role: 'user', text: 'x' },
+      { type: 'message', role: 'planner', text: 'Checking the auth module', streaming: false },
+      { type: 'tool', headline: { name: 'Grep', keyArg: 'auth' }, status: 'ok', output: '3 matches' },
+      { type: 'message', role: 'planner', text: 'Found it in middleware/auth.ts.', streaming: false },
+    ]);
   });
 
-  it('notes a silent approval decision instead of leaving it invisible', async () => {
-    let onEvent: (e: any) => void = () => {};
-    const h = harness({
-      streamPlanning: vi.fn().mockImplementation((_id: string, cb: (e: any) => void) => {
-        onEvent = cb;
-        return { close: vi.fn() };
-      }),
-      startConversation: vi.fn().mockImplementation(async () => {
-        onEvent({ type: 'approval_decided', kind: 'shell_command', subject: 'npm test', scope: 'npm test', granted: true, source: 'pre-approved' });
-        return { tasks: [] };
-      }),
+  it('shows a silent approval decision in the conversation instead of leaving it invisible', async () => {
+    const h = streaming(async (emit) => {
+      emit({ type: 'approval_decided', kind: 'shell_command', subject: 'npm test', scope: 'npm test', granted: true, source: 'pre-approved' });
+      return { tasks: [] };
     });
 
     await runEffect({ type: 'startConversation', goal: 'x' }, h.deps);
 
-    const notice = h.actions.find((a) => a.type === 'notice') as any;
-    expect(notice?.message).toContain('npm test');
-    expect(notice?.message).toMatch(/pre-approved/i);
+    let state: TuiState = { ...initialState(), sessionId: 'session-new' };
+    for (const action of h.actions) ({ state } = reduce(state, action));
+    expect(state.conversation.blocks).toMatchObject([{ type: 'approval', subject: 'npm test', status: 'granted', decidedBy: 'pre-approved' }]);
   });
 
   it('hands over a committed plan', async () => {
@@ -523,12 +439,16 @@ describe('execution', () => {
     expect(notice.message).toMatch(/approve/i);
   });
 
-  it('takes a plan pushed over the stream', async () => {
+  it('takes a plan pushed over the stream, and hands its transcript to the conversation', async () => {
     const plan = { tasks: [{ id: 'a', title: 'T' }] };
-    const h = withEvents({ type: 'plan_generated', plan, goal: 'g', runners: [] });
+    const event = { type: 'plan_generated', plan, goal: 'g', runners: [] };
+    const h = withEvents(event);
     await runEffect({ type: 'execute', sessionId: 's1' }, h.deps);
 
-    expect(h.actions).toContainEqual({ type: 'planUpdated', plan, sessionId: 's1' });
+    expect(h.actions).toEqual([
+      { type: 'sessionMessage', message: event, sessionId: 's1' },
+      { type: 'planUpdated', plan, sessionId: 's1' },
+    ]);
   });
 
   it('reports the outcome when the run finishes', async () => {
@@ -1316,7 +1236,7 @@ describe('conversation fork and rewind effects', () => {
 
   it('reports a refused rewind and leaves the state as it was', async () => {
     const h = harness({ rewindConversation: vi.fn().mockRejectedValue(new Error('Cannot rewind the conversation while the planner is answering')) });
-    const before: TuiState = initialState({ sessionId: 'session-1', goal: 'g', messages: history });
+    const before: TuiState = initialState({ sessionId: 'session-1', goal: 'g', conversation: chatOf(['user', 'build me a parser'], ['planner', 'Which formats?']) });
     let state = before;
 
     await runEffect({ type: 'rewindConversation', sessionId: 'session-1', index: 2 }, h.deps);
@@ -1325,7 +1245,7 @@ describe('conversation fork and rewind effects', () => {
     expect(types(h.actions)).toEqual(['failed']);
     expect(messageOf(h.actions, 'failed')).toMatch(/planner is answering/);
     expect(state.sessionId).toBe('session-1');
-    expect(state.messages.slice(0, history.length)).toEqual(before.messages);
+    expect(state.conversation.blocks.slice(0, before.conversation.blocks.length)).toEqual(before.conversation.blocks);
     expect(state.editor.text).toBe('');
   });
 
@@ -1334,7 +1254,7 @@ describe('conversation fork and rewind effects', () => {
     const h = harness({ rewindConversation: vi.fn().mockResolvedValue({ sessionId: 'session-fork', goal: 'build me a parser', plan, rewoundMessage: 'left behind' }) });
     let state: TuiState = initialState({
       sessionId: 'session-1',
-      messages: [...history, { role: 'user', content: 'left behind', timestamp: '2026-01-01T00:00:02Z' }],
+      conversation: chatOf(['user', 'build me a parser'], ['planner', 'Which formats?'], ['user', 'left behind']),
     });
 
     await runEffect({ type: 'rewindConversation', sessionId: 'session-1', index: 2 }, h.deps);
@@ -1342,8 +1262,8 @@ describe('conversation fork and rewind effects', () => {
 
     expect(state.sessionId).toBe('session-fork');
     expect(state.editor).toMatchObject({ text: 'left behind', cursor: 11 });
-    expect(state.messages.map((m) => m.content)).not.toContain('left behind');
-    expect(state.messages.map((m) => m.content)).toEqual(expect.arrayContaining(['build me a parser', 'Which formats?']));
+    expect(messagesOf(state).map((m) => m.text)).not.toContain('left behind');
+    expect(messagesOf(state).map((m) => m.text)).toEqual(expect.arrayContaining(['build me a parser', 'Which formats?']));
   });
 });
 

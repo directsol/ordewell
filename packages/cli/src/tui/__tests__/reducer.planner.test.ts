@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, reduce, type Action } from '../reducer';
+import type { SessionMessage } from '@ordewell/core';
 import type { PickerItem, TuiState } from '../state';
+import { lastMessage, messagesOf } from './chat';
 
 /**
  * The `/planner` picker (ADR-0009): who researches the goal and writes the
@@ -73,7 +75,7 @@ describe('/planner', () => {
 
     expect(effects).toEqual([]);
     expect(state.overlay?.kind).toBe('picker');
-    expect(state.messages.at(-1)?.role).toBe('error');
+    expect(lastMessage(state)?.role).toBe('error');
   });
 
   it('selecting an agent persists the choice', () => {
@@ -105,7 +107,7 @@ describe('/planner', () => {
   it('rejects a provider it does not know', () => {
     const { state, effects } = run('/planner notaplanner');
     expect(effects).toEqual([]);
-    expect(state.messages.at(-1)?.role).toBe('error');
+    expect(lastMessage(state)?.role).toBe('error');
   });
 
   it('fills in the preflight once runner discovery lands', () => {
@@ -219,8 +221,8 @@ describe('/planner-effort', () => {
   it('rejects a level the model does not declare, naming the ones it does', () => {
     const { state, effects } = run('/planner-effort xhigh', harness);
     expect(effects).toEqual([]);
-    expect(state.messages.at(-1)?.role).toBe('error');
-    expect(state.messages.at(-1)?.content).toContain('low, high');
+    expect(lastMessage(state)?.role).toBe('error');
+    expect(lastMessage(state)?.text).toContain('low, high');
   });
 
   it('says so when the selected model exposes no effort levels', () => {
@@ -241,51 +243,26 @@ describe('/planner-effort', () => {
   });
 });
 
-describe('plannerToken', () => {
+describe('streamed planner text', () => {
   const send = (state: TuiState, action: Action) => reduce(state, action).state;
+  const hear = (message: SessionMessage, sessionId = 's1'): Action => ({ type: 'sessionMessage', message, sessionId });
+  const delta = (text: string): SessionMessage => ({ type: 'planner_text_delta', turnId: 'turn-1', segmentId: 'seg-1', text });
   const s1 = { ...initialState(), sessionId: 's1' };
 
-  it('opens a new streaming assistant entry when the tail is not already one', () => {
-    const { state } = reduce(s1, { type: 'plannerToken', text: 'Look', sessionId: 's1' });
-    expect(state.messages).toHaveLength(1);
-    expect(state.messages[0]).toMatchObject({ role: 'assistant', content: 'Look', streaming: true });
+  it('grows one streaming planner block as deltas arrive', () => {
+    const state = [delta('Look'), delta('ing into it')].map((m) => hear(m)).reduce(send, s1);
+    expect(messagesOf(state)).toMatchObject([{ role: 'planner', text: 'Looking into it', streaming: true }]);
   });
 
-  it('appends a second token onto the same streaming entry', () => {
-    const opened = send(s1, { type: 'plannerToken', text: 'Look', sessionId: 's1' });
-    const { state } = reduce(opened, { type: 'plannerToken', text: 'ing into it', sessionId: 's1' });
-    expect(state.messages).toHaveLength(1);
-    expect(state.messages[0]).toMatchObject({ content: 'Looking into it', streaming: true });
+  it('settles that block in place when the turn\'s reply arrives', () => {
+    const streamed = send(s1, hear(delta('Looking into it')));
+    const state = send(streamed, hear({ type: 'planner_message', content: 'Looking into it.', timestamp: '', turnId: 'turn-1' }));
+
+    expect(messagesOf(state)).toMatchObject([{ role: 'planner', text: 'Looking into it.', streaming: false }]);
   });
 
-  it('a research step landing between two token bursts starts a fresh bubble after it', () => {
-    const first = send(s1, { type: 'plannerToken', text: 'Checking the auth module', sessionId: 's1' });
-    const researched = send(first, { type: 'researchStep', summary: 'read auth.ts', sessionId: 's1' });
-    const { state } = reduce(researched, { type: 'plannerToken', text: 'Found it.', sessionId: 's1' });
-
-    expect(state.messages.map((m) => m.role)).toEqual(['assistant', 'research', 'assistant']);
-    expect(state.messages[0]).toMatchObject({ content: 'Checking the auth module', streaming: true });
-    expect(state.messages[2]).toMatchObject({ content: 'Found it.', streaming: true });
-  });
-
-  it('plannerMessage settles a pending streaming entry in place instead of appending', () => {
-    const streamed = send(s1, { type: 'plannerToken', text: 'Looking into it', sessionId: 's1' });
-    const { state } = reduce(streamed, { type: 'plannerMessage', content: 'Looking into it.', sessionId: 's1' });
-
-    expect(state.messages).toHaveLength(1);
-    expect(state.messages[0]).toMatchObject({ role: 'assistant', content: 'Looking into it.' });
-    expect(state.messages[0].streaming).toBeFalsy();
-  });
-
-  it('plannerMessage still appends when there is no pending streaming entry', () => {
-    const { state } = reduce(s1, { type: 'plannerMessage', content: 'Hello.', sessionId: 's1' });
-    expect(state.messages).toHaveLength(1);
-    expect(state.messages[0]).toMatchObject({ role: 'assistant', content: 'Hello.' });
-    expect(state.messages[0].streaming).toBeFalsy();
-  });
-
-  it('ignores a token from a session that /new has replaced', () => {
-    const { state } = reduce({ ...s1, sessionId: 's2' }, { type: 'plannerToken', text: 'stray', sessionId: 's1' });
-    expect(state.messages).toHaveLength(0);
+  it('ignores a delta from a session that /new has replaced', () => {
+    const { state } = reduce({ ...s1, sessionId: 's2' }, hear(delta('stray'), 's1'));
+    expect(messagesOf(state)).toHaveLength(0);
   });
 });

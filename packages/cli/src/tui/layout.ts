@@ -1,12 +1,12 @@
 import { pad, style, truncate, width, wrap, wrapLines, type WrapLine } from './ansi';
 import { cursorInLines, type CursorPosition } from './editor';
-import { renderMarkdown } from './markdown';
+import { conversationLines, tokenLine } from './blocks';
 import { chatEditorRoom, chatPaneWidth, planPaneWidth } from './geometry';
 import { taskRepoNames } from '../isolation';
 import { SLASH_COMMANDS, type SlashCategory } from './slash';
-import { isTaskRunning, planRows, selectedPlanRow, type ChatMessage, type PlanRow, type TuiState } from './state';
+import { isTaskRunning, planRows, selectedPlanRow, type PlanRow, type TuiState } from './state';
 import { modesForTask } from './taskAssignment';
-import { ALL_PROVIDERS, capConflictFiles, runnerForProvider, taskOrderLabel, type AiProvider, type ResearchStepOutcome } from '@ordewell/core';
+import { ALL_PROVIDERS, capConflictFiles, runnerForProvider, taskOrderLabel, type AiProvider, type DisplayBlock } from '@ordewell/core';
 
 /**
  * What each pane's content actually is, and therefore how far it can scroll.
@@ -83,9 +83,8 @@ export function footerHints(state: TuiState): string[] {
 }
 
 /**
- * The queue's bubbles, one bubble per prompt, in queue order. Kept in its own
- * function because the chat rendering swaps for core display blocks (#52),
- * which will re-home where these paint but keep the bubbles themselves.
+ * The queue's bubbles, one bubble per prompt, in queue order. Not part of the
+ * conversation view: a prompt joins it only once it is sent.
  */
 export function queuedPromptRows(state: TuiState, cols: number): string[] {
   return state.queuedPrompts.flatMap((text) => queuedBubble(text, cols));
@@ -138,107 +137,29 @@ export function bodyRows(state: TuiState): number {
 
 // ── Chat body ────────────────────────────────────────────────────────────────
 
-const ROLE_PREFIX: Record<ChatMessage['role'], (text: string) => string> = {
-  user: (t) => `${style.cyan('❯')} ${t}`,
-  assistant: (t) => `${style.magenta('◆')} ${t}`,
-  system: (t) => style.grey(`· ${t}`),
-  error: (t) => `${style.red('✗')} ${style.red(t)}`,
-  // Research rows go through `researchRow`, which paints the outcome mark
-  // separately; this entry only exists to keep the role map total.
-  research: (t) => style.grey(`  ↳ ${t}`),
-};
-
-/**
- * How a research call ended, as one glyph. A refused `rm` and a successful
- * `rm` must not both read as a tick.
- */
-const OUTCOME_MARK: Record<ResearchStepOutcome, string> = {
-  success: '✓',
-  failure: '✗',
-  refused: '⊘',
-  denied: '⊘',
-  not_executed: '–',
-};
-
-/**
- * Only the mark carries colour. A dense run of successful reads stays as quiet
- * as the rest of the log, so a refusal or a failure is the thing that catches
- * the eye rather than one tick among thirty.
- */
-const OUTCOME_PAINT: Record<ResearchStepOutcome, (text: string) => string> = {
-  success: style.grey,
-  failure: style.red,
-  refused: style.yellow,
-  denied: style.yellow,
-  not_executed: style.grey,
-};
-
-const RESEARCH_RESULT_CHARS = 90;
-
-export function researchLine(message: ChatMessage): string {
-  const meta = message.research;
-  if (!meta?.outcome) return `⋯ ${message.content}`;
-  const result = (meta.result ?? '').replace(/\s+/g, ' ').trim();
-  const preview = result.length > RESEARCH_RESULT_CHARS
-    ? `${result.slice(0, RESEARCH_RESULT_CHARS)}…`
-    : result;
-  const mark = OUTCOME_MARK[meta.outcome];
-  return preview ? `${mark} ${message.content} → ${preview}` : `${mark} ${message.content}`;
-}
-
-const RESEARCH_INDENT = '  ↳ ';
-
-/**
- * One row per call, clipped rather than wrapped: a research log that wraps to
- * three rows per entry pushes the actual conversation off the pane.
- */
-function researchRow(message: ChatMessage, cols: number): string {
-  const text = truncate(researchLine(message), Math.max(1, cols - width(RESEARCH_INDENT)));
-  const paint = OUTCOME_PAINT[message.research?.outcome ?? 'success'];
-  const space = text.indexOf(' ');
-  if (space < 0) return style.grey(`${RESEARCH_INDENT}${text}`);
-  return `${style.grey('  ↳')} ${paint(text.slice(0, space))} ${style.grey(text.slice(space + 1))}`;
-}
-
 interface ChatBodyMemo {
-  messages: ChatMessage[];
+  blocks: readonly DisplayBlock[];
   cols: number;
+  detailAll: boolean;
   lines: string[];
 }
 
-// The transcript is the single most expensive thing to render — every
-// assistant message is re-parsed (Markdown → string-width) each frame — but
-// chat content is immutable once written: the reducer always hands back a new
-// `messages` array on any change, and a spinner tick, a `status_update` flood
-// or the user scrolling the plan pane never touch it. Memoising the wrapped
-// lines on the array reference lets those renders skip the re-parse and just
-// re-fit/scroll the cached body, which is what stops arrow-key scrolling on a
-// task from lagging while a six-task plan runs. The body depends on nothing
-// but `(messages, cols)`, so a single last-seen entry is all that can be reused
-// — and it is why the reducer asks for its scroll bound at the same width the
-// renderer will paint at, so the two of them share the one entry instead of
-// evicting each other's.
+// The transcript is the single most expensive thing to render, but a spinner
+// tick, a `status_update` flood or the user scrolling the plan pane never
+// touch it — and core's conversation view hands back the same `blocks` array
+// for anything that changes nothing. Memoising the lines on that reference
+// lets those renders skip straight to re-fitting the cached body, which is
+// what stops arrow-key scrolling on a task from lagging while a six-task plan
+// runs. A single last-seen entry is all that can be reused, which is why the
+// reducer asks for its scroll bound at the same width the renderer will paint
+// at: the two of them share the one entry instead of evicting each other's.
 let chatBodyMemo: ChatBodyMemo | null = null;
 
-export function chatBodyLines(messages: ChatMessage[], cols: number): string[] {
-  if (chatBodyMemo && chatBodyMemo.messages === messages && chatBodyMemo.cols === cols) {
-    return chatBodyMemo.lines;
-  }
-  const lines: string[] = [];
-  for (const message of messages) {
-    // Research entries are a dense log; a blank line between each would push
-    // the actual conversation off the top of the pane.
-    if (message.role === 'research') {
-      lines.push(researchRow(message, cols));
-      continue;
-    }
-    const wrapped = message.role === 'assistant'
-      ? renderMarkdown(message.content, Math.max(1, cols - 2))
-      : wrap(message.content, Math.max(1, cols - 2));
-    lines.push(...wrapped.map((line, i) => (i === 0 ? ROLE_PREFIX[message.role](line) : `  ${line}`)));
-    lines.push('');
-  }
-  chatBodyMemo = { messages, cols, lines };
+export function chatBodyLines(blocks: readonly DisplayBlock[], cols: number, detailAll: boolean): string[] {
+  const memo = chatBodyMemo;
+  if (memo && memo.blocks === blocks && memo.cols === cols && memo.detailAll === detailAll) return memo.lines;
+  const lines = conversationLines(blocks, cols, detailAll);
+  chatBodyMemo = { blocks, cols, detailAll, lines };
   return lines;
 }
 
@@ -250,6 +171,8 @@ export function chatBodyLines(messages: ChatMessage[], cols: number): string[] {
  */
 export interface ChatLayout {
   lines: string[];
+  /** Rows pinned under the scrolling lines, which no scrolling moves. */
+  footer: string[];
   anchor: 'top' | 'bottom';
   maxScroll: number;
 }
@@ -259,16 +182,22 @@ export function chatLayout(state: TuiState, rows: number, cols: number): ChatLay
   // planning conversation and only goes once a plan exists — from then on the
   // plan pane owns the screen and the chat column is too narrow for the art.
   const welcome = state.tasks.length === 0;
-  const body = chatBodyLines(state.messages, cols);
-  const transcript = !welcome ? body : state.messages.length === 0 ? welcomeLines(state, cols) : [...welcomeLines(state, cols), '', ...body];
+  const body = chatBodyLines(state.conversation.blocks, cols, state.detailAll);
+  const transcript = !welcome ? body : body.length === 0 ? welcomeLines(state, cols) : [...welcomeLines(state, cols), '', ...body];
   // The queued prompts paint as part of the tail, newest last — they are the
   // turns that have not gone out yet, and they travel where a sent message
   // would have appeared.
   const bubbles = queuedPromptRows(state, cols);
   const lines = [...transcript, ...(bubbles.length > 0 ? ['', ...bubbles] : [])];
+  // The token line is the session's, not a line of the transcript: it keeps
+  // the pane's bottom row while everything above it scrolls — unless the pane
+  // is a single row, which belongs to the conversation.
+  const usage = rows > 1 ? tokenLine(state.conversation.blocks, cols) : null;
+  const footer = usage ? [usage] : [];
+  const room = rows - footer.length;
   // Content that fits hangs off the top so the welcome does not jump when the
   // first message lands; once it overflows the newest lines win the pane.
-  return { lines, anchor: lines.length > rows ? 'bottom' : 'top', maxScroll: Math.max(0, lines.length - rows) };
+  return { lines, footer, anchor: lines.length > room ? 'bottom' : 'top', maxScroll: Math.max(0, lines.length - room) };
 }
 
 /** How far back the chat pane can be scrolled at the size it is about to be painted. */

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { initialState, reduce, type Step } from '../reducer';
+import { initialState, reduce, type Action, type Step } from '../reducer';
 import type { ApprovalRequestView, TuiState } from '../state';
 
 const key = (name: string, char?: string) => ({ type: 'key' as const, key: { name, char } });
@@ -20,7 +20,13 @@ const PATH_REQUEST: ApprovalRequestView = {
   scope: '/tmp/dump/*',
 };
 
-const requested = (request = REQUEST) => ({ type: 'approvalRequested' as const, request, sessionId: 's1' });
+const requested = (request = REQUEST, sessionId = 's1'): Action => ({
+  type: 'sessionMessage', message: { type: 'approval_request', ...request }, sessionId,
+});
+
+const settledElsewhere = (id: string, granted = true): Action => ({
+  type: 'sessionMessage', message: { type: 'approval_settled', id, granted }, sessionId: 's1',
+});
 
 function withPending(request = REQUEST): TuiState {
   return reduce(initialState({ sessionId: 's1', status: 'researching' }), requested(request)).state;
@@ -36,7 +42,7 @@ describe('approval overlay', () => {
 
   it('ignores a request for a different session', () => {
     const state = initialState({ sessionId: 's1' });
-    const next = reduce(state, { type: 'approvalRequested', request: REQUEST, sessionId: 'other' }).state;
+    const next = reduce(state, requested(REQUEST, 'other')).state;
 
     expect(next.overlay).toBeNull();
   });
@@ -86,13 +92,12 @@ describe('approval overlay', () => {
     expect(effects).toEqual([]);
   });
 
-  it('records the decision in the transcript, so the run has a visible audit trail', () => {
-    const granted = press(withPending(), 'y', 'y').state;
-    const denied = press(withPending(), 'n', 'n').state;
+  it('keeps the request in the conversation, which shows the decision once the session settles it', () => {
+    const answered = press(withPending(), 'y', 'y').state;
+    expect(answered.conversation.blocks).toMatchObject([{ type: 'approval', subject: 'npm test', status: 'pending' }]);
 
-    expect(granted.messages.at(-1)?.content).toContain('npm test');
-    expect(granted.messages.at(-1)?.content).toMatch(/approved/i);
-    expect(denied.messages.at(-1)?.content).toMatch(/denied/i);
+    const settled = reduce(answered, settledElsewhere('ap-1', true)).state;
+    expect(settled.conversation.blocks).toMatchObject([{ type: 'approval', subject: 'npm test', status: 'granted' }]);
   });
 });
 
@@ -116,13 +121,13 @@ describe('approval queue', () => {
 
   it('drops a queued request that was answered on another surface', () => {
     const both = reduce(withPending(), requested(PATH_REQUEST)).state;
-    const settled = reduce(both, { type: 'approvalSettled', approvalId: 'ap-2', sessionId: 's1' }).state;
+    const settled = reduce(both, settledElsewhere('ap-2')).state;
 
     expect(press(settled, 'y', 'y').state.overlay).toBeNull();
   });
 
   it('closes the open modal when that request is settled elsewhere', () => {
-    const settled = reduce(withPending(), { type: 'approvalSettled', approvalId: 'ap-1', sessionId: 's1' }).state;
+    const settled = reduce(withPending(), settledElsewhere('ap-1')).state;
 
     expect(settled.overlay).toBeNull();
   });
