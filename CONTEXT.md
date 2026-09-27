@@ -935,6 +935,119 @@ strategy is gone — a human who must confirm is modeled directly as a
 
 ---
 
+## Planner conversation display
+
+**Turn** — one exchange with the planner, from the user's prompt (or an
+internal trigger) to a settled outcome, streamed between `planner_turn_started`
+and `planner_turn_ended` under one `turnId`. Every turn-scoped message carries
+that id; a message without a `turnId` does not belong to a streamed turn.
+Turns settle through one classification (`PlannerTurnOutcome`: `message`,
+`plan`, `task_ops`, `stopped`, `error`) and the settled message is
+authoritative over anything streamed inside the turn.
+*Avoid:* "the reply" for the whole turn — the turn includes tool calls,
+thinking and possibly subagents; *Avoid:* overloading with the model's own
+providers' "turns" — a harness planner may open turns of its own, and only ones
+Ordewell opened are one of these.
+
+**Segment** — a stream of reply text inside one turn a surface can show as one
+growing message, keyed by `segmentId` on `planner_text_delta`. A backend that
+streams prose, then an envelope, then more prose, hands over several segments;
+the turn's final segment is the one a settled `planner_message` replaces.
+*Avoid:* calling the segment "the reply" — only a settled `planner_message` is
+that; *Avoid:* numbering segments by arrival — ids are given by the session,
+not derived.
+
+**Retraction** — `planner_text_retracted` saying streamed text was thrown away
+for good: the reply it belonged to was discarded (a corrective retry, an
+aborted segment). Everything a segment had streamed is dropped unless a later
+`planner_message` or a later segment of the same turn replaces it; the block
+the text was accumulating in ends and never returns from reload, because
+retracted text is saved nowhere.
+*Avoid:* "edit" — the text is not corrected, it is withdrawn whole;
+*Avoid:* treating it as an error — a retracted segment is what a bounded
+repair loop looks like to a viewer.
+
+**Display block** (`core/src/conversation/blocks.ts`) — one thing a surface
+draws for the planner conversation: a `message` (user, planner, system or
+error), `thinking`, `tool`, `subagent`, `approval`, `plan` or the `usage`
+token line. Built once in core by `reduceConversation` from the `SessionMessage`
+stream plus the surface's own `LocalEntry` lines; a block's `id` is stable for
+as long as the block exists, so a surface can key its UI state on it.
+*Avoid:* deriving a per-surface block shape from raw `SessionMessage`s again —
+the block list is the contract (ADR-0017); *Avoid:* storing per-block UI state
+(expanded/collapsed) in the block — it is the surface's.
+
+**Conversation view** (`reduceConversation`, `EMPTY_CONVERSATION`) — the
+stateful accumulator behind the blocks: every `SessionMessage` in and the view
+out. Pure and reusable per surface, including `fromTranscript`, which rebuilds
+the saved subset for a reloaded session. The newest transcript entry the view
+accounts for (`transcriptAt`) is what tells a reconnecting surface what is new.
+*Avoid:* calling it a chat log or a message list — it is a reducer over
+messages to a drawing, and streamed semi-states live in it;
+*Avoid:* a surface holding its own parallel mirror of the view.
+
+**Detail view (detail-all)** — the single expand-all toggle per surface: the
+TUI's ctrl+o and VS Code's header button flip one `detailAll` flag that decides
+whether tool blocks show their arguments and full output, subagent blocks show
+their children and digest, and so on. Collapsed is the default: a row per call
+(`Name(keyArg)`) and one preview line. There are deliberately no per-block
+expanded states (see ADR-0017's rejected options). The TUI's ctrl+L clears the
+conversation but keeps the token line.
+*Avoid:* "expandable row" per block — one toggle, one place, per surface;
+*Avoid:* claiming the surfaces share the flag's key — ctrl+o is the TUI's
+spelling, not the concept.
+
+**Usage record** (`UsageRecord`) — what one model call consumed, as its
+provider or runner *reported* it: token counts, cached input share, the
+context window when the reporter states one, and `reportedCost` only when the
+source itself billed one. Every measure is optional because backends report
+different subsets; absent means "not reported", never zero.
+*Avoid:* filling a missing number from a price table or an estimate — prices
+go stale and a subscription runner has no per-token price at all (ADR-0017);
+*Avoid:* treating a record as a statement about *who* called — it says nothing.
+
+**Usage totals** (`UsageTotals`, `PlannerUsage`) — the running sum of usage
+records for the session. Token counts stay absent until some record reports
+them; cost is kept per currency because two runners may bill in different ones
+and no honest exchange rate folds them together. `bySubagent` holds each
+research subagent's own share, which is already counted in `totals` — never
+added twice. Surfaced as the one `usage` block, the token line, always last.
+*Avoid:* merging currencies; *Avoid:* a "grand total" that mixes the planner's
+own calls in with per-subagent sums shown alongside.
+
+**Context fill** (`plannerContextFill`) — how full the planner's own context
+window is, from its last prompt's reported input tokens against the window the
+runner reports. Derived only for the planner's own calls: a subagent runs its
+own model, whose window says nothing about the planner's. A reported window of
+0 means "not known", and then the fill is simply omitted — never shown against
+a guessed zero.
+*Avoid:* calling it a percentage when either half is unknown.
+
+**Subagent lifecycle** — a research subagent as a first-class block: announced
+by `subagent_started` (brief and model), running its calls tagged with its
+`subagentId`, ended by `subagent_finished` with an outcome
+(`done | failed | stopped`) and the digest it handed back. The planner's
+`spawn` tool call becomes the subagent's own block — the two never show as
+separate rows. Usage is folded through the same events, tagged
+`subagentId`. Persisted in the research log; a reload regroups child steps
+under the subagent's block rather than duplicating them.
+*Avoid:* "child session" for the concept (that is OpenCode's mechanism, not the
+contract); *Avoid:* a finished subagent without an outcome claiming success —
+omit or failed, never guessed.
+
+**Queued prompt** — a message the user sent while a planner turn was in
+flight, held by the surface and sent as the turn's next input rather than
+bounced (the `ConversationBusyError` path stays for operations that would share
+the live context, such as a Compaction). Newest first in the hold, drawn
+newest-last onto the screen, and taken back by Esc — the newest one, restored
+to the drafting input; the planner keeps running. The TUI drains the queue on a
+turn ending.
+*Avoid:* "pending message" (that names the whole queue's existence, not one
+entry); *Avoid:* treating unsend as cancel — nothing in flight is stopped; the
+prompt simply never goes.
+
+---
+
 ## Surfaces
 
 **Surface** — a client that drives Ordewell: the **VS Code extension**
