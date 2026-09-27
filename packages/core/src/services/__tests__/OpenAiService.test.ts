@@ -133,4 +133,39 @@ describe('OpenAiService usage reporting (#49)', () => {
     );
     expect(withoutWindow[0]).not.toHaveProperty('contextWindow');
   });
+
+  // A research subagent's calls must reach the ledger as the subagent's, or its
+  // prompt is read as the planner's own and the context fill measures the wrong model.
+  it('files a research subagent\'s calls under that subagent, and only the planner\'s as its own', async () => {
+    createSpy
+      .mockReturnValueOnce(streamOf([
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', function: { name: 'spawn_research_agent', arguments: '{"prompt":"find the cache"}' } }] } }] },
+        { choices: [], usage: { prompt_tokens: 100, completion_tokens: 10 } },
+      ]))
+      .mockReturnValueOnce(streamOf([
+        { choices: [{ delta: { content: 'src/cache.ts holds it' } }] },
+        { choices: [], usage: { prompt_tokens: 40, completion_tokens: 4 } },
+      ]))
+      .mockReturnValueOnce(streamOf([
+        { choices: [{ delta: { content: 'It lives in src/cache.ts.' } }] },
+        { choices: [], usage: { prompt_tokens: 150, completion_tokens: 5 } },
+      ]));
+    const progress: ResearchProgress[] = [];
+
+    await new OpenAiService(cfg({ researchSubagentModel: 'openai:gpt-4o-mini', researchMaxSteps: 5 } as Partial<IConfig>)).startConversation({
+      goal: 'where is the cache?',
+      runners: ['claude-code'],
+      modelsByRunner: {},
+      fs: fakeFileSystem(),
+      onProgress: (p) => progress.push(p),
+    });
+
+    const subagentId = progress.find((p) => p.type === 'subagent_started')?.subagentId;
+    expect(subagentId).toBeDefined();
+    expect(progress.filter((p) => p.type === 'usage').map((p) => p.record)).toEqual([
+      { source: 'openai', model: 'gpt-4o', inputTokens: 100, outputTokens: 10 },
+      { source: 'openai', model: 'gpt-4o-mini', inputTokens: 40, outputTokens: 4, subagentId },
+      { source: 'openai', model: 'gpt-4o', inputTokens: 150, outputTokens: 5 },
+    ]);
+  });
 });

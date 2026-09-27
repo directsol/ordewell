@@ -525,13 +525,7 @@ export class Session {
         return;
       case 'usage': {
         if (!progress.record) return;
-        // A provider that reports through a turn has no sink of its own inside a
-        // subagent: executeSpawnAgent tags the progress event with the id, so
-        // fold it onto the record here or the subagent's share would count as
-        // the planner's.
-        this.usageLedger.record(progress.subagentId && !progress.record.subagentId
-          ? { ...progress.record, subagentId: progress.subagentId }
-          : progress.record);
+        this.usageLedger.record(progress.record);
         this.broadcast(this.usageLedger.message(turnId));
         return;
       }

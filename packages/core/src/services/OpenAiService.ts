@@ -53,7 +53,7 @@ class OpenAiResearchChat implements ResearchChat {
     private onContent?: (delta: string, segmentId: string) => void,
     /** The serving provider id, stamped on usage records. */
     private source = 'openai',
-    /** One report per API call; a subagent leaves this off and reports through its run loop instead. */
+    /** One report per API call — the only way a call's usage leaves this chat. */
     private onUsage?: (record: UsageRecord) => void,
     /** The model's context window when the catalog knows it; omitted from records otherwise. */
     private contextWindow?: number,
@@ -142,7 +142,7 @@ class OpenAiResearchChat implements ResearchChat {
       try { args = JSON.parse(v.args); } catch { /* empty */ }
       return { name: v.name, args, id: v.id };
     });
-    return { text: content, toolCalls, hasToolCalls: toolCalls.length > 0, reasoning: reasoning || undefined, finishReason, promptTokens, usage };
+    return { text: content, toolCalls, hasToolCalls: toolCalls.length > 0, reasoning: reasoning || undefined, finishReason, promptTokens };
   }
 
   /**
@@ -232,7 +232,7 @@ export class OpenAiService extends BaseAiService implements IAiService {
   }
 
   /** A research subagent: fresh history, digest contract, cheap model, read-only tools. */
-  protected createSubagentChat(onReasoning?: (delta: string) => void): ResearchChat | null {
+  protected createSubagentChat(onReasoning?: (delta: string) => void, onUsage?: (record: UsageRecord) => void): ResearchChat | null {
     const client = this.getClient();
     const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       { role: 'system', content: buildSubagentSystemPrompt() },
@@ -244,10 +244,8 @@ export class OpenAiService extends BaseAiService implements IAiService {
       toOpenAiSubagentTools(),
       onReasoning,
       undefined,
-      // A subagent has no per-call progress sink here; its run loop reads the
-      // record off the returned turn and reports it through the wrapped progress
-      // channel, which stamps the subagent's id (see ResearchSubagents).
       this.config.aiProvider,
+      onUsage,
     );
   }
 
