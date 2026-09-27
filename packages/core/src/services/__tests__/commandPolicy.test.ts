@@ -840,6 +840,16 @@ describe('pathLikeArgs — path arguments an auto-tier binary could still read o
     expect(pathLikeArgs('npm --prefix=/etc test')).toEqual(['/etc']);
   });
 
+  // The short form of `--flag=value`: the value glued straight onto the flag.
+  // Every token starting with `-` was skipped, so `grep -f /etc/passwd` was
+  // confined and `grep -f/etc/passwd` ran unprompted.
+  it('catches a path glued onto a short flag', () => {
+    expect(pathLikeArgs('grep -f/etc/passwd x')).toEqual(['/etc/passwd']);
+    expect(pathLikeArgs('git -C/etc log')).toEqual(['/etc']);
+    expect(pathLikeArgs('du -X~/.ssh/id_rsa src')).toEqual(['~/.ssh/id_rsa']);
+    expect(pathLikeArgs('ls -la src')).toEqual([]);
+  });
+
   // Quotes used to survive on argument tokens, so `looksLikePath('"/etc/passwd"')`
   // was false and the read slipped past confinement entirely.
   it('sees a path the shell will unquote', () => {

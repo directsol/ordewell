@@ -1211,8 +1211,24 @@ export function pathLikeArgs(command: string, opts: CommandPolicyOptions = {}): 
       const v = a.slice(a.indexOf('=') + 1);
       return looksLikePath(v) ? [v] : [];
     }
-    return (!a.startsWith('-') && looksLikePath(a)) ? [a] : [];
+    if (a.startsWith('-')) {
+      const glued = gluedValue(a);
+      return glued ? [glued] : [];
+    }
+    return looksLikePath(a) ? [a] : [];
   }));
+}
+
+/**
+ * A path glued straight onto a short flag, the short form of `--flag=value`:
+ * `-C/etc`, or `-xf/tmp/a.tar` after a run of boolean letters. Which letters
+ * take a value differs by binary, so every suffix past the first letter is
+ * tried; reading one too many costs a prompt, one too few costs confinement.
+ */
+function gluedValue(arg: string): string | undefined {
+  if (arg.startsWith('--')) return undefined;
+  for (let i = 2; i < arg.length; i++) if (looksLikePath(arg.slice(i))) return arg.slice(i);
+  return undefined;
 }
 
 /** How a recognized flag relates to the token after it. */
