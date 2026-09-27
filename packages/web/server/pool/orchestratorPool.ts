@@ -613,7 +613,11 @@ export class OrchestratorPool {
     return session;
   }
 
+  // The Session drops its planner context, but the model call in flight is
+  // the pool's to abort: it holds the only signal that reaches it.
   destroy(sessionId: string): void {
+    this.planningAborts.get(sessionId)?.abort();
+    this.planningAborts.delete(sessionId);
     this.sessions.get(sessionId)?.destroy();
     this.sessions.delete(sessionId);
   }
