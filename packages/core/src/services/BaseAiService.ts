@@ -17,6 +17,7 @@ import { classifyOutcome } from './researchStepSummary';
 import { addUsage, type UsageTotals } from '../models/Usage';
 import type { ConversationTurn } from './AiService';
 import type { UsageRecord } from '../models/Usage';
+import { abortScope } from '../utils/abortScope';
 
 /**
  * Read-only, side-effect-free tools that can share a round. Deliberately a
@@ -90,11 +91,8 @@ export abstract class BaseAiService {
 
   pruneContext(): number { return this.conversation?.ctx.chat.compactHistory?.() ?? 0; }
 
-  protected startAbortScope(callerSignal?: AbortSignal): AbortSignal | undefined {
-    this.activeAbort = new AbortController();
-    if (!callerSignal) return this.activeAbort.signal;
-    if (callerSignal.aborted) { this.activeAbort.abort(); return this.activeAbort.signal; }
-    callerSignal.addEventListener('abort', () => this.activeAbort?.abort(), { once: true });
+  protected startAbortScope(callerSignal?: AbortSignal): AbortSignal {
+    this.activeAbort = abortScope(callerSignal);
     return this.activeAbort.signal;
   }
 

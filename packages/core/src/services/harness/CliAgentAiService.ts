@@ -23,6 +23,7 @@ import {
 import { generatePlanWithRepair } from '../PlanRepair';
 import { settleReply, type ReplyAttempt } from '../settleReply';
 import { redactSecrets } from '../../utils/redactSecrets';
+import { abortScope } from '../../utils/abortScope';
 import { runnerForProvider } from '../ProviderRegistry';
 import { collectResearchContext } from '../ContextCollector';
 import type { AgentAdapter, AgentEvent, AgentProcessDeps, AgentStartOptions } from './AgentAdapter';
@@ -244,7 +245,8 @@ export class CliAgentAiService implements IAiService {
     signal?: AbortSignal,
   ): Promise<ConversationTurn> {
     const conversation = this.conversation!;
-    const combined = this.startAbortScope(signal);
+    this.activeAbort = abortScope(signal);
+    const combined = this.activeAbort.signal;
     let agentWaits = 0;
     // Text from turns Ordewell continued past on the user's behalf. A wait is
     // not a new user message, so the reply they read is the whole answer.
@@ -488,14 +490,6 @@ export class CliAgentAiService implements IAiService {
     if (!conversation) throw new Error('No active planner conversation.');
     await this.startAdapter({ ...conversation.startOptions, resumeSessionId: this.lastNativeSessionId ?? undefined });
     return this.adapter!;
-  }
-
-  private startAbortScope(callerSignal?: AbortSignal): AbortSignal | undefined {
-    this.activeAbort = new AbortController();
-    if (!callerSignal) return this.activeAbort.signal;
-    if (callerSignal.aborted) { this.activeAbort.abort(); return this.activeAbort.signal; }
-    callerSignal.addEventListener('abort', () => this.activeAbort?.abort(), { once: true });
-    return this.activeAbort.signal;
   }
 
   private plannerModel(): string | undefined {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { CliAgentAiService } from '../harness/CliAgentAiService';
 import { createAiService } from '../AiService';
 import { fakeConfig, fakeFileSystem } from '../../testing';
@@ -384,6 +384,38 @@ describe('CliAgentAiService — Claude Code', () => {
     expect(events.some((e) => e.type === 'interrupted')).toBe(true);
     expect(spawned.processes[0].killed).toBe(true);
     expect(turn.kind).toBe('message');
+  });
+
+  // Each turn links its own stop to the caller's signal. A caller aborting a
+  // signal it gave a turn that already ended must not stop the turn running now.
+  it('leaves the running turn alone when a finished turn\'s signal is aborted', async () => {
+    const signals: Array<AbortSignal | undefined> = [];
+    let release = () => {};
+    const svc = new CliAgentAiService(fakeConfig({ aiProvider: 'claude-code' }), {
+      workspaceRoot: () => '/repo',
+      createAdapter: () => ({
+        agentId: 'claude-code',
+        start: async () => {},
+        nativeSessionId: () => null,
+        dispose: () => {},
+        send: async (_message, onEvent, signal) => {
+          signals.push(signal);
+          if (signals.length === 2) await new Promise<void>((resolve) => { release = resolve; });
+          onEvent({ type: 'assistant_text', text: 'ok' });
+          onEvent({ type: 'turn_end' });
+        },
+      }),
+    });
+    const finished = new AbortController();
+    await svc.startConversation(request({ signal: finished.signal }));
+    const running = svc.continueConversation('next', () => {}, new AbortController().signal);
+    await vi.waitFor(() => expect(signals).toHaveLength(2));
+
+    finished.abort();
+
+    expect(signals[1]?.aborted).toBe(false);
+    release();
+    expect(await running).toMatchObject({ kind: 'message', text: 'ok' });
   });
 
   it('restarts from the agent session after a stop, rather than writing into a killed process', async () => {

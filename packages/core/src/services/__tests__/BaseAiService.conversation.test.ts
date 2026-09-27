@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { BaseAiService, type ResearchChat, type ResearchTurn, type ToolResult, type ConversationTurnContext } from '../BaseAiService';
 import type { IConfig } from '../../interfaces/IConfig';
 import type { IFileSystem } from '../../interfaces/IFileSystem';
@@ -84,6 +84,31 @@ describe('runConversationTurn abort handling', () => {
     const svc = new TestService(fakeConfig());
     const turn = await svc.runTurn(makeCtx(chat), 'go', () => {}, controller.signal);
     expect(turn.kind).toBe('message');
+  });
+
+  it('leaves the running turn alone when a finished turn\'s signal is aborted', async () => {
+    const signals: Array<AbortSignal | undefined> = [];
+    let release = () => {};
+    const chat: ResearchChat = {
+      sendMessage: async (_text, signal) => {
+        signals.push(signal);
+        if (signals.length === 2) await new Promise<void>((resolve) => { release = resolve; });
+        return proseTurn('ok');
+      },
+      sendToolResults: async () => proseTurn('ok'),
+    };
+    const svc = new TestService(fakeConfig());
+    svc.hold(makeCtx(chat));
+    const finished = new AbortController();
+    await svc.continueConversation('first', () => {}, finished.signal);
+    const running = svc.continueConversation('second', () => {}, new AbortController().signal);
+    await vi.waitFor(() => expect(signals).toHaveLength(2));
+
+    finished.abort();
+
+    expect(signals[1]?.aborted).toBe(false);
+    release();
+    expect(await running).toMatchObject({ kind: 'message', text: 'ok' });
   });
 
   it('classifies normally when the signal was never aborted', async () => {
