@@ -8,6 +8,48 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Planner replies stream as they are written.** Every planner — the API
+  providers and the harness planners alike — now shows its reply text as it
+  arrives instead of after the turn settles, and a turn that is corrected
+  withdraws the text it already streamed. The settled reply still wins: when a
+  turn ends, its text replaces whatever was streamed for it, so a retry cannot
+  leave a half-answer on screen. A reply that is a plan is never shown as
+  prose; it keeps streaming as the "building plan" display until it becomes a
+  plan marker.
+- **A token line under the conversation.** The TUI and VS Code show what the
+  session has used — input, output and cached tokens, per-currency cost, and
+  how full the planner's context window is — taken only from what the provider
+  or runner reports, and left out where none reports. No prices are guessed.
+- **Research subagents draw as their own blocks.** A subagent announced by the
+  planner gets a block carrying its brief, model and, when it finishes, its
+  outcome and the digest it handed back; its own calls and thinking sit under
+  it, and its usage is counted into the token line. A subagent's text no longer
+  leaks into the planner's reply. A reloaded session regroups the subagent's
+  saved steps rather than showing them loose or twice.
+- **Readable command rows, with ctrl+o for everything.** A tool call reads as
+  `Name(keyArg)` with one preview line of its output instead of a raw argument
+  blob; a refused command, a denied path and a broken command read
+  differently. ctrl+o expands or collapses full detail — arguments, whole
+  output, subagent children and digests — for the whole conversation at once.
+- **Queue a prompt while the planner is working.** A message sent mid-turn is
+  held and sent when the turn ends, drawn under the conversation with how to
+  take it back — Esc in the TUI unsends the newest one and puts its text back
+  in the input, and VS Code withdraws one from the queue badge. The planner
+  keeps running either way. ctrl+L clears the TUI conversation but keeps the
+  token line.
+
+### Changed
+
+- **Double-Esc stops the planner in the TUI.** With the input already empty,
+  the first Esc arms the stop and the second confirms it, so a stray tap cannot
+  cancel a turn; the status line says what is armed. VS Code draws a planner
+  approval as a card that names what is being approved and who decided it, and
+  offers an expand-all button for the conversation.
+- **The TUI's piped research log matches the chat pane.** Steps print as
+  `Read(src/auth.ts)` rather than `read_file auth.ts`.
+
 ## [0.5.4] — 2026-09-26
 
 ### Fixed

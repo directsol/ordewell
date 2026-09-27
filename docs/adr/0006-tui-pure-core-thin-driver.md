@@ -58,3 +58,24 @@ The decision stands, on different grounds than stated:
 - **S2**'s rejection stands because an in-process TUI would duplicate the
   session hosting the daemon already does for the CLI. It would not have forked
   the webview's execution path, which was in-process all along.
+
+## Update (2026-09-27) — the chat pane draws core's display blocks
+
+The TUI chat pane no longer accumulates presentation state from
+`SessionMessage`s itself. Core builds the planner conversation view once
+([ADR-0017](0017-shared-conversation-view.md)), and the TUI renders its blocks:
+command rows, streaming reply text, subagent blocks, plan markers and the token
+line. The keys this added are the TUI's:
+
+- **ctrl+o** toggles full detail for the conversation — a `detailAll` flag that
+  expands or collapses every tool block, subagent digest and streamed line at
+  once. It is one toggle, not per-block state.
+- **Double-Esc stops a running planner turn.** With the drafting line already
+  empty, the first press arms the stop and the second confirms it; the pairing
+  is what keeps the same key from cancelling on a stray tap.
+- **Esc unsends the newest queued prompt** when one is waiting — its text goes
+  back into the drafting input and the planner keeps running.
+
+The earlier note corrects the "same daemon the web UI uses" language; the
+architectural decision is unchanged, and the chat pane it describes is now
+drawn from ADR-0017's blocks.

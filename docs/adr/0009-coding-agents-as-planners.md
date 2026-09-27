@@ -231,3 +231,18 @@ this backend should understand they are trading speed for not holding a key.
   (`ORDEWELL_LIVE_AGENTS=…`) guards schema drift. The three corrections in the
   transport table above all came from running that check, which is the argument
   for keeping it.
+
+## Update (2026-09-27) — OpenCode streams its reply, not only its tool activity
+
+One sentence above is now out of date: "the event stream is used for tool
+activity only." It was right when it was written — letting the user's own
+replayed message through put the goal in the planner's reply — but the fix was
+not to stop reading prose from the stream, only to filter the echo. OpenCode
+planner turns now stream the assistant message's text parts as
+`planner_text_delta` (with `plan_token` for envelopes), and each message's
+reported `tokens` and `cost` feed the usage ledger (#47–#53). The user's
+message is still excluded: the adapter tracks the assistant message ids the
+server advertises, and a part of any other message is the user's own words —
+not every text part is treated as the assistant's. The framing above — the settled response is authoritative, the
+stream feeds display — still holds; only the "tool activity only" scope
+changed.
