@@ -1,5 +1,20 @@
-// Stage-1 chat reliability verification against the webview harness.
-import { chromium } from 'playwright';
+#!/usr/bin/env node
+/**
+ * Chat reliability verification against the webview harness: a real
+ * `ConversationViewHost` (ADR-0017) driving `restoreChat`/reload edge cases
+ * the main screenshot tour (webview-screenshot.mjs) doesn't cover — a legacy
+ * transcript with no plan marker, a reload that interrupts a live turn, a
+ * restore that must clear a stuck local "stopped" flag, and the watchdog's
+ * silent-turn recovery.
+ *
+ * Usage:
+ *   node bench/live/webview-harness.mjs &
+ *   node bench/live/webview-restore-assertions.mjs
+ */
+import path from 'node:path';
+import { chromium } from './load-playwright.mjs';
+import { createDriver } from './host-driver.mjs';
+import { RELOAD_FIXTURE, RELOAD_PLAN } from './scenarios.mjs';
 
 const BASE = 'http://127.0.0.1:3798';
 let failures = 0;
@@ -9,122 +24,142 @@ const ok = (cond, name) => {
 };
 
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 480, height: 900 } });
+const page = await browser.newPage({ viewport: { width: 480, height: 1400 } });
 await page.goto(BASE);
 await page.waitForSelector('.chat-container');
 
-const send = (msg) => page.evaluate((m) => window.__send(m), msg);
-const timelineKinds = () => page.evaluate(() => {
-  return [...document.querySelectorAll('.message-list > *')]
-    .map((el) => el.className || el.tagName)
-    .filter((c) => typeof c === 'string');
+// Each section below makes its own driver (a fresh session); the bridge
+// always answers through whichever one is current, the way a real host would
+// answer whatever session the webview is currently talking to.
+let currentDriver = createDriver();
+await page.exposeFunction('__toHost', async (msg) => {
+  if (!currentDriver.reply(msg)) return;
+  currentDriver.host.flush();
+  await sendAll(currentDriver.take());
 });
-const messageRoles = () => page.evaluate(() =>
-  [...document.querySelectorAll('.message-list [class*="message"]')].map((e) => e.className).slice(0, 50));
-const inputDisabled = () => page.evaluate(() => {
-  const ta = document.querySelector('textarea');
-  return ta ? ta.disabled : null;
-});
+
+async function send(msg) {
+  await page.evaluate((m) => window.__send(m), msg);
+}
+async function sendAll(msgs) {
+  if (msgs.length) await page.evaluate((arr) => arr.forEach((m) => window.__send(m)), msgs);
+}
 const bodyText = () => page.evaluate(() => document.querySelector('.message-list')?.innerText ?? '');
+// The input itself stays live during a turn (ADR-0017 Q1) — typing queues a
+// message rather than being blocked — so "locked/unlocked" here means the
+// disabled attribute, tied only to `conversationBusy`. Whether a turn is
+// live is instead the stop button, `.send-btn.processing`.
+const inputDisabled = () => page.evaluate(() => document.querySelector('.chat-input-row textarea')?.disabled ?? null);
+const turnActive = () => page.evaluate(() => document.querySelector('.send-btn.processing') !== null);
 
-console.log('1) restoreChat rebuilds timeline with plan anchor at marker');
-const plan = {
-  tasks: [{ id: 't1', order: 1, title: 'Restored Task', description: 'd', type: 'ai', status: 'pending', dependencies: [], subtasks: [], assignedRunner: 'claude-code', taskMode: 'build', completionMarker: 'x', prompt: 'p' }],
-  generatedAt: new Date().toISOString(), status: 'draft', runners: ['claude-code'], lastUpdated: new Date().toISOString(),
-};
-await send({
-  type: 'restoreChat',
-  hasPlan: true,
-  history: [
-    { role: 'user', content: 'restore me a parser', timestamp: '2026-01-01T00:00:00Z' },
-    { role: 'assistant', content: 'Which formats do you need?', timestamp: '2026-01-01T00:00:01Z' },
-    { role: 'user', content: 'JSON please', timestamp: '2026-01-01T00:00:02Z' },
-    { role: 'assistant', content: 'Plan generated with 1 task.', timestamp: '2026-01-01T00:00:03Z', kind: 'plan_generated' },
-    { role: 'assistant', content: 'Anything else you want tweaked?', timestamp: '2026-01-01T00:00:04Z' },
-  ],
-});
-await send({ type: 'planUpdated', plan });
-await page.waitForTimeout(300);
-let text = await bodyText();
-ok(text.includes('restore me a parser'), 'restored user bubble visible');
-ok(text.includes('Which formats do you need?'), 'restored planner bubble visible');
-ok(text.includes('Anything else you want tweaked?'), 'post-plan planner bubble visible');
-ok(text.includes('Restored Task'), 'plan card rendered from marker anchor');
-ok(await inputDisabled() === false, 'input enabled after restore');
-// plan card must sit BEFORE the trailing planner message (marker position honored)
-const planIdx = text.indexOf('Restored Task');
-const trailingIdx = text.indexOf('Anything else you want tweaked?');
-ok(planIdx !== -1 && trailingIdx !== -1 && planIdx < trailingIdx, 'plan card anchored at marker position (before trailing message)');
+console.log('1) restoreChat rebuilds the conversation from a saved transcript (R1)');
+{
+  const driver = createDriver();
+  currentDriver = driver;
+  await send({ type: 'restoreChat' });
+  driver.host.reload(RELOAD_FIXTURE);
+  await sendAll(driver.take());
+  await send({ type: 'planUpdated', plan: RELOAD_PLAN });
+  await page.waitForTimeout(200);
+  const text = await bodyText();
+  ok(text.includes('add a parser'), 'restored user goal visible');
+  ok(text.includes('Which formats do you need?'), 'restored planner reply visible');
+  ok(text.includes('Anything else you want tweaked?'), 'post-plan planner reply visible');
+  ok(await page.locator('.plan-revision-chip').count() === 1, 'plan marker restored');
+  ok(await inputDisabled() === false, 'input enabled after restore');
+}
 
-console.log('2) legacy history (no marker) appends plan card at end');
-await send({ type: 'restoreChat', hasPlan: true, history: [
-  { role: 'user', content: 'legacy goal', timestamp: '2026-01-01T00:00:00Z' },
-  { role: 'assistant', content: 'legacy planner reply', timestamp: '2026-01-01T00:00:01Z' },
-] });
-await page.waitForTimeout(200);
-text = await bodyText();
-const legacyPlanIdx = text.indexOf('Restored Task');
-const legacyReplyIdx = text.indexOf('legacy planner reply');
-ok(legacyReplyIdx !== -1 && legacyPlanIdx > legacyReplyIdx, 'plan card appended after legacy transcript');
+console.log('2) a legacy transcript (no plan_generated marker) still populates the plan dock, with no chip to anchor');
+{
+  const driver = createDriver();
+  currentDriver = driver;
+  await send({ type: 'restoreChat' });
+  driver.host.reload({
+    conversationHistory: [
+      { role: 'user', content: 'legacy goal', timestamp: '2026-01-01T00:00:00.000Z' },
+      { role: 'assistant', content: 'legacy planner reply', timestamp: '2026-01-01T00:00:01.000Z' },
+    ],
+    researchLog: [],
+    plannerUsage: { totals: {} },
+  });
+  await sendAll(driver.take());
+  await send({ type: 'planUpdated', plan: RELOAD_PLAN });
+  await page.waitForTimeout(150);
+  const text = await bodyText();
+  ok(text.includes('legacy goal') && text.includes('legacy planner reply'), 'legacy transcript rendered without error');
+  ok(await page.locator('.plan-revision-chip').count() === 0, 'no plan chip: nothing in the transcript to anchor one to');
+  ok(await page.locator('.plan-dock .task-card').count() === 1, 'the plan dock still shows the task, from planUpdated alone');
+}
 
-console.log('3) showWarnings unlocks input and shows system message');
-// simulate a busy turn first
-await send({ type: 'streamToken', token: 'thinking about the modify…' });
-await page.waitForTimeout(100);
-ok(await inputDisabled() === true, 'input locked while streaming');
-await send({ type: 'showWarnings', warnings: 'Completed tasks deleted: Foo', pendingTasks: [] });
-await page.waitForTimeout(200);
-ok(await inputDisabled() === false, 'input unlocked after showWarnings');
-text = await bodyText();
-ok(text.includes('Plan modification warnings'), 'warnings surfaced as system message');
+console.log('3) a reload mid-turn drops the stale stream and unlocks the input');
+{
+  const driver = createDriver();
+  currentDriver = driver;
+  driver.host.receive({ type: 'planner_turn_started', turnId: 'stale-1', prompt: 'about to be interrupted' });
+  driver.host.receive({ type: 'planner_text_delta', turnId: 'stale-1', segmentId: 's1', text: 'still streaming when the reload lands' });
+  driver.host.flush();
+  await sendAll(driver.take());
+  await page.waitForTimeout(80);
+  ok(await turnActive() === true, 'the stale turn shows as live while it streams');
 
-console.log('4) messages after a user Stop + interrupt terminal still render (stop-gate reset)');
-// enter a processing state, press the real Stop control (sets the stop-gate),
-// then deliver the host's terminal interrupt and a subsequent plan update.
-await send({ type: 'streamToken', token: 'about to be stopped' });
-await page.waitForTimeout(100);
-await page.evaluate(() => document.querySelector('.send-btn.processing')?.click());
-await page.waitForTimeout(100);
-await send({ type: 'plannerInterrupted', message: { role: 'planner', content: '', timestamp: new Date().toISOString() } });
-await page.waitForTimeout(100);
-const planAfterStop = { ...plan, tasks: [{ ...plan.tasks[0], id: 't2', title: 'Post-Stop Task' }] };
-await send({ type: 'planUpdated', plan: planAfterStop });
-await page.waitForTimeout(250);
-text = await bodyText();
-ok(text.includes('Post-Stop Task'), 'gated planUpdated renders after interrupt terminal (stoppedRef reset)');
+  await send({ type: 'restoreChat' });
+  driver.host.reload(RELOAD_FIXTURE);
+  await sendAll(driver.take());
+  await page.waitForTimeout(150);
+  const text = await bodyText();
+  ok(!text.includes('still streaming when the reload lands'), 'the interrupted turn\'s stale text is gone, not merged into the reload');
+  ok(text.includes('add a parser'), 'the reloaded transcript is what is shown instead');
+  ok(await turnActive() === false, 'the turn shows as closed: the reload stopped it, not left it open');
+}
 
-console.log('5) restoreChat clears a stuck stopped state');
-// Force the stopped state through the real path: type a message then press stop.
-await send({ type: 'newMessage', message: { role: 'assistant', content: 'turn done', timestamp: new Date().toISOString() } });
-await page.evaluate(() => window.__typeUser('/new'));       // sets stoppedRef via handleNewSession (no confirm when idle)
-await page.waitForTimeout(150);
-await send({ type: 'restoreChat', hasPlan: false, history: [
-  { role: 'user', content: 'post-stop reload goal', timestamp: '2026-01-01T00:00:00Z' },
-] });
-await send({ type: 'planUpdated', plan });
-await page.waitForTimeout(250);
-text = await bodyText();
-ok(text.includes('post-stop reload goal'), 'timeline restored after /new stop-gate');
-ok(text.includes('Restored Task'), 'planUpdated renders after restore (stop-gate cleared)');
+console.log('4) restoreChat clears a stuck local "stopped" flag (App\'s own stoppedRef/sessionClearedRef)');
+{
+  // Drive a turn to completion so /new has something to confirm over, then
+  // fire it through the real UI path (no confirm dialog while idle).
+  const driver = createDriver();
+  currentDriver = driver;
+  driver.host.receive({ type: 'planner_turn_started', turnId: 'before-new', prompt: 'turn before /new' });
+  driver.host.receive({ type: 'planner_message', content: 'turn done', timestamp: '2026-01-01T00:00:00.000Z', turnId: 'before-new' });
+  driver.host.receive({ type: 'planner_turn_ended', turnId: 'before-new', outcome: 'message' });
+  driver.host.flush();
+  await sendAll(driver.take());
+  await page.evaluate(() => window.__typeUser('/new'));
+  await page.waitForTimeout(100);
 
-console.log('6) watchdog re-enables input after silence (fake clock)');
-await send({ type: 'restoreChat', hasPlan: false, history: [] });
-await page.waitForTimeout(100);
-await send({ type: 'streamToken', token: 'about to stall…' });
-await page.waitForTimeout(100);
-ok(await inputDisabled() === true, 'input locked during stalled turn');
-// shift Date.now 130s forward; the 5s interval then sees >120s of silence
-await page.evaluate(() => {
-  const skew = 130_000;
-  const realNow = Date.now.bind(Date);
-  Date.now = () => realNow() + skew;
-});
-await page.waitForTimeout(6_000);
-ok(await inputDisabled() === false, 'watchdog unlocked the input');
-text = await bodyText();
-ok(text.includes('stopped responding'), 'watchdog posted a visible notice');
+  const driver2 = createDriver();
+  currentDriver = driver2;
+  await send({ type: 'restoreChat' });
+  driver2.host.reload(RELOAD_FIXTURE);
+  await sendAll(driver2.take());
+  await send({ type: 'planUpdated', plan: RELOAD_PLAN });
+  await page.waitForTimeout(200);
+  const text = await bodyText();
+  ok(text.includes('add a parser'), 'timeline restored after /new\'s local stop-gate');
+  ok(await page.locator('.plan-revision-chip').count() === 1, 'plan marker renders after restore (stop-gate cleared)');
+}
 
-await page.screenshot({ path: 'bench/live/screenshots/5-stage1-restore.png', fullPage: true });
+console.log('5) watchdog re-enables input after silence (fake clock)');
+{
+  const driver = createDriver();
+  currentDriver = driver;
+  driver.host.receive({ type: 'planner_turn_started', turnId: 'stall-1', prompt: 'about to stall' });
+  driver.host.flush();
+  await sendAll(driver.take());
+  await page.waitForTimeout(100);
+  ok(await turnActive() === true, 'the stalled turn shows as live');
+
+  // Shift Date.now() 130s forward; the watchdog's 5s interval then sees >120s of silence.
+  await page.evaluate(() => {
+    const realNow = Date.now.bind(Date);
+    Date.now = () => realNow() + 130_000;
+  });
+  await page.waitForTimeout(6_000);
+  ok(await turnActive() === false, 'watchdog unlocked the turn');
+  const text = await bodyText();
+  ok(text.includes('stopped responding'), 'watchdog posted a visible notice');
+}
+
+await page.screenshot({ path: path.join('bench/live/screenshots', 'stage1-restore.png') });
 await browser.close();
 console.log(failures === 0 ? '\nall stage-1 assertions passed' : `\n${failures} assertion(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
