@@ -106,8 +106,6 @@ interface TurnState {
   children: Map<string, string | null>;
   /** Frames from a child session that arrived before its `task` call named it. */
   heldFrames: Map<string, OpenCodeEvent[]>;
-  /** `task` calls whose subagent has started, so a finish is reported only for one that began. */
-  subagents: Set<string>;
 }
 
 interface OpenCodeMessageResponse {
@@ -313,7 +311,6 @@ export class OpenCodeAdapter implements AgentAdapter {
       textRuns: new Map(),
       children: new Map(),
       heldFrames: new Map(),
-      subagents: new Set(),
     };
     this.turnHasText = false;
     const streamAbort = new AbortController();
@@ -484,13 +481,14 @@ export class OpenCodeAdapter implements AgentAdapter {
   /**
    * A `task` call runs a subagent in a child session. The call's part names
    * that session once it exists, which is what ties the child's frames to the
-   * call; the subagent ends when the call does.
+   * call; the subagent ends when the call does. The part is restated at every
+   * status change, and so is what it says here — the service reports each
+   * start and finish once, and no finish for a call that never had a child.
    */
   private trackSubagent(part: OpenCodePart, callId: string, turn: TurnState, onEvent: (e: AgentEvent) => void): void {
     const state = part.state;
     const child = state?.metadata?.sessionId;
-    if (child && !turn.subagents.has(callId)) {
-      turn.subagents.add(callId);
+    if (child && !turn.children.get(child)) {
       const input = state?.input ?? {};
       const brief = typeof input.description === 'string' ? input.description : typeof input.prompt === 'string' ? input.prompt : '';
       const model = flatModelId(state?.metadata?.model?.providerID, state?.metadata?.model?.modelID);
@@ -501,7 +499,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       for (const frame of held) this.onFrame(frame, turn, onEvent);
     }
     const status = state?.status;
-    if ((status === 'completed' || status === 'error') && turn.subagents.delete(callId)) {
+    if (status === 'completed' || status === 'error') {
       onEvent({
         type: 'subagent_finished',
         subagentId: callId,

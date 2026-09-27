@@ -109,6 +109,12 @@ export class CliAgentAiService implements IAiService {
   private lastNativeSessionId: string | null = null;
   private conversation: { startOptions: AgentStartOptions; runners: RunnerId[]; runnerModes?: Record<RunnerId, RunnerModeInfo[]>; autonomousDefault?: boolean } | null = null;
   private activeAbort: AbortController | null = null;
+  /**
+   * Every subagent this conversation has reported starting, and finishing.
+   * Agents restate a subagent's state as it changes, and one can finish a turn
+   * or a process restart after it started; surfaces get each once, in order.
+   */
+  private readonly subagents = { started: new Set<string>(), finished: new Set<string>() };
 
   constructor(private config: IConfig, deps: CliAgentAiServiceDeps = {}) {
     const runner = runnerForProvider(config.aiProvider);
@@ -154,6 +160,8 @@ export class CliAgentAiService implements IAiService {
     // the previous goal's agent session.
     this.lastNativeSessionId = null;
     this.conversation = null;
+    this.subagents.started.clear();
+    this.subagents.finished.clear();
   }
 
   // --- Conversation (ADR-0002) ---
@@ -394,10 +402,14 @@ export class CliAgentAiService implements IAiService {
         }
 
         case 'subagent_started':
+          if (this.subagents.started.has(event.subagentId)) return;
+          this.subagents.started.add(event.subagentId);
           onProgress({ type: 'subagent_started', subagentId: event.subagentId, brief: event.brief, model: event.model });
           return;
 
         case 'subagent_finished':
+          if (!this.subagents.started.has(event.subagentId) || this.subagents.finished.has(event.subagentId)) return;
+          this.subagents.finished.add(event.subagentId);
           onProgress({
             type: 'subagent_finished', subagentId: event.subagentId, outcome: event.outcome, digest: event.digest,
             usage: subagentUsage.get(event.subagentId),

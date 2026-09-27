@@ -162,10 +162,6 @@ export class CodexAdapter extends StdioAgentAdapter {
    * one stream; the thread id is what tells them apart (see {@link subagentOf}).
    */
   private readonly subagents = new Map<string, { model?: string }>();
-  /** Subagents whose `subagent_started` has been emitted, so a second sighting cannot repeat it. */
-  private readonly startedSubagents = new Set<string>();
-  /** Subagents already reported finished, so a later status update cannot repeat it. */
-  private readonly finishedSubagents = new Set<string>();
 
   protected spawnSpec(opts: AgentStartOptions): SpawnSpec {
     this.startOpts = opts;
@@ -555,8 +551,10 @@ export class CodexAdapter extends StdioAgentAdapter {
   /**
    * A `collabAgentToolCall` — the planner spawning, waiting on or messaging a
    * subagent. The call itself is planner-level tool activity; the lifecycle it
-   * carries becomes `subagent_started` / `subagent_finished`. Codex tags every
-   * collab item with the parent thread, so this one never runs for a subagent.
+   * carries becomes `subagent_started` / `subagent_finished`, restated as
+   * often as Codex restates it — the service reports each once. Codex tags
+   * every collab item with the parent thread, so this one never runs for a
+   * subagent.
    */
   private emitCollabItem(item: ThreadItem, id: string, emit: (e: AgentEvent) => void): void {
     if (item.tool === 'spawnAgent') {
@@ -564,9 +562,7 @@ export class CodexAdapter extends StdioAgentAdapter {
       // the child thread once it lands, which is the first moment the subagent
       // has an id to report under.
       for (const child of item.receiverThreadIds ?? []) {
-        if (this.startedSubagents.has(child)) continue;
         const model = item.model || undefined;
-        this.startedSubagents.add(child);
         this.subagents.set(child, { model });
         emit({ type: 'subagent_started', subagentId: child, brief: item.prompt ?? '', ...(model ? { model } : {}) });
       }
@@ -574,12 +570,10 @@ export class CodexAdapter extends StdioAgentAdapter {
     // The subagent's outcome arrives on the call that observed it — a `wait`, or
     // any later collab call's `agentsStates` — as the child's last words.
     for (const [child, state] of Object.entries(item.agentsStates ?? {})) {
-      if (!state || this.finishedSubagents.has(child)) continue;
-      const outcome = subagentOutcome(state.status);
+      const outcome = subagentOutcome(state?.status);
       if (!outcome) continue;
       this.subagents.set(child, this.subagents.get(child) ?? {});
-      this.finishedSubagents.add(child);
-      emit({ type: 'subagent_finished', subagentId: child, outcome, digest: state.message ?? '' });
+      emit({ type: 'subagent_finished', subagentId: child, outcome, digest: state?.message ?? '' });
     }
     emit({
       type: 'tool_result', id, name: item.tool ?? 'collab',
