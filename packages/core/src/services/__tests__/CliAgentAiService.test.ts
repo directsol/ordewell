@@ -8,6 +8,7 @@ import type { ResearchProgress, ResearchStep } from '../../models/Task';
 import { fakeSpawn, fixture, openCodeFixture, planJson, scriptedAdapter, type FakeSpawnOptions, type ScriptedReply } from './harnessTestKit';
 import type { AgentEvent } from '../harness/AgentAdapter';
 import { addPlannerUsage, plannerContextFill } from '../../models/Usage';
+import { TurnStream } from '../replyStream';
 
 /**
  * Harness planners, driven through the one seam the design commits to: the
@@ -445,7 +446,29 @@ describe('CliAgentAiService — streamed events (#47)', () => {
     const turn = await svc.startConversation(request({ onProgress }));
 
     expect(turn.text).toBe('Which store?');
-    expect(events.filter((e) => e.type === 'plan_token').map((e) => e.planToken)).toEqual(['Which ', 'stor']);
+    const deltas = events.filter((e) => e.type === 'text_delta');
+    expect(deltas.map((e) => e.text)).toEqual(['Which ', 'stor']);
+    expect(new Set(deltas.map((e) => e.segmentId)).size).toBe(1);
+  });
+
+  it('reads as chat text through a real TurnStream, never the "building" plan display', async () => {
+    // Regression: assistant text used to bypass TurnStream's classifier
+    // entirely, so every harness reply — plain prose included — rendered as
+    // "Building plan…" until the turn settled (#48).
+    const svc = scripted([
+      { type: 'assistant_text_delta', text: 'Which ' },
+      { type: 'assistant_text_delta', text: 'store?' },
+      { type: 'assistant_text', text: 'Which store?' },
+      { type: 'turn_end' },
+    ]);
+    const routed: ResearchProgress[] = [];
+    const stream = new TurnStream('t1', (p) => routed.push(p));
+
+    const turn = await svc.startConversation(request({ onProgress: stream.sink() }));
+
+    expect(turn.text).toBe('Which store?');
+    expect(routed.filter((e) => e.type === 'plan_token')).toEqual([]);
+    expect(routed.filter((e) => e.type === 'text_delta').map((e) => e.text)).toEqual(['Which ', 'store?']);
   });
 
   it('keeps the text streamed before a tool call when a later run completes', async () => {
@@ -480,7 +503,11 @@ describe('CliAgentAiService — streamed events (#47)', () => {
     const turn = await svc.startConversation(request({ onProgress }));
 
     expect(turn.text).toBe('Delegating. It is in src/cache.ts.');
-    expect(events.filter((e) => e.type === 'plan_token').map((e) => e.planToken)).toEqual(['Delegating. ', 'It is in src/cache.ts.']);
+    const deltas = events.filter((e) => e.type === 'text_delta');
+    expect(deltas.map((e) => e.text)).toEqual(['Delegating. ', 'It is in src/cache.ts.']);
+    // The subagent's Task call commits the planner's run, so its reply after
+    // the call is a fresh segment — never the same one the delegation opened.
+    expect(deltas[0].segmentId).not.toBe(deltas[1].segmentId);
     expect(events.filter((e) => e.type === 'thinking')).toEqual([{ type: 'thinking', text: 'grep ', subagentId: 'sa1' }]);
     expect(events.find((e) => e.type === 'tool_call' && e.toolCallId === 'c1')?.subagentId).toBe('sa1');
     expect(events.find((e) => e.type === 'tool_result' && e.toolCallId === 'c1')?.subagentId).toBe('sa1');
@@ -499,7 +526,7 @@ describe('CliAgentAiService — streamed events (#47)', () => {
     const turn = await svc.startConversation(request({ onProgress }));
 
     expect(turn.kind).toBe('plan');
-    expect(events.map((e) => e.type)).toEqual(['plan_token', 'text_retracted', 'plan_token']);
+    expect(events.map((e) => e.type)).toEqual(['text_delta', 'text_retracted', 'text_delta']);
   });
 
   it('takes back what an empty reply streamed before nudging the agent', async () => {
@@ -512,7 +539,10 @@ describe('CliAgentAiService — streamed events (#47)', () => {
     const turn = await svc.startConversation(request({ onProgress }));
 
     expect(turn.text).toBe('Which store?');
-    expect(events.map((e) => e.type)).toEqual(['plan_token', 'text_retracted', 'plan_token']);
+    // First: the empty reply's own deltas taken back before the nudge. Second:
+    // the successful reply's single segment, retracted again so its settled
+    // bubble does not sit next to a leftover streamed copy of itself.
+    expect(events.map((e) => e.type)).toEqual(['text_delta', 'text_retracted', 'text_delta', 'text_retracted']);
   });
 
   it('reports subagent lifecycle and usage, the subagent\'s share carried on its finish', async () => {
@@ -529,7 +559,7 @@ describe('CliAgentAiService — streamed events (#47)', () => {
 
     await svc.startConversation(request({ onProgress }));
 
-    expect(events.filter((e) => e.type !== 'plan_token')).toEqual([
+    expect(events.filter((e) => e.type !== 'plan_token' && e.type !== 'text_delta' && e.type !== 'text_retracted')).toEqual([
       { type: 'subagent_started', subagentId: 'sa1', brief: 'find the cache', model: 'haiku' },
       { type: 'usage', record: { source: 'claude-code', inputTokens: 300, outputTokens: 20, subagentId: 'sa1' } },
       { type: 'usage', record: { source: 'claude-code', inputTokens: 100, subagentId: 'sa1' } },
@@ -767,7 +797,7 @@ describe('CliAgentAiService — Codex', () => {
     // The completed agentMessage repeats what already streamed; it replaces the
     // deltas, it does not append them.
     expect(turn.text).toBe('Which store?');
-    expect(events.filter((e) => e.type === 'plan_token').map((e) => e.planToken)).toEqual(['Which ', 'store?']);
+    expect(events.filter((e) => e.type === 'text_delta').map((e) => e.text)).toEqual(['Which ', 'store?']);
     // Same for reasoning: the completed item's summary repeats the streamed one.
     expect(events.filter((e) => e.type === 'thinking').map((e) => e.text))
       .toEqual(['Checking how ', 'the planner is wired.']);
@@ -1162,7 +1192,7 @@ describe('CliAgentAiService — OpenCode', () => {
 
     const final = 'math.ts exports a single `add` function (`(a, b) => a + b`).';
     expect(turn.text).toBe(final);
-    expect(events.flatMap((e) => (e.type === 'plan_token' && e.planToken ? [e.planToken] : [])).join('')).toBe(final);
+    expect(events.flatMap((e) => (e.type === 'text_delta' && e.text ? [e.text] : [])).join('')).toBe(final);
     expect(events.filter((e) => e.type === 'usage')).toHaveLength(3);
   });
 
@@ -1263,7 +1293,7 @@ describe('CliAgentAiService — one-shot plan generation', () => {
  * are the CLI's, which is why the expectations below are literals.
  */
 describe('CliAgentAiService — Claude Code partial messages, usage and subagents', () => {
-  const plannerTokens = (events: ResearchProgress[]) => events.filter((e) => e.type === 'plan_token').map((e) => e.planToken);
+  const plannerTokens = (events: ResearchProgress[]) => events.filter((e) => e.type === 'text_delta').map((e) => e.text);
   const usageRecords = (events: ResearchProgress[]) => events.flatMap((e) => (e.type === 'usage' && e.record ? [e.record] : []));
 
   it('streams reply deltas that add up to the final text, paragraph break included', async () => {

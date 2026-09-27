@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from 'child_process';
+import { v4 as uuidv4 } from 'uuid';
 import {
   type Task,
   type DiscoveredModel,
@@ -250,6 +251,10 @@ export class CliAgentAiService implements IAiService {
         researchLog.push(...turn.researchLog);
 
         if (turn.aborted || combined?.aborted) {
+          // Every segment this turn streamed is about to be folded into one
+          // settled bubble (`replyText`); left in place, an earlier segment a
+          // tool call sealed would still show, duplicating its own text.
+          onProgress({ type: 'text_retracted' });
           onProgress({ type: 'interrupted' });
           return { kind: 'message', text: replyText(turn.text), researchLog };
         }
@@ -357,6 +362,10 @@ export class CliAgentAiService implements IAiService {
             break;
         }
 
+        // Same reasoning as the interrupted return above: `replyText` is the
+        // whole turn's text, a tool call's earlier segment included, so the
+        // settled bubble must not sit next to that segment's own leftover one.
+        onProgress({ type: 'text_retracted' });
         return { kind: 'message', text: replyText(turn.text), researchLog };
       }
     } finally {
@@ -383,7 +392,11 @@ export class CliAgentAiService implements IAiService {
     // Deltas of the reply run still open. Its complete `assistant_text`
     // replaces them; a tool call or the end of the turn commits them as sent.
     let streamedRun = '';
-    const commitRun = () => { text += streamedRun; streamedRun = ''; };
+    // Segments a run's own text streams under. A fresh id per run so a plan
+    // envelope opening right after a tool call is classified on its own
+    // opening, not carried over from whatever the text before the call was.
+    let segmentId = uuidv4();
+    const commitRun = () => { text += streamedRun; streamedRun = ''; segmentId = uuidv4(); };
     // Who streamed thinking deltas (the planner as '', or a subagent) since
     // their last complete `thinking`, which then repeats what was already sent.
     const streamedThinking = new Set<string>();
@@ -425,13 +438,13 @@ export class CliAgentAiService implements IAiService {
       switch (event.type) {
         case 'assistant_text_delta':
           streamedRun += event.text;
-          onProgress({ type: 'plan_token', planToken: event.text });
+          onProgress({ type: 'text_delta', text: event.text, segmentId });
           return;
 
         case 'assistant_text':
           text += event.text;
           if (streamedRun) streamedRun = '';
-          else onProgress({ type: 'plan_token', planToken: event.text });
+          else onProgress({ type: 'text_delta', text: event.text, segmentId });
           return;
 
         case 'thinking_delta':
