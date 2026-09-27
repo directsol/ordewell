@@ -9,6 +9,7 @@ import { parsePlanJson } from '../PlanValidator';
 import type { Session } from '../createSession';
 import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
 import type { TranscriptQuery } from '../../interfaces/TaskOutputSource';
+import { reduceConversation, EMPTY_CONVERSATION } from '../../conversation';
 
 describe('model allowlist wiring', () => {
   function smallPlan(): LegacyPlanState {
@@ -1030,6 +1031,46 @@ describe('session id stability (persist seam)', () => {
       // The child step is re-grouped directly under its entry, not left where
       // the harness's own turn log happened to record it.
       expect(log[log.indexOf(entry!) + 1]).toBe(step);
+    });
+
+    it('a harness planner\'s prose streams as chat text end to end, never the "building" plan display (#48)', async () => {
+      // Full chain: CliAgentAiService -> Session -> the same reduceConversation
+      // every surface draws through. Guards the regression where harness reply
+      // text bypassed TurnStream's classifier and rendered as "Building plan…"
+      // for every reply, plan or prose alike, until the turn settled.
+      const cli = new CliAgentAiService(
+        fakeConfig({ aiProvider: 'claude-code' }),
+        {
+          createAdapter: scriptedAdapter([[
+            { type: 'assistant_text_delta', text: 'Looking. ' },
+            { type: 'tool_call', id: 'c1', name: 'Grep', args: { pattern: 'cache' } },
+            { type: 'tool_result', id: 'c1', name: 'Grep', output: 'src/cache.ts', success: true },
+            { type: 'assistant_text_delta', text: 'It is in src/cache.ts.' },
+            { type: 'assistant_text', text: 'It is in src/cache.ts.' },
+            { type: 'usage', record: { source: 'claude-code', inputTokens: 100, outputTokens: 10 } },
+            { type: 'turn_end' },
+          ]]),
+          workspaceRoot: () => '/repo',
+        },
+      );
+      const broadcasts: import('../SessionMessage').SessionMessage[] = [];
+      const session = makeSession({
+        broadcast: (msg) => broadcasts.push(msg),
+        aiService: {
+          startConversation: (req: import('../../services/AiService').ConversationRequest) => cli.startConversation(req),
+          hasActiveConversation: () => cli.hasActiveConversation(),
+          reset: () => cli.reset(),
+        },
+      });
+
+      await session.startPlanning('find the cache', ['claude-code']);
+
+      const view = broadcasts.reduce(reduceConversation, EMPTY_CONVERSATION);
+      const message = view.blocks.find((b) => b.type === 'message' && b.role === 'planner');
+      expect(message).toMatchObject({ text: 'Looking. It is in src/cache.ts.', streaming: false });
+      expect(view.blocks.some((b) => b.type === 'plan' && b.status === 'building')).toBe(false);
+      expect(view.blocks.some((b) => b.type === 'tool')).toBe(true);
+      expect(view.blocks.some((b) => b.type === 'usage')).toBe(true);
     });
 
     it('saves each subagent with its tagged child steps, grouped despite interleaving', async () => {

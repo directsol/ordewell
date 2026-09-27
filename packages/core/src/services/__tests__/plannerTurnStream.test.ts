@@ -55,4 +55,22 @@ describe('planner turn stream', () => {
       { type: 'planner_turn_ended', turnId, outcome: 'message' },
     ]);
   });
+
+  it('never lets a JSON-opening reply stream as prose, fence or not (J1)', async () => {
+    const { session, streamed } = turnSession(
+      [
+        { type: 'text_delta', segmentId: 's1', text: '```json\n' },
+        { type: 'text_delta', segmentId: 's1', text: '{"taskOps":[]}' },
+        { type: 'text_delta', segmentId: 's2', text: '{"tas' },
+        { type: 'text_delta', segmentId: 's2', text: 'kOps":[]}' },
+      ],
+      { kind: 'message', text: 'the settled reply, unrelated to what streamed', researchLog: [] },
+    );
+
+    await session.startPlanning('add persistence', ['claude-code']);
+
+    const types = streamed().map((m) => m.type);
+    expect(types).not.toContain('planner_text_delta');
+    expect(types).toContain('plan_token');
+  });
 });
