@@ -294,6 +294,11 @@ describe('messages from the runtime', () => {
     expect(lastMessage(s)).toMatchObject({ role: 'system', text: 'Model set to x/y' });
   });
 
+  it('shows an error-level notice as an error turn, in red', () => {
+    const s = send(initialState(), { type: 'notice', message: 'Failed to start task "t1": boom', level: 'error' });
+    expect(lastMessage(s)).toMatchObject({ role: 'error', text: 'Failed to start task "t1": boom' });
+  });
+
   it('records a resize', () => {
     const s = send(initialState(), { type: 'resize', rows: 50, cols: 120 });
     expect([s.rows, s.cols]).toEqual([50, 120]);

@@ -116,6 +116,15 @@ describe('OpenCodeAdapter — recorded event stream', () => {
     expect(textOf(events, 'assistant_text')).toBe('Hello there friend');
   });
 
+  it('unwraps a read tool result from its <path>/<content> envelope', async () => {
+    const events = await replay('prose');
+
+    const result = events.find((e) => e.type === 'tool_result' && e.name === 'read');
+    expect(result).toMatchObject({
+      output: '1: export const add = (a: number, b: number) => a + b;\n\n(End of file - total 1 lines)',
+    });
+  });
+
   describe('a task call that runs a subagent in a child session', () => {
     const callId = 'call_81f9f8695fab49009d73c828';
 

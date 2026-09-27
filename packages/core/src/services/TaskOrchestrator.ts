@@ -56,7 +56,7 @@ export interface OrchestratorObserver {
    * shared paths, copies, a stash. Beside the notification channel, which a
    * daemon may leave unwired, so a surface without toasts can still show it.
    */
-  onIsolationNotice?(data: { level: 'info' | 'warn'; message: string }): void;
+  onIsolationNotice?(data: { level: 'info' | 'warn' | 'error'; message: string }): void;
 }
 
 type SharedRootReason = Exclude<IsolationInactiveReason, 'dirty'>;
@@ -435,7 +435,7 @@ export class TaskOrchestrator {
     const group = run.repos.some((r) => r.path !== SELF_REPO);
     const repaired = handoffOf(run).landed.filter((t) => t.repairedFiles?.length);
     const { level, message } = describeMergeResult(result, branch, group, repaired);
-    this.notifications[level](message);
+    this.tell(level, message);
     if (result.outcome === 'merged') await this.clearMergedRun(run);
     return result;
   }
@@ -1252,7 +1252,7 @@ export class TaskOrchestrator {
       // Held out of auto-scheduling to avoid a spawn-throw retry loop.
       this.store.markPending(task.id);
       this.onHold.add(task.id);
-      this.notifications.error(`Failed to start task "${task.title}": ${err}`);
+      this.tell('error', `Failed to start task "${task.title}": ${err}`);
       this.emit('onTaskChanged');
       await this.tick();
     }
@@ -1307,7 +1307,7 @@ export class TaskOrchestrator {
     return cwd;
   }
 
-  private tell(level: 'info' | 'warn', message: string): void {
+  private tell(level: 'info' | 'warn' | 'error', message: string): void {
     this.notifications[level](message);
     this.emit('onIsolationNotice', { level, message });
   }

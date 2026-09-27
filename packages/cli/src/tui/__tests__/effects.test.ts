@@ -1518,8 +1518,8 @@ describe('worktree isolation', () => {
     await runEffect({ type: 'execute', sessionId: 's1' }, h.deps);
 
     expect(h.actions.filter((a) => a.type === 'notice')).toEqual([
-      { type: 'notice', message: 'NOTES.md is shared live with every task, so edits to it are not isolated.' },
-      { type: 'notice', message: 'api/.env could not be linked into task workspaces' },
+      { type: 'notice', level: 'info', message: 'NOTES.md is shared live with every task, so edits to it are not isolated.' },
+      { type: 'notice', level: 'warn', message: 'api/.env could not be linked into task workspaces' },
     ]);
   });
 
