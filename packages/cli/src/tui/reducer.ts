@@ -1,6 +1,6 @@
 import {
   ALL_PROVIDERS, CLI_PROVIDERS, EMPTY_CONVERSATION, fromTranscript, parseMaxParallel, PROVIDER_PRIORITY, runnerForProvider,
-  type AiProvider, type ConversationMessage, type ConversationView, type DisplayBlock, type PlannerUsage, type ResearchLogEntry,
+  type AiProvider, type ConversationMessage, type DisplayBlock, type PlannerUsage, type ResearchLogEntry,
   type SessionMessage,
 } from '@ordewell/core';
 import { dependencyCandidates, dependentsOf } from '@ordewell/core/plan-utils';
@@ -160,28 +160,6 @@ function drainQueue(state: TuiState, settled: TuiState): Step {
 }
 
 /**
- * Whether this is the planner's newest reply arriving a second time.
- *
- * One reply can reach the TUI twice: the daemon broadcasts `planner_message` on
- * the session socket *and* leaves it as the last assistant entry in the plan it
- * returns, and while a run is live there are two subscriptions to that one
- * channel (planning and execution). Only a repeat of the newest reply counts —
- * scoped to "nothing has been said since" so a planner legitimately repeating
- * itself on a later turn still gets its line. A streamed segment still waiting
- * for its reply is not spoken yet: the reply is what settles it.
- */
-function alreadySpoken(view: ConversationView, content: string): boolean {
-  const blocks = view.blocks.filter((b) => b.type !== 'usage');
-  const last = blocks.filter((b) => b.type === 'message' && (b.role === 'planner' || b.role === 'user')).at(-1);
-  const spoken = last?.type === 'message' && last.role === 'planner' && last.segmentId === undefined && last.text === content;
-  // A compaction's summary is redrawn as a system entry, and the daemon's
-  // notice of the same text may land on either side of that redraw.
-  const tail = blocks.at(-1);
-  const redrawn = tail?.type === 'message' && tail.role === 'system' && tail.text === content;
-  return spoken || redrawn;
-}
-
-/**
  * What a run is doing right now, from the tasks themselves. It used to be the
  * last `task_started` title, which went on naming a task long after it had
  * finished — and said nothing once the run was only waiting on the user.
@@ -230,7 +208,6 @@ function turnActivity(state: TuiState): TuiState {
  * approval request also queues its modal, since the planner waits on the answer.
  */
 function followSession(state: TuiState, message: SessionMessage): TuiState {
-  if (message.type === 'planner_message' && alreadySpoken(state.conversation, message.content)) return state;
   const heard = turnActivity(hear(state, message));
   if (message.type === 'approval_request') {
     const { id, kind, subject, scope, detail } = message;

@@ -1,16 +1,17 @@
 import { execSync } from 'child_process';
 import {
-  ALL_PROVIDERS, clipboardCopyCommand, isCliProvider, truncateCheckpointSummary, type AiProvider, type HasBinFn, type LegacyPlanState,
-  type PlannerModelRecall, type SessionMessage,
+  ALL_PROVIDERS, clipboardCopyCommand, isCliProvider, type AiProvider, type HasBinFn, type LegacyPlanState,
+  type PlannerModelRecall,
 } from '@ordewell/core';
 import { describeConnectionRefused, isConnectionRefused } from '../daemonClient';
 import { WorkspaceInitNeededError } from '../apiClient';
 import { normalizeCatalog } from '../catalog';
 import { describePlannerSwitch } from '../plannerModelSwitch';
 import type { Action, Effect } from './reducer';
-import type { RewindTargetView, SessionView, TaskIsolationView } from './state';
+import type { RewindTargetView, SessionView } from './state';
 import type { MergeRunResult, WsEvent } from '../apiClient';
 import { mergeOutcome } from '../isolation';
+import { inboundFor } from './inbound';
 
 /** The slice of the daemon client the TUI needs; `ApiClient` satisfies it. */
 export interface OrdewellApi {
@@ -469,10 +470,15 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
     }
 
     // The redrawn transcript opens with the summary entry, which is what the
-    // user gets to read — no separate notice to repeat it.
+    // user gets to read — no separate notice to repeat it. The daemon also
+    // broadcast that summary; `redrawn` keeps a late socket copy of it from
+    // landing as a second, spoken turn.
     case 'compactConversation': {
       const { plan } = await api.compactConversation(effect.sessionId);
+      const inbound = inboundFor(deps.api, deps.dispatch, effect.sessionId);
       dispatch(restoredChat(plan, effect.sessionId));
+      const summary = compactionSummary(plan);
+      if (summary) inbound.redrawn(summary.content, summary.timestamp);
       dispatch({ type: 'planUpdated', plan, sessionId: effect.sessionId });
       return;
     }
@@ -611,11 +617,8 @@ async function withExecutionStream(
   const streamReady = new Promise<void>((resolve, reject) => {
     settleReady = (error) => error ? reject(error) : resolve();
   });
-  const stream = deps.api.streamExecution(
-    sessionId,
-    (event) => onExecutionEvent(deps.dispatch, event, sessionId),
-    settleReady,
-  );
+  const inbound = inboundFor(deps.api, deps.dispatch, sessionId);
+  const stream = deps.api.streamExecution(sessionId, inbound.execution, settleReady);
   // Surface a failed connection while it is still being established.
   void stream.catch(settleReady);
   await streamReady;
@@ -623,116 +626,28 @@ async function withExecutionStream(
   await stream;
 }
 
-/** A streamed text piece: one of many that arrive in a burst and read as one. */
-type Delta = Extract<SessionMessage, { type: 'planner_text_delta' | 'planner_thinking_delta' | 'plan_token' }>;
-
-function isDelta(message: SessionMessage): message is Delta {
-  return message.type === 'planner_text_delta' || message.type === 'planner_thinking_delta' || message.type === 'plan_token';
-}
-
-/** Two deltas as one, when the second continues the same stream; otherwise null. */
-function joinDeltas(held: Delta, next: Delta): Delta | null {
-  if (held.type === 'planner_text_delta' && next.type === 'planner_text_delta') {
-    return held.turnId === next.turnId && held.segmentId === next.segmentId ? { ...held, text: held.text + next.text } : null;
-  }
-  if (held.type === 'planner_thinking_delta' && next.type === 'planner_thinking_delta') {
-    const same = held.turnId === next.turnId && held.segmentId === next.segmentId && held.subagentId === next.subagentId;
-    return same ? { ...held, text: held.text + next.text } : null;
-  }
-  if (held.type === 'plan_token' && next.type === 'plan_token') {
-    return held.turnId === next.turnId ? { ...held, token: held.token + next.token } : null;
-  }
-  return null;
-}
-
 /**
  * One planner turn: its messages stream over the websocket while the REST call
  * is in flight, and the reply is either a question or a plan.
  */
 async function converse(deps: EffectDeps, sessionId: string, call: () => Promise<unknown>): Promise<void> {
-  // What the socket already delivered for this turn. The plan the REST call
-  // returns carries the same reply as its last assistant entry, so without this
-  // the turn is spoken twice — see `alreadySpoken`, which catches the remaining
-  // case of two subscriptions to one channel during a run.
-  let streamed: string | null = null;
-
-  // A burst of deltas is held and dispatched as one, so a fast stream repaints
-  // once per burst rather than once per token. Anything that is not the same
-  // stream's next piece flushes it first: dispatch order stays exactly the
-  // order the session sent.
-  const DELTA_DEBOUNCE_MS = 75;
-  let held: Delta | null = null;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-
-  const pass = (message: SessionMessage): void => deps.dispatch({ type: 'sessionMessage', message, sessionId });
-  const flush = (): void => {
-    if (timer !== null) {
-      clearTimeout(timer);
-      timer = null;
-    }
-    if (held === null) return;
-    const message = held;
-    held = null;
-    pass(message);
-  };
-
-  const stream = deps.api.streamPlanning(sessionId, (event) => {
-    // A run's notices reach the user through the execution stream.
-    if (!event || event.type === 'notice') return;
-    if (isDelta(event)) {
-      const joined = held && joinDeltas(held, event);
-      if (joined) {
-        held = joined;
-        return;
-      }
-      flush();
-      held = event;
-      timer = setTimeout(flush, DELTA_DEBOUNCE_MS);
-      return;
-    }
-    flush();
-    if (event.type === 'planner_message') streamed = event.content;
-    pass(event);
-  });
+  const inbound = inboundFor(deps.api, deps.dispatch, sessionId);
+  const stream = deps.api.streamPlanning(sessionId, inbound.planning);
 
   try {
     const plan = await call();
-    flush();
+    inbound.flush();
     // Speak the turn before `planUpdated` settles it: the settle is also what
     // drains the next queued prompt, so the reply would otherwise land after
-    // the prompt that queue sent, in the wrong order.
-    const question = lastAssistantMessage(plan);
-    if (question && question !== streamed) {
-      pass({ type: 'planner_message', content: question, timestamp: new Date().toISOString() });
-    }
+    // the prompt that queue sent, in the wrong order. The socket usually
+    // delivered the same words; the backfill is dropped when it did.
+    const reply = lastAssistantMessage(plan);
+    if (reply) inbound.backfill(reply.content, reply.timestamp);
     deps.dispatch({ type: 'planUpdated', plan, sessionId });
   } finally {
-    flush();
+    inbound.flush();
     stream.close();
   }
-}
-
-/**
- * A decision reached with no round-trip prompt (pre-approved, remembered from
- * earlier this session, or the operator's mode floor) previously had no
- * transcript line at all — indistinguishable from the model never having
- * needed approval in the first place. One line, same channel as the
- * interactive verdict.
- */
-function describeApprovalDecision(event: Extract<WsEvent, { type: 'approval_decided' }>): string {
-  const label = event.source === 'pre-approved' ? 'pre-approved'
-    : event.source === 'remembered' ? 'remembered'
-    : event.source === 'mode' ? 'policy'
-    : 'no approval channel';
-  return `${event.granted ? 'Auto-approved' : 'Auto-denied'} (${label}): ${event.subject}`;
-}
-
-function lastAssistantMessage(plan: unknown): string | null {
-  const history = (plan as Pick<LegacyPlanState, 'conversationHistory'> | null)?.conversationHistory ?? [];
-  for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i].role === 'assistant') return history[i].content;
-  }
-  return null;
 }
 
 /** The conversation a saved plan reopens with: its transcript, research log and token line. */
@@ -747,122 +662,23 @@ function restoredChat(plan: unknown, sessionId: string): Action {
   };
 }
 
-/**
- * Maps the daemon's `SessionMessage` broadcast to actions. Task progress
- * arrives as a whole-plan `status_update`, not per-task events, so the pane is
- * re-synced from each snapshot rather than patched incrementally.
- */
-function onExecutionEvent(dispatch: (action: Action) => void, event: WsEvent, sessionId: string): void {
-  switch (event?.type) {
-    case 'status_update': {
-      const updates: Record<string, { status: string; idleSince?: string | null; isolation?: TaskIsolationView }> = {};
-      for (const task of event.tasks ?? []) {
-        updates[String(task.id)] = { status: String(task.status), idleSince: task.idleSince ?? null, isolation: task.isolation };
-      }
-      dispatch({ type: 'tasksStatus', updates, sessionId });
-      return;
-    }
-
-    case 'task_started':
-      dispatch({ type: 'taskStarted', taskId: String(event.taskId), title: String(event.title ?? event.taskId), runner: event.runner, sessionId });
-      return;
-
-    // The extension shows these in its checkpoint panel; here they are
-    // transcript lines, which is the TUI's equivalent surface.
-    case 'checkpoint':
-      dispatch({ type: 'notice', message: `· Checkpoint — ${event.taskTitle}: ${truncateCheckpointSummary(event.summary)}` });
-      return;
-
-    case 'approval_decided':
-      dispatch({ type: 'notice', message: describeApprovalDecision(event) });
-      return;
-
-    case 'review_needed':
-      dispatch({ type: 'notice', message: 'Plan needs your sign-off — /approve to continue.' });
-      return;
-
-    case 'review_approved':
-      dispatch({ type: 'notice', message: 'Plan approved.' });
-      return;
-
-    // Its transcript also carries the plan's marker for the conversation — a
-    // run's queued edit is reconciled by the planner with no turn of its own.
-    case 'plan_generated':
-      dispatch({ type: 'sessionMessage', message: event, sessionId });
-      dispatch({ type: 'planUpdated', plan: event.plan, sessionId });
-      return;
-
-    case 'planner_message':
-      dispatch({ type: 'sessionMessage', message: event, sessionId });
-      return;
-
-    // The orchestrator paused fan-out because a structural edit is queued; drain
-    // it so the planner reconciles the plan and dependents resume spawning.
-    // Dropped on the floor, the queue suppresses every later tick() — which is
-    // exactly "tasks did not fan out when the dependent ones finished."
-    case 'queue_ready':
-      dispatch({ type: 'queueReady', sessionId });
-      return;
-
-    case 'execution_complete':
-      dispatch({ type: 'executionComplete', summary: event.summary, sessionId });
-      return;
-
-    // A stop carries no tally — the reducer counts the pane instead.
-    case 'execution_stopped':
-      dispatch({ type: 'executionComplete', stopped: true, sessionId });
-      return;
-
-    // Nothing started; the user chooses how to go on.
-    case 'isolation_blocked':
-      dispatch({ type: 'isolationBlocked', message: event.message, ...(event.repos ? { repos: event.repos } : {}), sessionId });
-      return;
-
-    // How the run isolates. The daemon has no toast channel, so this is the only place the user hears it.
-    case 'notice':
-      dispatch({ type: 'notice', message: event.message });
-      return;
-
-    case 'isolation_handoff':
-      dispatch({ type: 'isolationHandoff', handoff: { repos: event.repos, landed: event.landed }, sessionId });
-      return;
-
-    // Raw runner chatter, and the planner's own turn: the status line and the
-    // plan pane already say everything the user needs during a run. Listed
-    // rather than defaulted, so a new SessionMessage variant fails to compile
-    // here until someone decides what a run's watcher does with it.
-    case 'task_updated':
-    case 'task_output':
-    case 'planner_liveness':
-    case 'research_step':
-    case 'plan_token':
-    case 'research_step_done':
-    case 'approval_request':
-    case 'approval_settled':
-    case 'planner_turn_started':
-    case 'planner_turn_ended':
-    case 'planner_text_delta':
-    case 'planner_thinking_delta':
-    case 'planner_text_retracted':
-    case 'planner_usage':
-    case 'subagent_started':
-    case 'subagent_finished':
-      return;
-
-    // Its asker already has the words, from the merge request itself; a
-    // viewer that did not ask still has to drop a run that is gone.
-    case 'isolation_merge':
-      if (event.result.outcome === 'merged') dispatch({ type: 'runCleared', sessionId });
-      return;
-
-    default: {
-      // Compile-time only. The socket also greets with `connected` and
-      // `chat_backlog`, which are not SessionMessages and must stay ignorable.
-      const unhandled: never = event;
-      void unhandled;
-      return;
+/** The settled reply a plan's transcript ends on, with the timestamp a socket copy of it would carry. */
+function lastAssistantMessage(plan: unknown): { content: string; timestamp?: string } | null {
+  const history = (plan as Pick<LegacyPlanState, 'conversationHistory'> | null)?.conversationHistory ?? [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role === 'assistant') {
+      const { content, timestamp } = history[i];
+      return { content, ...(timestamp ? { timestamp } : {}) };
     }
   }
+  return null;
+}
+
+/** The summary a compaction just made the transcript's first entry, if this plan came from one. */
+function compactionSummary(plan: unknown): { content: string; timestamp?: string } | null {
+  const history = (plan as Pick<LegacyPlanState, 'conversationHistory'> | null)?.conversationHistory ?? [];
+  const entry = history.find((message) => message.kind === 'compaction');
+  return entry ? { content: entry.content, ...(entry.timestamp ? { timestamp: entry.timestamp } : {}) } : null;
 }
 
 async function refreshPlan(deps: EffectDeps, sessionId: string): Promise<void> {
