@@ -2,13 +2,14 @@ import { v4 as uuidv4 } from 'uuid';
 import type { ConversationRequest, ConversationTurn, IAiService } from './AiService';
 import { repairLoop, taskOpsRejectedPrompt } from './PlanRepair';
 import { renderTaskQueryAnswer, taskQuerySignature, TASK_QUERY_ANSWER_OR_OPS, TASK_QUERY_REMINDER, type LiveOutputLookup, type TaskQuery, type TaskQueryCatalog } from './TaskQuery';
-import { taskOpsProtocol, type ApplyTaskOpsResult, type TaskOp } from './TaskOps';
+import { taskOpsProtocol, refMatchesTask, taskOpRefs, type ApplyTaskOpsResult, type TaskOp } from './TaskOps';
 import { resolveDefaultMode } from './ModeResolver';
 import type { PlannerTurnOutcome, SessionBroadcaster } from './SessionMessage';
 import { TurnStream } from './replyStream';
 import type { ForkedDialogue } from './conversationFork';
 import { condensedNotice, extractSummary, keptTail, summaryRequest } from './conversationSummary';
 import type { ConversationMessage, LegacyPlanState, ResearchLogEntry, ResearchProgress, RunnerId, Task } from '../models/Task';
+import { flattenTasks } from '../models/Task';
 
 /**
  * Per-runner model cap for the always-on catalog block. Generous enough that
@@ -455,12 +456,13 @@ export class PlannerConversation {
       // write the very edit that gets queued.
       let settleable = await this.drainTaskQueries(turn, userTurn);
 
-      // Structural changes while tasks execute are queued, never applied live —
-      // the orchestrator must not have the plan mutated under a running batch.
-      // The gate is live runners, not an armed scheduler: a run paused on a user
-      // task keeps executing with nothing reading the plan, and queueing there
-      // parks the edit behind a batch boundary that will never arrive.
-      if ((settleable.kind === 'task_ops' || settleable.kind === 'plan') && this.host.hasLiveWork()) {
+      // Structural changes that reach a task a runner is executing are queued,
+      // never applied live — the orchestrator must not have the plan mutated
+      // under a running batch in a way that changes that task. The gate is a
+      // live runner *and* an edit that touches it: an edit to any other task,
+      // or an added task, is reconciled into the plan now and the running batch
+      // keeps going. A paused scheduler with no runner live queues nothing.
+      if (this.editTouchesLiveWork(settleable)) {
         const queued = this.host.queueEdit(options.verbatim ?? message);
         settleable = {
           kind: 'message',
@@ -474,6 +476,21 @@ export class PlannerConversation {
       if (checkpoint) this.restore(checkpoint);
       throw err;
     }
+  }
+
+  /**
+   * Whether a settled structural edit reaches work a runner is executing. Only
+   * these are queued: a whole-plan commit replaces the plan and would reset the
+   * run, and a task-ops batch that names an in-progress task changes it under
+   * the runner. An add, or an edit to any other task, is reconciled into the
+   * plan in place while the running batch keeps going.
+   */
+  private editTouchesLiveWork(turn: SettleableTurn): boolean {
+    if (turn.kind === 'plan') return this.host.hasLiveWork();
+    if (turn.kind !== 'task_ops') return false;
+    const running = flattenTasks(this.host.tasks()).filter((t) => t.status === 'in_progress');
+    if (running.length === 0) return false;
+    return turn.ops.some((op) => taskOpRefs(op).some((ref) => running.some((task) => refMatchesTask(ref, task))));
   }
 
   private assertIdle(operation: string): void {

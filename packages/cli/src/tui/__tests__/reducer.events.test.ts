@@ -179,6 +179,48 @@ describe('execution', () => {
     expect(lastMessage(s)?.text).toContain('2/2');
   });
 
+  // A run whose last live task is cancelled or marked done can never restart if
+  // the indicator stays "executing": the daemon refuses the next Execute as
+  // "already executing". The tasks are the truth, not the stream.
+  const running: Partial<TuiState> = {
+    ...withTasks,
+    status: 'executing',
+    tasks: withTasks.tasks!.map((t) => ({ ...t, status: 'in_progress' })),
+  };
+
+  it('returns to idle on a status snapshot with nothing running', () => {
+    const s = send(initialState(running), {
+      type: 'tasksStatus',
+      updates: { a: { status: 'completed' }, b: { status: 'pending' } },
+    });
+    expect(s.status).toBe('idle');
+  });
+
+  it('returns to idle when a single task update leaves none running', () => {
+    const s = send(initialState({ ...running, tasks: [withTasks.tasks![0], withTasks.tasks![1]] }), {
+      type: 'taskStatus',
+      taskId: 'a',
+      status: 'pending',
+    });
+    expect(s.status).toBe('idle');
+  });
+
+  it('still says executing while some task is running', () => {
+    const s = send(initialState({ ...withTasks, status: 'idle' }), {
+      type: 'tasksStatus',
+      updates: { a: { status: 'completed' }, b: { status: 'in_progress' } },
+    });
+    expect(s.status).toBe('executing');
+  });
+
+  it('does not let a run status clobber a planner turn in flight', () => {
+    const s = send(initialState({ ...withTasks, status: 'researching' }), {
+      type: 'tasksStatus',
+      updates: { a: { status: 'pending' }, b: { status: 'pending' } },
+    });
+    expect(s.status).toBe('researching');
+  });
+
   it('counts the pane when a stop arrives without a tally', () => {
     // `execution_stopped` carries no summary, and defaulting the count to zero
     // reported a run halted midway as "0/N complete" — the pane's own statuses

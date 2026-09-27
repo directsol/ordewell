@@ -73,7 +73,7 @@ export function footerHints(state: TuiState): string[] {
     return [
       ...(escHint ? [escHint] : []),
       'enter expand', 'R runner', 'o model', 'e effort', 'M mode', 'D deps', 'f start',
-      'E run plan', 'c cancel', markHint, 's skip', 'a add', 'd remove', 't terminal', ...resolveHint,
+      'E run plan', 'S stop', 'c cancel', markHint, 's skip', 'a add', 'd remove', 't terminal', ...resolveHint,
       'pgup/pgdn scroll', 'tab chat',
     ];
   }

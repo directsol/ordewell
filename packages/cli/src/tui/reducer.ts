@@ -6,7 +6,7 @@ import { activeToken, findCommand, parseSlash, tokenCompletions } from './slash'
 import { applyKey, commit } from './editor';
 import { say, wiped } from './transcript';
 import { blockedPicker, clearIsolation, handoffArrived, isolationForPlan, sameIsolation, showDiff } from './handoff';
-import { findTask, isTaskRunning, planRows, plannerInFlight, type TuiState } from './state';
+import { findTask, isTaskRunning, planRows, plannerInFlight, type RunStatus, type TaskView, type TuiState } from './state';
 import type { Key } from './keys';
 import { handleOverlayKey } from './reducers/overlays';
 import { handlePlanKey } from './reducers/planPane';
@@ -101,6 +101,11 @@ export function reduce(state: TuiState, action: Action): Step {
     // the planner's next "(+N more)".
     case 'taskStarted': {
       if (stale(state, action.sessionId)) return step(state);
+      // One task, one start. A second notice for a task already running is a
+      // duplicate that slipped through (a retry arrives with it back to
+      // pending, so a genuine second start still speaks).
+      const existing = findTask(state.tasks, action.taskId);
+      if (existing && isTaskRunning(existing)) return step(state);
       const tasks = state.tasks.map((t) => (t.id === action.taskId && !isTaskRunning(t) ? { ...t, status: 'in_progress' } : t));
       const spoken = say(state, 'system', taskStartedNotice(action.title, action.runner));
       return step({ ...spoken, tasks, status: 'executing', busyLabel: runLabel(tasks) });
@@ -108,11 +113,11 @@ export function reduce(state: TuiState, action: Action): Step {
 
     case 'taskStatus': {
       if (stale(state, action.sessionId) || !state.tasks.some((t) => t.id === action.taskId)) return step(state);
-      return step({
-        ...state,
-        status: 'executing',
-        tasks: state.tasks.map((t) => (t.id === action.taskId ? { ...t, status: action.status } : t)),
-      });
+      const tasks = state.tasks.map((t) => (t.id === action.taskId ? { ...t, status: action.status } : t));
+      // The indicator follows the tasks, not the stream: once none is running
+      // the run is over, whatever the daemon's scheduler still holds armed.
+      const status = runStatus(state, tasks);
+      return step({ ...state, status, tasks, busyLabel: status === 'executing' ? runLabel(tasks) : state.busyLabel });
     }
 
     case 'tasksStatus': {
@@ -134,7 +139,8 @@ export function reduce(state: TuiState, action: Action): Step {
       // status_update still triggers a render via dispatch, but at least
       // the reference equality lets downstream memos keep their hits.
       if (!changed) return step(state);
-      return step({ ...state, status: 'executing', tasks, busyLabel: runLabel(tasks) });
+      const status = runStatus(state, tasks);
+      return step({ ...state, status, tasks, busyLabel: status === 'executing' ? runLabel(tasks) : state.busyLabel });
     }
 
     case 'queueReady': {
@@ -298,6 +304,15 @@ export function reduce(state: TuiState, action: Action): Step {
       if (!state.stopArmed || action.arm !== state.stopArmToken) return step(state);
       return step(disarmStop(state));
   }
+}
+
+/** The run indicator after a task-status change: a run is active only while a task is. */
+function runStatus(state: TuiState, tasks: TaskView[]): RunStatus {
+  if (tasks.some(isTaskRunning)) return 'executing';
+  // A task waiting on the user is not executing, but the run is not over
+  // either — the indicator says it waits rather than going idle.
+  if (tasks.some((t) => t.status === 'awaiting_user')) return 'executing';
+  return plannerInFlight(state) ? state.status : 'idle';
 }
 
 /** Ctrl-C backs out one layer at a time; it only quits when there is nothing to back out of. */

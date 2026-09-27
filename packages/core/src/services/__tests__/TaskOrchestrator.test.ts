@@ -1104,6 +1104,25 @@ describe('cancelTask', () => {
     expect(t2!.status).toBe('pending');
     expect(spawn).toHaveBeenCalledTimes(1);
   });
+
+  // The armed scheduler is an internal scheduling detail; what a surface asks —
+  // "is a run executing?" — is live work. Once the last runner is cancelled
+  // there is none, which is what lets a later Execute restart the plan instead
+  // of being refused as "already executing".
+  it('has no live work after the last running task of an armed run is cancelled', async () => {
+    const { spawn } = sessionRunner();
+    const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
+    orchestrator.setWorkspaceRoot(() => '/repo');
+    orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'Only', prompt: 'do it' })]);
+
+    await orchestrator.approveReview();
+    expect(orchestrator.isRunning).toBe(true);
+    expect(orchestrator.hasLiveWork).toBe(true);
+
+    await orchestrator.cancelTask('t1');
+
+    expect(orchestrator.hasLiveWork).toBe(false);
+  });
 });
 });
 

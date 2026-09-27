@@ -471,6 +471,22 @@ describe('TUI end to end', () => {
     expect(h.daemon.mocks.executePlan).toHaveBeenCalledWith('session-1');
   });
 
+  it('S on the plan pane stops the run, and the run indicator stops with the last task', async () => {
+    const h = harness();
+    h.type('Build the login flow');
+    h.type('\r');
+    await vi.waitFor(() => expect(h.screen()).toContain('Add the login route'));
+
+    h.type('\t');
+    h.type('E');
+    await vi.waitFor(() => expect(h.app.getState().status).toBe('idle'));
+
+    h.type('S');
+    await vi.waitFor(() => expect(h.daemon.mocks.stopExecution).toHaveBeenCalledWith('session-1'));
+    // Nothing is running, so the header is back to idle and the plan can run again.
+    expect(h.app.getState().status).toBe('idle');
+  });
+
   it('f starts one task and the pane animates it, then settles when it finishes', async () => {
     const h = harness();
     h.type('Build the login flow');

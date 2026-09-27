@@ -15,17 +15,25 @@ import type { TaskIsolationView } from './state';
  * own handling for task lifecycle.
  *
  * Dedupe is per identity, not per subscription kind: each identity counts the
- * copies each side has delivered, and a copy is real only while it pulls ahead
- * of the other side — the first copy of a broadcast is shown, the second, the
- * same broadcast arriving on the other subscription, is dropped. A message the
- * planner genuinely repeats is a later broadcast and pulls ahead again.
+ * copies each subscription has delivered, and a copy is real only while it
+ * takes a subscription past every other — the first copy of a broadcast is
+ * shown, the same broadcast arriving on any other subscription, or a second
+ * run socket, is dropped. A message the planner genuinely repeats is a later
+ * broadcast and pulls ahead again.
  */
 
 export type Dispatch = (action: Action) => void;
 
-const PLANNING = 0;
-const EXECUTION = 1;
-type Side = typeof PLANNING | typeof EXECUTION;
+/**
+ * Whether a subscription is the planner's or a run's. It decides behaviour
+ * (streamed prose has one voice, a run's `plan_generated` also refreshes the
+ * pane), never identity: two run sockets are two subscriptions that each get
+ * every broadcast, and counting by kind would show one broadcast twice.
+ */
+type Kind = 'planning' | 'execution';
+
+/** One subscription's event callback. */
+export type Receiver = (event: WsEvent) => void;
 
 /** A streamed text piece: one of many that arrive in a burst and read as one. */
 type Streamed = Extract<SessionMessage, { type: 'planner_text_delta' | 'planner_thinking_delta' | 'plan_token' }>;
@@ -91,38 +99,44 @@ function replyKey(content: string, timestamp?: string): string {
 }
 
 /**
- * How many copies of one identity each side has delivered. Counting — rather
- * than a seen-set — is what lets a message the planner legitimately repeats
- * through: a later broadcast increments one side past the other and is shown
- * again, while the two copies of one broadcast end level.
+ * How many copies of one identity each subscription has delivered. Counting per
+ * subscription — rather than per kind — is what keeps a second run socket from
+ * showing a broadcast the first already showed. A copy is real only when it
+ * takes a subscription past the highest count any subscription has reached:
+ * the first delivery of broadcast N is the one that makes some count N, every
+ * later copy of the same broadcast is a count already seen.
  */
 class Copies {
-  private readonly counts = new Map<string, [number, number]>();
+  private readonly counts = new Map<string, Map<string, number>>();
   private readonly order: string[] = [];
 
   constructor(private readonly cap: number) {}
 
-  /** Whether this side's copy is a broadcast's first, not the other side's duplicate. */
-  first(side: Side, key: string): boolean {
-    const counts = this.bump(side, key);
-    return counts[side] > counts[side === PLANNING ? EXECUTION : PLANNING];
+  /** Whether this delivery is the first copy of a new broadcast, whichever subscription carried it. */
+  first(id: string, key: string): boolean {
+    let highest = 0;
+    for (const count of this.counts.get(key)?.values() ?? []) {
+      if (count > highest) highest = count;
+    }
+    return this.bump(id, key) === highest + 1;
   }
 
-  /** Account for a copy already shown (a redrawn transcript's entry), so its counterpart is recognized. */
-  credit(side: Side, key: string): void {
-    this.bump(side, key);
+  /** Account for a copy already shown (a redrawn transcript's entry), so its counterparts are recognized. */
+  credit(id: string, key: string): void {
+    this.bump(id, key);
   }
 
-  private bump(side: Side, key: string): [number, number] {
-    let counts = this.counts.get(key);
-    if (!counts) {
-      counts = [0, 0];
-      this.counts.set(key, counts);
+  private bump(id: string, key: string): number {
+    let keyed = this.counts.get(key);
+    if (!keyed) {
+      keyed = new Map();
+      this.counts.set(key, keyed);
       this.order.push(key);
       if (this.order.length > this.cap) this.counts.delete(this.order.shift()!);
     }
-    counts[side] += 1;
-    return counts;
+    const count = (keyed.get(id) ?? 0) + 1;
+    keyed.set(id, count);
+    return count;
   }
 }
 
@@ -153,10 +167,10 @@ class WindowSet {
 }
 
 export interface SessionInbound {
-  /** The subscription opened around a planning turn. */
-  planning(event: WsEvent): void;
-  /** The subscription opened around a run. */
-  execution(event: WsEvent): void;
+  /** A fresh subscription for a planning turn. Each call is its own identity. */
+  planning(): Receiver;
+  /** A fresh subscription for a run. Each call is its own identity. */
+  execution(): Receiver;
   /**
    * The settled reply an awaited call's plan carries. The socket usually spoke
    * it already — the daemon commits before answering — and then the same words
@@ -238,53 +252,61 @@ function createInbound(dispatch: Dispatch, sessionId: string): SessionInbound {
     dispatch({ type: 'sessionMessage', message, sessionId });
   };
 
-  const acceptReply = (side: Side, event: Extract<SessionMessage, { type: 'planner_message' }>): void => {
+  const acceptReply = (id: string, event: Extract<SessionMessage, { type: 'planner_message' }>): void => {
     const key = replyKey(event.content, event.timestamp);
     if (pending.take(key)) {
-      copies.credit(side, key);
+      copies.credit(id, key);
       return;
     }
-    if (!copies.first(side, key)) return;
+    if (!copies.first(id, key)) return;
     showReply(event);
   };
 
-  const deliverConversation = (side: Side, event: ConversationMessage): void => {
+  const deliverConversation = (kind: Kind, id: string, event: ConversationMessage): void => {
     if (event.type === 'planner_message') {
-      acceptReply(side, event);
+      acceptReply(id, event);
       return;
     }
-    if (!copies.first(side, identity(event))) return;
+    if (!copies.first(id, identity(event))) return;
     if (event.type === 'plan_generated') {
       dispatch({ type: 'sessionMessage', message: event, sessionId });
       // A run's queued edit is reconciled into this broadcast with no turn of
       // its own, so the pane follows it here. On the planning stream the same
       // broadcast is a turn still in flight: `converse` settles the plan it
       // gets back, and ending the turn here would drain the queue early.
-      if (side === EXECUTION) dispatch({ type: 'planUpdated', plan: event.plan, sessionId });
+      if (kind === 'execution') dispatch({ type: 'planUpdated', plan: event.plan, sessionId });
       return;
     }
     dispatch({ type: 'sessionMessage', message: event, sessionId });
   };
 
-  const receive = (side: Side, event: WsEvent): void => {
+  const receive = (kind: Kind, id: string, event: WsEvent): void => {
     if (isStreamed(event)) {
       // Streamed prose has one voice: the planning subscription. A run's own
       // socket ignores it, as it always has.
-      if (side === PLANNING) hold(event);
+      if (kind === 'planning') hold(event);
       return;
     }
     flush();
     if (isConversation(event)) {
-      deliverConversation(side, event);
+      deliverConversation(kind, id, event);
       return;
     }
-    if (!copies.first(side, identity(event))) return;
+    if (!copies.first(id, identity(event))) return;
     dispatchLifecycle(dispatch, event, sessionId);
   };
 
+  let subscription = 0;
+
   return {
-    planning: (event) => receive(PLANNING, event),
-    execution: (event) => receive(EXECUTION, event),
+    planning: () => {
+      const id = `p${++subscription}`;
+      return (event) => receive('planning', id, event);
+    },
+    execution: () => {
+      const id = `e${++subscription}`;
+      return (event) => receive('execution', id, event);
+    },
     backfill: (content, timestamp) => {
       if (shown.has(content)) return;
       const message = { type: 'planner_message' as const, content, timestamp: timestamp ?? new Date().toISOString() };

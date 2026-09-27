@@ -97,6 +97,9 @@ export function handlePlanKey(state: TuiState, key: Key): Step {
   // the selected task, hence the uppercase.
   if (key.char === 'E') return step(state, [{ type: 'execute', sessionId: state.sessionId }]);
 
+  // The run's explicit stop, matching /stop and the uppercase of `E`.
+  if (key.char === 'S') return step(state, [{ type: 'stopExecution', sessionId: state.sessionId }]);
+
   const action = key.char === 'm' ? markAction(task) : PLAN_SHORTCUTS[key.char ?? ''];
   if (action) {
     return step(state, [taskActionEffect(state, state.sessionId, task.id, action)]);
