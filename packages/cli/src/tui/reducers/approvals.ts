@@ -1,0 +1,48 @@
+import type { Key } from '../keys';
+import type { ApprovalRequestView, TuiState } from '../state';
+import { step, type Step } from './shared';
+
+/**
+ * Queue rather than stack: the planner blocks on each request, so showing them
+ * one at a time keeps the modal honest about what is actually waiting. The open
+ * modal is itself the head of the queue, hence the id check against both.
+ */
+export function enqueueApproval(state: TuiState, request: ApprovalRequestView): TuiState {
+  const open = state.overlay?.kind === 'approval' ? state.overlay.request : null;
+  if (open?.id === request.id) return state;
+  if (state.pendingApprovals.some((p) => p.id === request.id)) return state;
+  if (open) return { ...state, pendingApprovals: [...state.pendingApprovals, request] };
+  return { ...state, overlay: { kind: 'approval', request } };
+}
+
+/** Retire a request answered elsewhere (another surface, or the planner's timeout). */
+export function dropApproval(state: TuiState, approvalId: string): TuiState {
+  const pending = state.pendingApprovals.filter((p) => p.id !== approvalId);
+  const open = state.overlay?.kind === 'approval' ? state.overlay.request : null;
+  if (open?.id !== approvalId) return { ...state, pendingApprovals: pending };
+  return showNextApproval({ ...state, pendingApprovals: pending, overlay: null });
+}
+
+function showNextApproval(state: TuiState): TuiState {
+  const [next, ...rest] = state.pendingApprovals;
+  if (!next) return { ...state, overlay: null };
+  return { ...state, overlay: { kind: 'approval', request: next }, pendingApprovals: rest };
+}
+
+export function handleApprovalKey(
+  state: TuiState,
+  overlay: Extract<NonNullable<TuiState['overlay']>, { kind: 'approval' }>,
+  key: Key,
+): Step {
+  const grant = key.name === 'enter' || key.char === 'y' || key.char === 'Y';
+  const deny = key.name === 'escape' || key.char === 'n' || key.char === 'N';
+  // Anything else is left alone: a stray keypress must not answer for the user.
+  if (!grant && !deny) return step(state);
+
+  const { request } = overlay;
+  // No line of its own: the request's approval block shows the verdict, from
+  // the session's `approval_settled` rather than from this keypress.
+  return step(showNextApproval({ ...state, overlay: null }), state.sessionId
+    ? [{ type: 'respondApproval', sessionId: state.sessionId, approvalId: request.id, granted: grant }]
+    : []);
+}

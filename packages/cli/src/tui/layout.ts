@@ -4,7 +4,7 @@ import { conversationLines, tokenLine } from './blocks';
 import { chatEditorRoom, chatPaneWidth, planPaneWidth } from './geometry';
 import { taskRepoNames } from '../isolation';
 import { SLASH_COMMANDS, type SlashCategory } from './slash';
-import { isTaskRunning, planRows, selectedPlanRow, type PlanRow, type TuiState } from './state';
+import { isTaskRunning, planRows, plannerInFlight, selectedPlanRow, type PlanRow, type TuiState } from './state';
 import { modesForTask } from './taskAssignment';
 import { ALL_PROVIDERS, capConflictFiles, runnerForProvider, taskOrderLabel, type AiProvider, type DisplayBlock } from '@ordewell/core';
 
@@ -55,9 +55,11 @@ export function footerHints(state: TuiState): string[] {
   // otherwise bind it to. What ESC does there depends on what is waiting: a
   // queued prompt it takes back, otherwise the first press arms the stop and
   // the second commits it — so the hint names the state the key is actually in.
-  const planning = state.status === 'planning' || state.status === 'researching';
+  // The arm itself is not named here: its cue is the status row's red line, and
+  // a second one in the footer would say the same thing twice and change the
+  // footer's height the moment the arm appeared.
+  const planning = plannerInFlight(state);
   const escHint = !planning ? null
-    : state.stopArmed ? 'esc again to stop'
     : state.queuedPrompts.length > 0 ? 'esc unsend'
     : 'esc ×2 stop planning';
 
@@ -112,8 +114,7 @@ function queuedBubble(text: string, cols: number): string[] {
  * expiring never changes the body's height the way a footer hint would.
  */
 export function stopHint(state: TuiState): string {
-  const planning = state.status === 'planning' || state.status === 'researching';
-  return planning && state.stopArmed ? 'Press Esc again to stop' : '';
+  return plannerInFlight(state) && state.stopArmed ? 'Press Esc again to stop' : '';
 }
 
 export function packHints(hints: string[], cols: number): string[] {
@@ -689,7 +690,7 @@ export function helpLayout(rows: number, cols: number): HelpLayout {
     body.push('');
   }
   body.push(
-    style.grey('tab switches panes · ↑↓/pgup/pgdn scroll · ctrl-o expand/collapse all · ctrl-l clears · ctrl-c quits'),
+    style.grey('tab switches panes · pgup/pgdn scroll · ctrl-o toggles full detail · esc takes back a queued prompt, otherwise esc twice stops · ctrl-l clears · ctrl-c quits'),
   );
 
   // The sheet is a table: clip long descriptions to one row each rather than

@@ -629,7 +629,7 @@ describe('overlays', () => {
 
   it('names the detail-all toggle in the help sheet', () => {
     const sheet = helpLayout(200, 120).lines.map(stripAnsi).join('\n');
-    expect(sheet).toContain('ctrl-o expand/collapse all');
+    expect(sheet).toContain('ctrl-o toggles full detail');
   });
 
   it('keeps each help entry on a single line so the table stays aligned', () => {
