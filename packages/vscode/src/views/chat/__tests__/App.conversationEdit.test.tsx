@@ -14,6 +14,12 @@ const plan = {
 
 const textarea = () => document.querySelector('.chat-input-row textarea') as HTMLTextAreaElement;
 
+// Every first word SlashParser answers, written out rather than read from it.
+const HOST_COMMANDS = [
+  '/refresh', '/model', '/planner', '/planner-effort', '/key', '/sessions', '/allowlist', '/help', '/new', '/auto',
+  '/fork', '/rewind', '/compact', '/parallel',
+];
+
 describe('App — a compaction redraws the transcript', () => {
   let host: ReturnType<typeof hostBridge>;
   beforeEach(() => {
@@ -63,5 +69,13 @@ describe('App — a compaction redraws the transcript', () => {
 
     const shown = document.body.textContent ?? '';
     for (const command of ['/fork', '/rewind', '/compact']) expect(shown).toContain(command);
+  });
+
+  it('lists every command the host answers in /help, not a copy that drifted', () => {
+    fireEvent.change(textarea(), { target: { value: '/help' } });
+    fireEvent.keyDown(textarea(), { key: 'Enter' });
+
+    const shown = document.querySelector('.slash-output')?.textContent ?? '';
+    for (const command of HOST_COMMANDS) expect(shown).toContain(command);
   });
 });

@@ -16,6 +16,7 @@ import type { LegacyPlanState, DiscoveredModel, Task, TaskModelAssignment, Runne
 import type { AiProvider } from '@ordewell/core';
 import { isPlanRevision, planSummaryLabel, nextDock } from './planDock';
 import { DetailContext } from './detail';
+import { slashHelp } from '../../commands/slashCommands';
 import type { HostToWebview, PendingPlanEdit, PlannerBackend, RunnerMeta, WebviewToHost } from '../../shared/protocol';
 import { EMPTY_HOLD, hasHiddenDetail, type PromptHold } from '@ordewell/core/plan-utils';
 import { applyConversationPatch, EMPTY_PATCHED_VIEW, patchedBlocks, type PatchedView } from '../../shared/conversationPatch';
@@ -427,7 +428,7 @@ export default function App() {
       return;
     }
     if (text === '/help') {
-      setSlashOutput('Commands: /model, /model set <id>, /key set, /sessions, /new, /fork, /rewind [n], /compact, /refresh, /auto, /parallel [n], /allowlist, /help\n\nType / after a command to see model suggestions.');
+      setSlashOutput(slashHelp());
       setTimeout(() => setSlashOutput(''), 6000);
       return;
     }
