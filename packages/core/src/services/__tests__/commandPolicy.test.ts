@@ -144,6 +144,18 @@ describe('classifyCommand', () => {
       expect(classifyCommand('echo $( (rm -rf /) )').tier).toBe('refuse');
     });
 
+    // A substitution in the command position produced an empty binary token,
+    // and a segment without a binary was dropped before classification — so
+    // only the harmless inner `printf` was judged, and `rm` ran as auto.
+    it('refuses a command whose name the shell computes when it runs', () => {
+      expect(classifyCommand('$(printf rm) -rf build').tier).toBe('refuse');
+      expect(classifyCommand('`echo rm` -rf build').tier).toBe('refuse');
+      expect(classifyCommand('"$(echo rm)" -rf build').tier).toBe('refuse');
+      expect(classifyCommand('r$(echo m) -rf build').tier).toBe('refuse');
+      expect(classifyCommand('cat notes.txt | $(echo sh)').tier).toBe('refuse');
+      expect(classifyCommand('$CMD -rf build').tier).toBe('refuse');
+    });
+
     // Process substitution spawns a process the tokenizer never inspects.
     it('refuses <(…) and >(…) process substitution', () => {
       expect(classifyCommand('cat <(rm -rf /)').tier).toBe('refuse');
@@ -229,6 +241,16 @@ describe('classifyCommand', () => {
       expect(classifyCommand('x=/etc/passwd; cat $x').tier).not.toBe('auto');
       expect(classifyCommand('x=/etc/passwd; cat ${x}').tier).not.toBe('auto');
       expect(classifyCommand('cat $HOME/.ssh/id_rsa').tier).not.toBe('auto');
+    });
+
+    // The same escape through what the shell computes or unquotes: the path
+    // check saw an empty word, or `$/etc/passwd`, and neither looks like a path.
+    it('does not let a substitution or bash quoting smuggle a path past auto-tier classification', () => {
+      expect(classifyCommand('cat $(printf /etc/passwd)').tier).not.toBe('auto');
+      expect(classifyCommand('head -n 5 `printf /etc/passwd`').tier).not.toBe('auto');
+      expect(classifyCommand("cat $'/etc/passwd'").tier).not.toBe('auto');
+      expect(classifyCommand('cat $"/etc/passwd"').tier).not.toBe('auto');
+      expect(classifyCommand('cat $0').tier).not.toBe('auto');
     });
 
     it('gives the model an actionable reason, not just a refusal', () => {

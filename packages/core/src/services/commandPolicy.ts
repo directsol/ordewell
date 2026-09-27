@@ -646,7 +646,7 @@ const WRAPPER_FAMILY: Record<string, WrapperSpec> = {
  * a literal character in cmd, so `echo it's & del x` hid the `del` inside what
  * the lexer believed was a quoted string.
  *
- * Only the four rules that actually diverge are modeled. Constructs cmd.exe
+ * Only the five rules that actually diverge are modeled. Constructs cmd.exe
  * lacks (`$(…)`, backticks) are still recognized on Windows: over-splitting
  * costs a needless approval prompt, under-splitting costs the gate.
  */
@@ -667,6 +667,12 @@ export interface Dialect {
   quotes: string[];
   /** Matches a variable reference the interpreter will expand. */
   expansion: RegExp;
+  /**
+   * Whether `$'…'` and `$"…"` are quoting forms of their own (bash's ANSI-C
+   * and locale quoting). Read as a literal `$` and a plain quote,
+   * `cat $'/etc/passwd'` hid its path behind a `$` no path check recognizes.
+   */
+  dollarQuotes: boolean;
   /** Executable extensions stripped before a binary is matched against the tiers. */
   strippedExtensions: string[];
 }
@@ -675,7 +681,9 @@ const POSIX_DIALECT: Dialect = {
   escape: '\\',
   escapeInQuotes: true,
   quotes: ["'", '"'],
-  expansion: /^\$[A-Za-z_{]/,
+  // Positional and special parameters (`$1`, `$@`, `$$`, …) expand too.
+  expansion: /^\$[A-Za-z_{0-9@*#?$!-]/,
+  dollarQuotes: true,
   strippedExtensions: [],
 };
 
@@ -685,6 +693,7 @@ const CMD_DIALECT: Dialect = {
   quotes: ['"'],
   // `%VAR%` and delayed-expansion `!VAR!`.
   expansion: /^[%!][A-Za-z_]/,
+  dollarQuotes: false,
   // Without this, `del.exe` and `C:\bin\del.exe` both missed the refusal list.
   strippedExtensions: ['.exe', '.cmd', '.bat', '.com', '.ps1', '.msc'],
 };
@@ -733,10 +742,13 @@ interface Segment {
   /** True when this segment consumes another command's output (`… | seg`). */
   piped: boolean;
   /**
-   * A token contains a `$var` the shell will expand. Tracked at lex time
-   * because only the lexer knows a `$` inside single quotes is literal.
+   * A token contains a `$var` or a substitution the shell will expand. Tracked
+   * at lex time because only the lexer knows a `$` inside single quotes is
+   * literal.
    */
   expandable: boolean;
+  /** The binary token as written, when the shell computes it — see {@link isComputedWord}. */
+  computedBinary?: string;
 }
 
 /** An output redirect whose target is not provably a no-op (`/dev/null`, an fd duplication). */
@@ -861,19 +873,26 @@ function lex(command: string, nested: string[], dialect: Dialect): Lexed {
 
     // Substitutions expand inside double quotes too, so these precede the
     // double-quote passthrough below.
+    // The substitution stays in the token as written: what it expands to is
+    // decided when the shell runs, and dropping it left an empty word — which
+    // as a command name took the whole segment out of classification.
     if (c === '$' && command[i + 1] === '(') {
       const close = matchParen(command, i + 1);
       if (close < 0) { unbalanced = true; break; }
       nested.push(command.slice(i + 2, close));
-      started = true;
+      current += command.slice(i, close + 1); started = true; expandable = true;
       i = close + 1; continue;
     }
     if (c === '`') {
       const close = command.indexOf('`', i + 1);
       if (close < 0) { unbalanced = true; break; }
       nested.push(command.slice(i + 1, close));
-      started = true;
+      current += command.slice(i, close + 1); started = true; expandable = true;
       i = close + 1; continue;
+    }
+    if (dialect.dollarQuotes && quote === '' && c === '$' && (command[i + 1] === "'" || command[i + 1] === '"')) {
+      expandable = true;
+      current += c; started = true; i++; continue;
     }
     if (dialect.expansion.test(command.slice(i, i + 2))) {
       expandable = true;
@@ -976,6 +995,18 @@ function binaryName(token: string, dialect: Dialect): string {
 /** A `NAME=value` token, in the one position a shell treats as an assignment. */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+/**
+ * Whether the shell, not the command line, decides what this word says: it
+ * holds a substitution or an expansion. Quotes are gone by now, so a `$` the
+ * command line quoted counts too — harmless for a command name, since no
+ * program is named with one.
+ */
+function isComputedWord(token: string, dialect: Dialect): boolean {
+  if (/[$`]/.test(token)) return true;
+  for (let i = 0; i < token.length; i++) if (dialect.expansion.test(token.slice(i, i + 2))) return true;
+  return false;
+}
+
 function toSegment(tokens: string[], piped: boolean, dialect: Dialect): Segment {
   const rest = [...tokens];
   const assignments: string[] = [];
@@ -988,6 +1019,7 @@ function toSegment(tokens: string[], piped: boolean, dialect: Dialect): Segment 
     assignments,
     piped,
     expandable: false,
+    ...(rest.length > 0 && isComputedWord(rest[0], dialect) ? { computedBinary: rest[0] } : {}),
   };
 }
 
@@ -1355,6 +1387,11 @@ function isAuto(seg: Segment): boolean {
 }
 
 function refusalFor(seg: Segment): string | undefined {
+  // Nothing else about the segment means anything when the name of what runs
+  // is only known once the shell has run the substitution or read the variable.
+  if (seg.computedBinary !== undefined) {
+    return `"${seg.computedBinary}" is a command name the shell computes as it runs, so this classifier cannot tell what would run. Name the program directly.`;
+  }
   if (REFUSED_COMMANDS.includes(seg.binary)) {
     return `"${seg.binary}" modifies state. You are a read-only planner — describe the change as a task instead, and the runner executing the plan will make it.`;
   }
