@@ -125,10 +125,15 @@ describe('planUpdated', () => {
 });
 
 describe('planner conversation', () => {
-  it('shows the planner question as an assistant turn and stops the spinner', () => {
-    const s = send({ ...initialState(), status: 'planning' }, { type: 'plannerMessage', content: 'Which DB?' });
-    expect(s.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'Which DB?' });
-    expect(s.status).toBe('idle');
+  it('shows the planner question as an assistant turn; planUpdated settles the spinner', () => {
+    const asked = send({ ...initialState(), status: 'planning' }, { type: 'plannerMessage', content: 'Which DB?' });
+    expect(asked.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'Which DB?' });
+
+    // `planUpdated` is the action that ends a turn — see `converse`, which
+    // dispatches the turn's text first and this settle after it, so a queued
+    // prompt can drain onto the settled state without this clobbering it.
+    const settled = send(asked, { type: 'planUpdated', plan: { tasks: [] } });
+    expect(settled.status).toBe('idle');
   });
 
   it('shows research progress on the spinner and in the transcript', () => {

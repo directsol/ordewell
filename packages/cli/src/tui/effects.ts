@@ -62,8 +62,6 @@ export interface OrdewellApi {
 export interface EffectDeps {
   api: OrdewellApi;
   workspace: string;
-  /** Serializes planner turns so a follow-up cannot race session creation. */
-  conversationQueue: ConversationQueue;
   /** The local daemon's port — also the tmux session a task's terminal lives in. */
   port: number;
   dispatch(action: Action): void;
@@ -97,51 +95,18 @@ export interface EffectDeps {
 }
 
 /**
- * A planner conversation accepts one turn at a time. In particular, the
- * daemon only registers a newly-created session once its first turn returns,
- * so a second request must wait rather than receive a misleading 404.
- */
-export class ConversationQueue {
-  private tail: Promise<void> = Promise.resolve();
-  private active = false;
-
-  enqueue<T>(work: () => Promise<T>): Promise<T> {
-    const run = () => {
-      try {
-        return Promise.resolve(work());
-      } catch (error) {
-        return Promise.reject(error);
-      }
-    };
-
-    const result = this.active ? this.tail.then(run) : run();
-    this.active = true;
-    const settled = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.tail = settled;
-    void settled.then(() => {
-      if (this.tail === settled) this.active = false;
-    });
-    return result;
-  }
-}
-
-/**
  * Performs one effect and feeds results back as actions. Every path is
  * caught: a daemon hiccup becomes an error turn in the transcript, never an
  * unhandled rejection that tears down the raw-mode terminal.
+ *
+ * Conversation turns need no client-side queue: the reducer only routes a
+ * prompt to `sendMessage` when no planner turn is in flight (see
+ * `drainQueue`/`submit`), so turn serialization is decided at the source and
+ * the daemon's first-turn registration race never comes up.
  */
 export async function runEffect(effect: Effect, deps: EffectDeps): Promise<void> {
-  const isConversationTurn = effect.type === 'startConversation' || effect.type === 'sendMessage';
-  const run = () => {
-    const work = () => perform(effect, deps);
-    return isConversationTurn ? deps.conversationQueue.enqueue(work) : work();
-  };
-
   try {
-    await run();
+    await perform(effect, deps);
   } catch (err) {
     if (!isConnectionRefused(err)) {
       const message = err instanceof Error ? err.message : String(err);
@@ -166,7 +131,7 @@ export async function runEffect(effect: Effect, deps: EffectDeps): Promise<void>
 
     deps.dispatch({ type: 'notice', message: 'The server had stopped; started a new one and retried.' });
     try {
-      await run();
+      await perform(effect, deps);
     } catch (retryErr) {
       const message = retryErr instanceof Error ? retryErr.message : String(retryErr);
       deps.dispatch({
@@ -263,6 +228,15 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
       // not a stale request), and its own planner_message/planUpdated already
       // carries whatever feedback there is.
       if (cancelled) dispatch({ type: 'notice', message: 'Planning stopped.' });
+      return;
+    }
+
+    // The arm's expiry is the runtime's to schedule: the reducer is pure, so
+    // it names the delay and this owns the timer that ends the arming. Unref'd,
+    // so a pending arm never holds the process open on its way out.
+    case 'disarmStop': {
+      const timer = setTimeout(() => dispatch({ type: 'stopDisarmed', arm: effect.arm }), effect.afterMs);
+      timer.unref?.();
       return;
     }
 
@@ -749,12 +723,14 @@ async function converse(deps: EffectDeps, sessionId: string, call: () => Promise
 
   try {
     const plan = await call();
-    deps.dispatch({ type: 'planUpdated', plan, sessionId });
-
+    // Speak the turn before `planUpdated` settles it: the settle is also what
+    // drains the next queued prompt, so the reply would otherwise land after
+    // the prompt that queue sent, in the wrong order.
     const question = lastAssistantMessage(plan);
     if (question && question !== streamed) {
       deps.dispatch({ type: 'plannerMessage', content: question, sessionId });
     }
+    deps.dispatch({ type: 'planUpdated', plan, sessionId });
   } finally {
     if (tokenTimer !== null) clearTimeout(tokenTimer);
     stream.close();

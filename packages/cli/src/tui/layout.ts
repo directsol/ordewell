@@ -52,9 +52,14 @@ export function footerHints(state: TuiState): string[] {
   // Only on a task that has a conflict to resolve: isolation stays quiet otherwise.
   const resolveHint = selected?.isolation?.state === 'conflict' ? ['x resolve conflict'] : [];
   // A planning turn in flight owns ESC ahead of whatever the pane would
-  // otherwise bind it to — the hint has to say so or the key isn't discoverable.
+  // otherwise bind it to. What ESC does there depends on what is waiting: a
+  // queued prompt it takes back, otherwise the first press arms the stop and
+  // the second commits it — so the hint names the state the key is actually in.
   const planning = state.status === 'planning' || state.status === 'researching';
-  const escHint = planning ? 'esc stop planning' : null;
+  const escHint = !planning ? null
+    : state.stopArmed ? 'esc again to stop'
+    : state.queuedPrompts.length > 0 ? 'esc unsend'
+    : 'esc ×2 stop planning';
 
   if (state.focus === 'plan') {
     // `expandedTaskId` alone only means subtask rows are revealed — the editor
@@ -78,10 +83,32 @@ export function footerHints(state: TuiState): string[] {
 }
 
 /**
- * Hints across as many lines as they need. The plan pane's list is longer than a
- * normal terminal is wide, and truncating it hid the very keys the footer exists
- * to teach — `t terminal` fell off the end as soon as two more were added.
+ * The queue's bubbles, one bubble per prompt, in queue order. Kept in its own
+ * function because the chat rendering swaps for core display blocks (#52),
+ * which will re-home where these paint but keep the bubbles themselves.
  */
+export function queuedPromptRows(state: TuiState, cols: number): string[] {
+  return state.queuedPrompts.flatMap((text) => queuedBubble(text, cols));
+}
+
+/** One queued prompt wrapped under a dimmed marker, the takeback hint on its first row. */
+function queuedBubble(text: string, cols: number): string[] {
+  const room = Math.max(1, cols - width('◇  · queued · esc to unsend'));
+  return wrap(text, room).map((line, i) => i === 0
+    ? truncate(`${style.grey(`◇ ${line}`)} · queued · esc to unsend`, cols)
+    : truncate(style.grey(`  ${line}`), cols));
+}
+
+/**
+ * The standing arm of the in-flight turn's stop. Painted red at the paint site
+ * and shown on the status row — always exactly one line, so appearing and
+ * expiring never changes the body's height the way a footer hint would.
+ */
+export function stopHint(state: TuiState): string {
+  const planning = state.status === 'planning' || state.status === 'researching';
+  return planning && state.stopArmed ? 'Press Esc again to stop' : '';
+}
+
 export function packHints(hints: string[], cols: number): string[] {
   const lines: string[] = [];
   let current = '';
@@ -233,7 +260,12 @@ export function chatLayout(state: TuiState, rows: number, cols: number): ChatLay
   // plan pane owns the screen and the chat column is too narrow for the art.
   const welcome = state.tasks.length === 0;
   const body = chatBodyLines(state.messages, cols);
-  const lines = !welcome ? body : state.messages.length === 0 ? welcomeLines(state, cols) : [...welcomeLines(state, cols), '', ...body];
+  const transcript = !welcome ? body : state.messages.length === 0 ? welcomeLines(state, cols) : [...welcomeLines(state, cols), '', ...body];
+  // The queued prompts paint as part of the tail, newest last — they are the
+  // turns that have not gone out yet, and they travel where a sent message
+  // would have appeared.
+  const bubbles = queuedPromptRows(state, cols);
+  const lines = [...transcript, ...(bubbles.length > 0 ? ['', ...bubbles] : [])];
   // Content that fits hangs off the top so the welcome does not jump when the
   // first message lands; once it overflows the newest lines win the pane.
   return { lines, anchor: lines.length > rows ? 'bottom' : 'top', maxScroll: Math.max(0, lines.length - rows) };

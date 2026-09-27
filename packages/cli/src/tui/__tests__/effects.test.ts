@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, type Mock } from 'vitest';
-import { ConversationQueue, runEffect, type EffectDeps, type OrdewellApi } from '../effects';
+import { runEffect, type EffectDeps, type OrdewellApi } from '../effects';
 import { initialState, reduce, type Action } from '../reducer';
 import type { Effect } from '../reducer';
 import type { TuiState } from '../state';
@@ -41,7 +41,6 @@ function harness(api: Partial<OrdewellApi> = {}, over: Partial<EffectDeps> = {})
       ...api,
     } as OrdewellApi,
     workspace: '/ws',
-    conversationQueue: new ConversationQueue(),
     port: 3742,
     dispatch: (action) => actions.push(action),
     newSessionId: () => 'session-new',
@@ -410,24 +409,9 @@ describe('planning', () => {
     expect(h.api.sendConversationMessage).toHaveBeenCalledWith('s1', 'use bcrypt');
   });
 
-  it('queues a follow-up message until the active planner turn settles', async () => {
-    let finishFirstTurn: (plan: { tasks: never[] }) => void = () => {};
-    const h = harness({
-      startConversation: vi.fn().mockImplementation(
-        () => new Promise<{ tasks: never[] }>((resolve) => { finishFirstTurn = resolve; }),
-      ),
-    });
-
-    const firstTurn = runEffect({ type: 'startConversation', goal: 'research the codebase' }, h.deps);
-    const followUp = runEffect({ type: 'sendMessage', sessionId: 'session-new', message: 'also cover caching' }, h.deps);
-
-    expect(h.api.sendConversationMessage).not.toHaveBeenCalled();
-
-    finishFirstTurn({ tasks: [] });
-    await Promise.all([firstTurn, followUp]);
-
-    expect(h.api.sendConversationMessage).toHaveBeenCalledWith('session-new', 'also cover caching');
-  });
+  // Turn serialization moved out of the effect layer and into the reducer:
+  // a prompt submitted while a turn is in flight waits in `TuiState.queuedPrompts`
+  // and only emits `sendMessage` when the turn settles. See reducer.queue.test.ts.
 });
 
 describe('execution', () => {
@@ -1148,6 +1132,27 @@ describe('settings persistence ordering', () => {
       ORCHESTRATOR_MODEL: 'sonnet',
       ORDEWELL_PLANNER_EFFORT: 'high',
     });
+  });
+});
+
+describe('the armed stop expiring', () => {
+  it('schedules the disarm the reducer asked for, and delivers it after the delay', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      await runEffect({ type: 'disarmStop', afterMs: 2000, arm: 1 }, h.deps);
+
+      // Nothing yet — the arm is still standing.
+      expect(h.actions).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(h.actions).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.actions).toEqual([{ type: 'stopDisarmed', arm: 1 }]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

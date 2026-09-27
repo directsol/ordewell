@@ -69,9 +69,12 @@ describe('approval overlay', () => {
     expect(effects).toContainEqual({ type: 'respondApproval', sessionId: 's1', approvalId: 'ap-1', granted: false });
   });
 
-  it('escape stops the whole turn while one is in flight, rather than denying one call', () => {
-    const { state, effects } = press(withPending(), 'escape');
+  it('escape arms while a turn is in flight rather than denying one call; the second esc stops the turn', () => {
+    const armed = press(withPending(), 'escape');
+    expect(armed.state.overlay).toMatchObject({ kind: 'approval' });
+    expect(armed.state.stopArmed).toBe(true);
 
+    const { state, effects } = press(armed.state, 'escape');
     expect(effects).toEqual([{ type: 'cancelPlanning', sessionId: 's1' }]);
     expect(state.overlay).toBeNull();
   });

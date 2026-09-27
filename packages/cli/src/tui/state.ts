@@ -366,6 +366,23 @@ export interface TuiState {
    * answered one at a time rather than stacking modals on top of each other.
    */
   pendingApprovals: ApprovalRequestView[];
+  /**
+   * Prompts held back while a planner turn answers. They are visible as dimmed
+   * bubbles (so "did I send that?" has a visible answer) and go out one per
+   * settling turn, oldest first.
+   */
+  queuedPrompts: string[];
+  /**
+   * A first Esc during a planner turn: the stop is armed and one more Esc
+   * commits it. Cleared by `stopDisarmed`, which the runtime schedules, or by
+   * the next key that is not Esc.
+   */
+  stopArmed: boolean;
+  /**
+   * The arm `stopArmed` belongs to. Each arming bumps it, so the expiry a
+   * previous arm scheduled can never disarm a later one out of turn.
+   */
+  stopArmToken: number;
   toast: string;
   rows: number;
   cols: number;
@@ -471,6 +488,9 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
     handoff: null,
     overlay: null,
     pendingApprovals: [],
+    queuedPrompts: [],
+    stopArmed: false,
+    stopArmToken: 0,
     toast: '',
     rows: 24,
     cols: 80,

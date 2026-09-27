@@ -35,9 +35,9 @@ describe('approval overlay rendering', () => {
     expect(out).toMatch(/(n|esc).*den(y|ies)/i);
   });
 
-  it('says esc stops the whole turn while one is in flight, because that is what it now does', () => {
+  it('says esc must be pressed twice while a turn is in flight', () => {
     const out = screenWith(SHELL, { status: 'researching', sessionId: 's1' });
-    expect(out).toMatch(/esc stops planning/i);
+    expect(out).toMatch(/esc twice stops planning/i);
     expect(out).toMatch(/n den(y|ies)/i);
   });
 

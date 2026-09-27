@@ -68,6 +68,8 @@ export type Effect =
   | { type: 'stopExecution'; sessionId: string }
   | { type: 'cancelPlanning'; sessionId: string }
   | { type: 'processQueued'; sessionId: string }
+  /** Schedules the stop-arm expiry; the runtime owns the timer, not the reducer. */
+  | { type: 'disarmStop'; afterMs: number; arm: number }
   /** `watch` asks the runtime to hold the execution stream open for this action — see `taskActionEffect`. */
   | { type: 'taskAction'; sessionId: string; taskId: string; action: TaskAction; watch?: boolean }
   | { type: 'addTask'; sessionId: string; title: string }
@@ -103,6 +105,8 @@ export type Action =
   /** The run and its record are gone; nothing is left to hand off or to mark. */
   | { type: 'runCleared'; sessionId?: string }
   | { type: 'queueReady'; sessionId?: string }
+  /** The scheduled expiry of an armed stop; the arm simply lapses. */
+  | { type: 'stopDisarmed'; arm: number }
   | { type: 'executionComplete'; summary?: { total: number; completed: number; failed: number }; stopped?: boolean; sessionId?: string }
   | { type: 'settingsLoaded'; settings: Record<string, unknown> }
   | { type: 'modelsLoaded'; models: ModelView[]; orchestratorModels?: ModelView[]; providers?: string[]; providerErrors?: Record<string, string>; modesByRunner?: Record<string, ModeView[]> }
@@ -145,6 +149,31 @@ function restoredMessages(history: ConversationMessage[]): ChatMessage[] {
 }
 
 const isPendingResearch = (m: ChatMessage): boolean => m.role === 'research' && !m.research?.outcome;
+
+/**
+ * A planner turn ending is the moment the next queued prompt goes out. The
+ * actions that end a turn (`planUpdated`'s settle branch, `failed`) funnel
+ * through here: one prompt is spoken and sent, and the status says planning
+ * again only while the queue keeps going.
+ *
+ * Nothing is drained when no turn was in flight — a failure during execution,
+ * or a plan refresh running alongside a run, is not a settling turn.
+ */
+function drainQueue(state: TuiState, settled: TuiState): Step {
+  const [next, ...rest] = state.queuedPrompts;
+  // The arm aimed at the turn that just ended lapses with it — the next turn
+  // starts unarmed, and its first Esc has to earn the stop again.
+  const ended = disarmStop(settled);
+  if (next === undefined) return step(ended);
+  const spoken = say(ended, 'user', next);
+  const effect: Effect | null = state.sessionId
+    ? { type: 'sendMessage', sessionId: state.sessionId, message: next }
+    : null;
+  return step(
+    { ...spoken, queuedPrompts: rest, status: 'planning', busyLabel: '', thinkingLine: '' },
+    effect ? [effect] : [],
+  );
+}
 
 /**
  * Whether this is the planner's newest turn arriving a second time.
@@ -258,6 +287,8 @@ export function reduce(state: TuiState, action: Action): Step {
         sessionId: null,
         goal: '',
         pendingApprovals: [],
+        queuedPrompts: [],
+        stopArmed: false,
         overlay: state.overlay?.kind === 'approval' ? null : state.overlay,
       });
 
@@ -299,12 +330,26 @@ export function reduce(state: TuiState, action: Action): Step {
         taskEditor: expandedTaskId !== null ? state.taskEditor : null,
       };
       const selectedTask = clampSelection(state.selectedTask, planRows(next).length);
-      return step(settlePlan({ ...next, selectedTask, focus: tasks.length === 0 ? 'chat' : state.focus }));
+      // A plan refresh mid-run (a run in flight) is not a turn ending — only
+      // leaving the planning statuses is the moment the queue may drain.
+      const settled = settlePlan({
+        ...next,
+        selectedTask,
+        focus: tasks.length === 0 ? 'chat' : state.focus,
+      });
+      if (state.status !== 'planning' && state.status !== 'researching') {
+        return step(settled);
+      }
+      return drainQueue(state, settled);
     }
 
     case 'plannerMessage': {
       if (stale(state, action.sessionId)) return step(state);
-      const settled: TuiState = { ...state, status: 'idle', busyLabel: '', thinkingLine: '' };
+      // The turn's spinner is stopped by `planUpdated`, which is the action
+      // that ends a turn (see `converse`) — this only speaks the text, so a
+      // queued prompt can drain onto a settled state without this clobbering
+      // the next turn's status.
+      const settled: TuiState = { ...state, busyLabel: '', thinkingLine: '' };
       // Sanitized before the comparison, not just before storage — `say`
       // stores the sanitized form, so matching against the raw turn would
       // never dedup a repeat that carries a tab.
@@ -501,6 +546,8 @@ export function reduce(state: TuiState, action: Action): Step {
         thinkingLine: '',
         planApproved: false,
         pendingApprovals: [],
+        queuedPrompts: [],
+        stopArmed: false,
         overlay: state.overlay?.kind === 'approval' ? null : state.overlay,
       });
 
@@ -524,8 +571,14 @@ export function reduce(state: TuiState, action: Action): Step {
         orchestratorModel: action.orchestratorModel ?? state.orchestratorModel,
       }, ['set-planner', 'set-task-runner']));
 
-    case 'failed':
-      return step({ ...say(state, 'error', action.message), status: 'idle', busyLabel: '', thinkingLine: '' });
+    case 'failed': {
+      const reported = { ...say(state, 'error', action.message), status: 'idle' as const, busyLabel: '', thinkingLine: '' };
+      // A planner turn dying IS a turn ending — the queue would otherwise wait
+      // on a next one that never comes. An execution failure (or any failure
+      // with no turn running) drains nothing.
+      if (state.status !== 'planning' && state.status !== 'researching') return step(reported);
+      return drainQueue(state, reported);
+    }
 
     case 'workspaceNeedsInit':
       return step({
@@ -560,6 +613,13 @@ export function reduce(state: TuiState, action: Action): Step {
     // timer); a tick that arrives simply advances the frame.
     case 'spinnerTick':
       return step({ ...state, spinnerFrame: (state.spinnerFrame + 1) % 10 });
+
+    // The scheduled expiry of an armed stop; a token that is no longer the live
+    // arm is a stale timer (the user disarmed and re-armed in between) and is
+    // ignored, so it cannot cut a newer arm short.
+    case 'stopDisarmed':
+      if (!state.stopArmed || action.arm !== state.stopArmToken) return step(state);
+      return step(disarmStop(state));
   }
 }
 
@@ -937,6 +997,11 @@ function clampRange(value: number, low: number, high: number): number {
   return Math.max(low, Math.min(high, value));
 }
 
+/** The arm lapsed — through the scheduled effect or a different key. */
+function disarmStop(state: TuiState): TuiState {
+  return state.stopArmed ? { ...state, stopArmed: false } : state;
+}
+
 /** Whether the drag never left the cell it started in — a click, not a range. */
 const isClick = (selection: Selection): boolean =>
   selection.anchor.col === selection.head.col && selection.anchor.row === selection.head.row;
@@ -1011,16 +1076,50 @@ function scrollPlan(state: TuiState, delta: number, paged: boolean): Step {
 const plannerInFlight = (state: TuiState): boolean =>
   state.status === 'planning' || state.status === 'researching';
 
+/** How long a first Esc holds the stop armed before it lapses. */
+const STOP_ARM_MS = 2000;
+
 /**
- * Call off the turn. An approval prompt on screen goes with it, queue and all:
- * the daemon denies every outstanding request as it aborts, so leaving the
- * modal up would ask the user to answer for a turn that no longer exists.
+ * Call off the turn. An approval prompt on screen goes with it, and so does
+ * the queue behind it: the prompts the user held back belong to a turn that no
+ * longer exists, so they return to the editor to edit and resend rather than
+ * firing off after the stop.
  */
 function stopPlanning(state: TuiState, sessionId: string): Step {
   const dismissed = state.overlay?.kind === 'approval'
     ? { ...state, overlay: null, pendingApprovals: [] }
     : state;
-  return step(dismissed, [{ type: 'cancelPlanning', sessionId }]);
+  return step(queueToEditor({ ...dismissed, stopArmed: false }), [{ type: 'cancelPlanning', sessionId }]);
+}
+
+/**
+ * The prompts parked behind a dead turn go back where they were typed, in the
+ * order they were queued. `/stop` arrives with the editor already cleared (the
+ * command consumed it), and the Esc route cannot reach the stop with a queue
+ * left — so this is always replacing an empty box.
+ */
+function queueToEditor(state: TuiState): TuiState {
+  if (state.queuedPrompts.length === 0) return state;
+  const text = state.queuedPrompts.join('\n');
+  return { ...state, queuedPrompts: [], editor: { ...state.editor, text, cursor: text.length } };
+}
+
+/**
+ * Takes the newest queued prompt back: its text goes above whatever draft is
+ * in the box, separated by a newline, and the planner keeps running. The editor
+ * is rebuilt wholesale rather than patched, because the takeback replaces what
+ * the user was composing rather than joining its history.
+ */
+function unsendLatest(state: TuiState): Step {
+  const [latest, ...rest] = [...state.queuedPrompts].reverse();
+  const draft = state.editor.text;
+  const text = draft ? `${latest}\n${draft}` : latest;
+  return step({
+    ...state,
+    queuedPrompts: rest.reverse(),
+    stopArmed: false,
+    editor: { ...state.editor, text, cursor: latest.length, historyIndex: state.editor.history.length, draft: '' },
+  });
 }
 
 /**
@@ -1029,22 +1128,31 @@ function stopPlanning(state: TuiState, sessionId: string): Step {
  * plan-pane shortcuts and picker filters never leak into the prompt.
  */
 function handleKey(state: TuiState, key: Key): Step {
+  // Any key that is not the Esc being asked about disarms a standing stop. The
+  // arm is dropped and the key goes on to whatever it normally does — a press
+  // that arrives after the arm must not be swallowed by the arming itself.
+  if (state.stopArmed && key.name !== 'escape') state = disarmStop(state);
   if (key.name === 'ctrl-c') return interrupt(state);
   if (key.name === 'ctrl-d' && !state.editor.text && !state.overlay) {
     return step({ ...state, exiting: true }, [{ type: 'exit' }]);
   }
   if (key.name === 'ctrl-l') return step({ ...state, messages: [] });
 
-  // A first ESC stops the planner rather than doing whatever ESC does today —
-  // that behavior is still one ESC away, once the turn is no longer in flight.
+  // Esc during a planner turn, in order of the user's intent:
+  // 1. take back the newest queued prompt (the planner keeps running);
+  // 2. arm a stop — a second Esc commits it, anything else disarms;
+  // 3. commit the stop.
   // This sits *above* overlay routing for the approval prompt only: ESC there
   // would otherwise deny one tool call, which the planner answers by issuing
-  // the next one. A user pressing ESC mid-research wants the turn dead, not a
-  // single refusal. Every other overlay (help, pickers, confirm, task editor)
-  // keeps its own ESC — those are things the user opened and can close.
+  // the next one. A user pressing ESC mid-research wants out of the turn, and
+  // now has to say so twice. Every other overlay (help, pickers, confirm, task
+  // editor) keeps its own ESC — those are things the user opened and can close.
   if (key.name === 'escape' && plannerInFlight(state) && state.sessionId
       && (!state.overlay || state.overlay.kind === 'approval')) {
-    return stopPlanning(state, state.sessionId);
+    if (state.queuedPrompts.length > 0) return unsendLatest(state);
+    if (state.stopArmed) return stopPlanning(state, state.sessionId);
+    const arm = state.stopArmToken + 1;
+    return step({ ...state, stopArmed: true, stopArmToken: arm }, [{ type: 'disarmStop', afterMs: STOP_ARM_MS, arm }]);
   }
   if (state.overlay) return handleOverlayKey(state, state.overlay, key);
   // Above the focus split, because a wheel notch is aimed, not focused. A drag
@@ -1553,6 +1661,13 @@ function submit(state: TuiState): Step {
   // coding-agent planner ever sees the token and tries to resolve it itself.
   if (command && findCommand(command.name)?.source !== 'skill') return runCommand(cleared, command);
 
+  // A prompt while a turn answers is held, not sent: the transcript would
+  // otherwise show a message the daemon has not even received yet, and the
+  // first turn's registration race turns a second prompt into a 404.
+  if (plannerInFlight(state)) {
+    return step({ ...cleared, queuedPrompts: [...state.queuedPrompts, text] });
+  }
+
   const spoken = say(cleared, 'user', text);
   const effect: Effect = state.sessionId
     ? { type: 'sendMessage', sessionId: state.sessionId, message: text }
@@ -1588,13 +1703,13 @@ function runCommand(state: TuiState, { name, args }: ParsedCommand): Step {
       );
     case 'stop':
       // Whichever is actually in flight — a planning turn and a task run never
-      // overlap, so this is never ambiguous about which one to halt.
+      // overlap, so this is never ambiguous about which one to halt. Stopping
+      // a turn brings the queue behind it back into the editor, the way the
+      // Esc route does.
       return withSession(state, (sessionId) =>
-        step(state, [
-          state.status === 'planning' || state.status === 'researching'
-            ? { type: 'cancelPlanning', sessionId }
-            : { type: 'stopExecution', sessionId },
-        ]),
+        state.status === 'planning' || state.status === 'researching'
+          ? stopPlanning(state, sessionId)
+          : step(state, [{ type: 'stopExecution', sessionId }]),
       );
 
     case 'model':
@@ -1804,6 +1919,8 @@ function newSession(state: TuiState): Step {
     // Prompts belong to the session that raised them; the old planner is gone
     // and its pending requests deny on their own timeout.
     pendingApprovals: [],
+    queuedPrompts: [],
+    stopArmed: false,
     overlay: state.overlay?.kind === 'approval' ? null : state.overlay,
   }, closeEffects);
 }
