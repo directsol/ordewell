@@ -47,6 +47,29 @@ describe('writeEnvVar', () => {
     expect(content).toContain('KEY1=val2');
     expect(content).not.toContain('val1');
   });
+
+  it('tightens an existing world-readable .env to 0600', () => {
+    if (process.platform === 'win32') return;
+    const file = path.join(os.tmpdir(), '.ordewell', '.env');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'KEY1=old\n');
+    fs.chmodSync(file, 0o644);
+
+    writeEnvVar(file, 'KEY1', 'new');
+
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(file, 'utf8')).toBe('KEY1=new\n');
+  });
+
+  it('rejects a key containing regex metacharacters', () => {
+    const file = path.join(os.tmpdir(), '.ordewell', '.env');
+    expect(() => writeEnvVar(file, 'KEY.*', 'value')).toThrow(/valid environment variable/);
+  });
+
+  it('rejects a value containing a newline', () => {
+    const file = path.join(os.tmpdir(), '.ordewell', '.env');
+    expect(() => writeEnvVar(file, 'KEY', 'one\ntwo')).toThrow(/newline/);
+  });
 });
 
 describe('loadEnvFile', () => {

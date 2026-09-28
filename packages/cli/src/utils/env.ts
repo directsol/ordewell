@@ -1,6 +1,6 @@
-import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
-import { join, parse } from 'path';
-import { globalDataDir } from '@ordewell/core';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
+import { globalDataDir, writePrivateFile } from '@ordewell/core';
 
 export function findEnvFile(): string {
   return join(globalDataDir(), '.env');
@@ -28,24 +28,42 @@ export function loadEnvFile(): void {
   }
 }
 
-export function writeEnvVar(filePath: string, key: string, value: string): void {
-  try {
-    const { dir } = parse(filePath);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+// A shell variable name, which is all `.env` can hold. Rejecting anything else
+// keeps a key from being read as a pattern or written as an injected line.
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-    let content = '';
-    if (existsSync(filePath)) {
-      content = readFileSync(filePath, 'utf8');
-      const regex = new RegExp(`^${key}=.*$`, 'm');
-      if (regex.test(content)) {
-        content = content.replace(regex, `${key}=${value}`);
-      } else {
-        content += `\n${key}=${value}\n`;
-      }
+function assertValidEnvKey(key: string): void {
+  if (!ENV_KEY_PATTERN.test(key)) {
+    throw new Error(`"${key}" is not a valid environment variable name.`);
+  }
+}
+
+export function writeEnvVar(filePath: string, key: string, value: string): void {
+  assertValidEnvKey(key);
+  if (/[\r\n]/.test(value)) {
+    throw new Error(`Refusing to write ${key}: the value contains a newline.`);
+  }
+
+  let content = '';
+  if (existsSync(filePath)) {
+    content = readFileSync(filePath, 'utf8');
+    const lines = content.split('\n');
+    // Match by line prefix rather than interpolating the key into a RegExp: an
+    // unescaped key could otherwise be read as a pattern.
+    const index = lines.findIndex((line) => line.startsWith(`${key}=`));
+    if (index === -1) {
+      if (content.length > 0 && !content.endsWith('\n')) content += '\n';
+      content += `${key}=${value}\n`;
     } else {
-      content = `${key}=${value}\n`;
+      lines[index] = `${key}=${value}`;
+      content = lines.join('\n');
     }
-    writeFileSync(filePath, content);
+  } else {
+    content = `${key}=${value}\n`;
+  }
+
+  try {
+    writePrivateFile(filePath, content);
   } catch (err) {
     console.error(`Could not write to ${filePath}: ${(err as Error).message}`);
   }
