@@ -45,6 +45,7 @@
     "lint": "eslint src --ext .ts",
     "watch": "tsup src/main.ts --watch",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
