@@ -358,7 +358,7 @@ complete. A verdict obeys the same identity rule: the attempt stays live while
 its summary is read, and the verdict lands only if that attempt is still the
 task's current one, so a cancel, retry, mark complete, stop or plan load in that
 window is never overwritten by a stale verdict.
-The working directory is decided in one place (`resolveAttemptCwd`): the
+The working directory is decided in one place (`IsolationRunController.attemptCwd`): the
 workspace root, or in an isolated run the worktree `WorktreeIsolation.prepare`
 made for the attempt. A passed verdict keeps the attempt live through its merge,
 so the task completes — and frees its dependents — only once its work is on the
@@ -554,6 +554,23 @@ plan: a fork must not copy it.
 A record saved in the ADR-0013 shape (the refs on the run itself, one `worktree`
 per task) is converted to a group of one when plan state is loaded, so a session
 saved by 0.4.23 resumes and hands off as it would have.
+The record and the open run's lifecycle are owned by the *isolation run
+controller*.
+
+**Isolation run controller** (`IsolationRunController`) — the module between
+TaskOrchestrator and `WorktreeIsolation` that owns an *isolation run*'s
+lifecycle: deciding at a run's start whether it isolates, shares the workspace
+root or is a *blocked run*; continuing a plan's run or minting a new one; each
+attempt's working directory; releasing a worktree once any merge in flight
+settles; closing the run with its *isolation handoff*; and Merge all, clean-up
+and discard afterwards. It holds the run record, the open run's mode, the
+parked start of a blocked run and the resolver links, and reports through a
+listener (changed, blocked, handoff, notice, worktrees about to go) — it never
+emits orchestrator events or schedules work itself. A blocked start is handed
+back to the caller to replay. The scheduler reads isolation state only through
+it (`openRecord`, `isolating`, `current`). Git stays in `WorktreeIsolation`.
+*Avoid:* "isolation run" for the controller — that is the record it holds;
+"WorktreeIsolation" for it — that is the git layer beneath it.
 
 **Isolation handoff** — the end of an isolated run: for each repo, its integration
 branch and base ref, and the tasks that landed, broadcast as `isolation_handoff`. What
