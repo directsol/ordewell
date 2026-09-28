@@ -747,6 +747,11 @@ export class TaskOrchestrator {
   private async cancelAttempt(taskId: string, worktree: { keep: boolean }): Promise<void> {
     const task = this.store.get(taskId);
     if (!task) return;
+    // A cancel that arrives after the task already settled (its verdict
+    // landed and the attempt was torn down) has nothing left to cancel. Without
+    // this guard it would still revert a completed/failed task to 'pending',
+    // silently discarding a verdict that already landed.
+    if (!this.attempts.has(taskId) && task.status !== 'in_progress') return;
     const ended = this.endAttempt(taskId, 'cancel');
     this.store.markPending(taskId);
     this.onHold.add(taskId);

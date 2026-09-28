@@ -1201,6 +1201,26 @@ describe('cancelTask', () => {
 
     expect(orchestrator.hasLiveWork).toBe(false);
   });
+
+  it('is a no-op when the verdict already landed before the cancel arrives', async () => {
+    const { sessions, spawn } = sessionRunner();
+    const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
+    const task = createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' });
+    orchestrator.loadPlan([task]);
+    await orchestrator.forceStartTask('t1');
+
+    sessions[0].emitOutput('<<<ORDEWELL_DONE_mk-1>>>');
+    sessions[0].emitExit(-1);
+    await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
+
+    // A cancel for this task raced with its verdict and lost — it arrives
+    // after the task already settled and landed. It must not revert a
+    // completed task back to 'pending'.
+    await orchestrator.cancelTask('t1');
+
+    expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed');
+    expect(orchestrator.storeInstance.get('t1')!.verdict?.outcome).toBe('pass');
+  });
 });
 });
 

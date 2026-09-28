@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A session saves into the workspace after Execute, not the extension
+  host's own directory.** Approving a plan had handed the session an empty
+  workspace path, so every later save under that plan landed in a stray
+  `.ordewell` folder instead of the one you opened.
+- **The usage-limit pause message mentions a kept worktree only when there is
+  one.**
+
 ## [0.5.5] — 2026-09-28
 
 ### Added

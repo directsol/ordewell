@@ -8,6 +8,58 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **CI runs the VS Code integration test and reports coverage.** Every push
+  now builds a real VS Code, drives the extension against a synthetic runner,
+  and prints each package's statement/branch/function coverage in the job's
+  summary — report-only, so it never fails a build on a percentage.
+
+### Changed
+
+- **The plan saves to disk the moment a task settles**, not only at certain
+  points in a run, so a crash or a closed session loses less: reopening finds
+  the last task's verdict already on disk.
+- **TaskOrchestrator and Session were split into focused modules** — isolation
+  and conflict repair, the runner-exit classifier, message queue and readiness,
+  and the wiring that builds them — with no change to what a run does. Session
+  itself is down to one composition root.
+
+### Fixed
+
+- **An error from the UI while a task starts no longer corrupts that task.**
+  Observers (the host broadcast, session persistence) could throw during
+  `startTask`; one throwing observer now only fails to notify — the task keeps
+  running, its worktree is not torn down, and the next ready task still
+  starts.
+- **A task that fails to spawn now stops the runner it partially started.**
+  Previously only cancel, retry, Mark complete and stop did; a failed spawn
+  could leave the runner process alive and the verifier still watching a
+  worktree that was already deleted.
+- **Cancelling a task that already finished no longer reverts it.** A cancel
+  that arrives after the task's verdict has already landed — a race, most
+  often when a task finishes right as you cancel it — is now a no-op instead
+  of silently putting a completed task back to pending and discarding its
+  verdict.
+- **An unlisted command-runner is refused, not asked.** `xargs -a list rm`,
+  `awk 'BEGIN{system(...)}'` and similar could land at the ask tier with a
+  binary-wide remembered grant, contradicting ADR-0008's "refuse is not
+  promptable." This narrows the planner's exploration envelope
+  ([ADR-0008](docs/adr/0008-planner-exploration-envelope.md)), it does not
+  widen it.
+- **Provider keys and the daemon token are written 0600**, even when they
+  replace an existing file created with looser permissions — a plain write
+  over an existing file keeps that file's old mode, so the write now goes
+  through a fresh temp file renamed over the target instead.
+- **The usage-limit pause message mentions a kept worktree only when there is
+  one.** A paused task in a run without isolation has no worktree, so it is
+  no longer told it does.
+- **A failed planner turn rolls back even when a task settled mid-turn.**
+  Save-on-verdict's background save could bump the same counter the rollback
+  guard reads, so a turn that failed right after a task finished kept its
+  unanswered message in memory and on disk. Execution-event saves no longer
+  block the undo.
+
 ## [0.5.5] — 2026-09-28
 
 ### Added
