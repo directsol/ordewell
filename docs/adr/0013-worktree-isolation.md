@@ -176,8 +176,12 @@ first draft of the wiring was wrong, and what was chosen instead:
 - **The other outcomes.** `conflict` → the task is `awaiting_user`, worktree
   and refs kept, dependents wait. `failed` (git refused, e.g. a hook) → the task
   is `failed` and the run halts exactly as for a failed verdict, refs kept. A
-  failed verdict and a stop keep the worktree (`keep: true`); cancel, retry,
-  removal from the plan and a failed spawn remove it. A retry prepares afresh
+  failed verdict, a stop and a cancel keep the worktree (`keep: true`); retry,
+  removal from the plan and a failed spawn remove it. (Cancel removed it at
+  first; amended 2026-09-28 — a runner is often cancelled because it looked
+  stuck after finishing, and removing its worktree took the finished work with
+  it. The next attempt's prepare replaces a kept worktree, so nothing piles up.)
+  A retry prepares afresh
   from the integration tip when it next starts. Mark complete is a passed
   verdict the user vouches for, so it integrates too — the way out of a stuck
   task whose work is sitting in its worktree, and of a conflict resolved by hand.

@@ -157,15 +157,21 @@ describe('TaskOrchestrator with worktree isolation', () => {
     expect(spawnedCwd('t1')).toBe('/fake-worktrees/run1/1-t1');
   });
 
-  it('removes a cancelled task\'s worktree and branch', async () => {
+  it('keeps a cancelled task\'s worktree, so Mark complete can still land its work', async () => {
     const { orchestrator, isolation } = setup();
     orchestrator.loadPlan([task('t1', 1)]);
     await orchestrator.approveReview();
 
     await orchestrator.cancelTask('t1');
 
-    expect(isolation.calls).toContainEqual({ op: 'release', taskId: 't1', keep: false });
-    expect(orchestrator.getTaskIsolation('t1')).toEqual({ state: 'none' });
+    expect(isolation.calls).toContainEqual({ op: 'release', taskId: 't1', keep: true });
+    expect(isolation.calls).not.toContainEqual({ op: 'release', taskId: 't1', keep: false });
+    expect(orchestrator.storeInstance.get('t1')!.status).toBe('pending');
+
+    await orchestrator.markTaskComplete('t1');
+
+    expect(isolation.taskIdsFor('integrate')).toEqual(['t1']);
+    expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed');
   });
 
   it('removes the worktree of a task that leaves the plan', async () => {

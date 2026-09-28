@@ -62,7 +62,7 @@ opt out.
 15. As a developer, I want an explicit "resolve as a task" action for a conflict, so that an autonomous run can continue without inventing truth.
 16. As a developer, I want a failed task's worktree kept for inspection, so that I can see exactly what the runner did.
 17. As a developer, I want a retry to start fresh from the current integration tip, so that a retried task sees everything its predecessors have already integrated.
-18. As a developer, I want cancelling a task to remove its worktree and branch, so that abandoned work does not accumulate on disk.
+18. As a developer, I want cancelling a task to keep its worktree and branch until its next attempt replaces them, so that work a runner finished before I cancelled it can still land. *(Amended 2026-09-28; it first said cancel removes them.)*
 19. As a developer, I want removing a task from the plan to clean up its isolation, so that the plan and the filesystem stay in agreement.
 20. As a developer using "Run task" or "Force start" on a single task, I want the same isolation guarantees, so that manual execution is not a second-class path.
 21. As a developer, I want the plan's end-of-run handoff to show me the integration branch and what landed on it, so that I know exactly what to review.
@@ -174,7 +174,8 @@ one-line notice. The `fakeConfig` test helper gains the field.
 **Lifecycle.** Worktrees are created lazily when a task actually starts.
 Successful integration removes the worktree and deletes the task branch.
 Verification failure keeps both for inspection; a retry recreates fresh from the
-current integration tip. Cancel, release, and task removal destroy them.
+current integration tip. Cancel keeps them too (amended 2026-09-28, see
+ADR-0013); release and task removal destroy them.
 Orphans are pruned when a session is adopted. "Discard run" removes all of a
 run's worktrees and task branches but keeps the integration branch until it is
 explicitly discarded.

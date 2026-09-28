@@ -978,28 +978,37 @@ export class TaskOrchestrator {
    * Cancel a running (or scheduled) task: kill its session and return it to
    * 'pending' — "not executed". The task is put on hold so the scheduler
    * doesn't immediately restart it; Retry / Force Start release the hold.
+   *
+   * The attempt's worktree is kept, as a stopped or failed one is: a runner is
+   * often cancelled because it looked stuck after doing the work, and Mark
+   * complete can still land that work. The next attempt replaces it.
    */
   async cancelTask(taskId: string): Promise<void> {
+    await this.cancelAttempt(taskId, { keep: true });
+  }
+
+  private async cancelAttempt(taskId: string, worktree: { keep: boolean }): Promise<void> {
     const task = this.store.get(taskId);
     if (!task) return;
     const ended = this.endAttempt(taskId, 'cancel');
     this.store.markPending(taskId);
     this.onHold.add(taskId);
     this.emit('onTaskChanged');
-    await this.releaseWorktree(taskId, { keep: false }, ended?.integration);
+    await this.releaseWorktree(taskId, worktree, ended?.integration);
     await this.tick();
   }
 
   /**
    * Let go of a task that is leaving the plan. A live runner is cancelled
-   * through {@link cancelTask}; a spawn still in flight just loses its attempt,
+   * as {@link cancelTask} does, but its worktree goes: no task is left to land
+   * it into. A spawn still in flight just loses its attempt,
    * which is what makes {@link startTask} kill the session it is about to
    * receive. The id's cross-attempt bookkeeping goes too — a hold or retry
    * count kept for a task that no longer exists would be inherited by nothing.
    */
   async releaseTask(taskId: string): Promise<void> {
     const phase = this.attempts.get(taskId)?.phase;
-    if (phase === 'running' || phase === 'integrating') await this.cancelTask(taskId);
+    if (phase === 'running' || phase === 'integrating') await this.cancelAttempt(taskId, { keep: false });
     else {
       this.endAttempt(taskId, 'release');
       await this.releaseWorktree(taskId, { keep: false });

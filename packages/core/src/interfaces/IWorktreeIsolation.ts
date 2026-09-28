@@ -359,9 +359,9 @@ export interface IWorktreeIsolation {
   integrate(task: Task, run: IsolationRun, persist?: () => void): Promise<IsolationOutcome>;
 
   /**
-   * `keep: false` removes the task's worktree, branch and record (cancel, task
+   * `keep: false` removes the task's worktree, branch and record (retry, task
    * removal). `keep: true` leaves the worktree and branch exactly as they are
-   * for inspection — a failed verdict — and only moves the task off `active`,
+   * for inspection — a failed verdict, a stop, a cancel — and only moves the task off `active`,
    * so a crash-recovery prune does not sweep it away; a repair it ends leaves
    * the task `conflict`, as it was before the repair. Takes the run rather than
    * a bare task id: ids are only unique within one plan, and one daemon serves
