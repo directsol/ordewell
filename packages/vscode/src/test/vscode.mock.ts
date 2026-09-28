@@ -132,4 +132,5 @@ export const window = {
 
 export const commands = {
   executeCommand: vi.fn(async () => undefined) as never,
+  registerCommand: vi.fn(() => ({ dispose: vi.fn() })) as never,
 };
