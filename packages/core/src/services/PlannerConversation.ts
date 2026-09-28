@@ -159,6 +159,7 @@ export interface TranscriptSnapshot {
   readonly history: ConversationMessage[] | undefined;
   readonly researchLog: ResearchLogEntry[] | undefined;
   readonly persisted: number;
+  readonly savedInBackground: number;
 }
 
 export interface ReplyOptions {
@@ -186,6 +187,8 @@ export interface ReplyOptions {
 export class PlannerConversation {
   /** Bumped on every persist, so a rollback can tell whether its writes already reached disk. */
   private persisted = 0;
+  /** Saves an execution event made while a turn may be in flight; see {@link restore}. */
+  private savedInBackground = 0;
   private turnsInFlight = 0;
   private compacting = false;
   private openTurnId: string | null = null;
@@ -229,7 +232,13 @@ export class PlannerConversation {
   snapshot(): TranscriptSnapshot | null {
     const plan = this.host.plan();
     if (!plan) return null;
-    return { plan, history: plan.conversationHistory, researchLog: plan.researchLog, persisted: this.persisted };
+    return {
+      plan,
+      history: plan.conversationHistory,
+      researchLog: plan.researchLog,
+      persisted: this.persisted,
+      savedInBackground: this.savedInBackground,
+    };
   }
 
   /**
@@ -237,17 +246,30 @@ export class PlannerConversation {
    * was persisted since, because then memory already matches disk and every
    * surface, and undoing it would erase work the user has seen land. Also a
    * no-op once a different plan has been adopted.
+   *
+   * A background save (a task settling mid-turn) wrote the turn's writes to
+   * disk without landing anything the user saw, so it does not stop the undo;
+   * the undo is saved in turn, or a reload would bring the writes back.
    */
   restore(snapshot: TranscriptSnapshot): boolean {
     if (this.host.plan() !== snapshot.plan || this.persisted !== snapshot.persisted) return false;
-    snapshot.plan.conversationHistory = snapshot.history;
-    snapshot.plan.researchLog = snapshot.researchLog;
+    const undo = (): boolean => {
+      snapshot.plan.conversationHistory = snapshot.history;
+      snapshot.plan.researchLog = snapshot.researchLog;
+      return true;
+    };
+    if (this.savedInBackground === snapshot.savedInBackground) undo();
+    else this.host.mutate(undo, () => {});
     return true;
   }
 
-  /** The host calls this after every persist. */
-  markPersisted(): void {
-    this.persisted++;
+  /**
+   * The host calls this after every persist. `background` is a save no call
+   * of the user's made — an execution event landing mid-turn.
+   */
+  markPersisted(opts: { background?: boolean } = {}): void {
+    if (opts.background) this.savedInBackground++;
+    else this.persisted++;
   }
 
   /**

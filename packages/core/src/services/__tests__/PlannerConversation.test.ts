@@ -109,6 +109,31 @@ describe('PlannerConversation transcript', () => {
     expect(state.plan!.conversationHistory).toHaveLength(3);
   });
 
+  // A task settling mid-turn saves the whole plan, the turn's unsent message
+  // with it. That save is not the turn landing, so it must not keep the turn
+  // from being taken back — and disk has to follow memory back once it is.
+  it('restore still undoes a turn a background save caught in flight, and saves the undo', () => {
+    const { conversation, state } = fakeHost(fakeAi());
+    const snap = conversation.snapshot()!;
+
+    conversation.append('user', 'unsent', { timestamp: '2026-01-01T00:00:02Z' });
+    conversation.markPersisted({ background: true });
+
+    expect(conversation.restore(snap)).toBe(true);
+    expect(state.plan!.conversationHistory).toHaveLength(2);
+    expect(state.persists).toBe(1);
+  });
+
+  it('restore saves nothing when no save caught the turn', () => {
+    const { conversation, state } = fakeHost(fakeAi());
+    const snap = conversation.snapshot()!;
+
+    conversation.append('user', 'unsent', { timestamp: '2026-01-01T00:00:02Z' });
+
+    expect(conversation.restore(snap)).toBe(true);
+    expect(state.persists).toBe(0);
+  });
+
   it('restore never writes a snapshot onto a plan adopted after it was taken', () => {
     const { conversation, state } = fakeHost(fakeAi());
     const snap = conversation.snapshot()!;

@@ -488,16 +488,16 @@ export class Session {
       // Saved the moment it settles: a shared run has no run record to save
       // it mid-run, so a crash would otherwise lose every verdict since the
       // last Session operation.
-      onTaskSettled: () => this.persist(),
+      onTaskSettled: () => this.persist({ background: true }),
       onIsolationChanged: () => {
         // The run record names branches and worktrees on disk, so it is saved
         // as it changes rather than at the end: a crash must still find them.
-        this.persist();
+        this.persist({ background: true });
         relay.onIsolationChanged();
       },
       onExecutionComplete: () => {
         relay.onExecutionComplete();
-        this.persist();
+        this.persist({ background: true });
       },
     };
   }
@@ -513,8 +513,12 @@ export class Session {
     if (this.plan) this.plan.tasks = this.store.snapshot();
   }
 
-  /** Persists PlanStore state to disk. PlanStore is the single authority. */
-  private persist(): void {
+  /**
+   * Persists PlanStore state to disk. PlanStore is the single authority.
+   * `background`: an execution event's save, which may land in the middle of a
+   * planner turn without settling it (see {@link PlannerConversation.restore}).
+   */
+  private persist(opts: { background?: boolean } = {}): void {
     if (!this.plan) return;
     this.events.flushSubagentRuns(this.plan);
     this.syncPlanTasks();
@@ -522,7 +526,7 @@ export class Session {
     this.plan.plannerUsage = this.usage.snapshot();
     this.plan.lastUpdated = new Date().toISOString();
     this.save(this.plan, this.goal, this.workspace, this.currentSessionId);
-    this.conversation.markPersisted();
+    this.conversation.markPersisted(opts);
   }
 
   /** A new plan on a long-lived Session gets its own persisted identity (unless the host fixed one). */
