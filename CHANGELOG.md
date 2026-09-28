@@ -8,6 +8,8 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-09-28
+
 ### Added
 
 - **Planner replies stream as they are written.** Every planner — the API
@@ -49,8 +51,47 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
   offers an expand-all button for the conversation.
 - **The TUI's piped research log matches the chat pane.** Steps print as
   `Read(src/auth.ts)` rather than `read_file auth.ts`.
+- **Adding a task mid-run applies at once.** A planner edit waits for the
+  running batch only when it reaches a task a runner is executing. Added
+  tasks, and edits to tasks that are not running, land in the plan
+  immediately while the running tasks carry on.
+- **`S` stops a run in the TUI.** The plan pane's footer names it. A run with
+  no task running reads as idle, so Execute can start it again.
+- **Cancelling a task keeps its worktree.** Runners are often cancelled
+  because they look stuck after finishing, so the work is no longer thrown
+  away. Mark complete can still land it, and the next attempt replaces it.
+  Removing the task from the plan still discards it.
 
 ### Fixed
+
+- **Finished tasks stay finished when the planner rewrites the plan.** A
+  planner that answered "add a task" with the whole plan could send finished
+  tasks back as pending, and they ran again. That happened both when nothing
+  was running and when the change had been queued until the batch finished.
+  A task that is done, running or waiting on you now keeps its status and
+  content whatever the planner writes, and one the planner leaves out is put
+  back. A queued change is applied once, and a reload no longer applies it
+  again. A queued change the planner cannot apply is reported, and the run
+  continues.
+- **A task whose terminal was closed no longer counts as running forever.**
+  Closing a task's tmux window, or losing the tmux server, left the task and
+  its run "executing" with nothing left to finish them. The task now gets its
+  verdict from what the runner printed: done if the completion marker is
+  there, failed if not.
+- **A runner that hits its usage limit pauses its task instead of failing
+  it.** The task waits on you with its worktree kept, so you can retry once
+  the limit resets. The run holds rather than spending the same limit on the
+  next tasks.
+- **A task that passed but could not be merged waits on you.** It no longer
+  shows as failed, which contradicted its completion marker. The notice says
+  what stopped the merge, such as a worktree that is gone, and the work is
+  kept.
+- **Reopening a plan keeps a worktree that still holds unmerged work.** The
+  crash-recovery cleanup deleted every worktree still marked active, including
+  one whose runner was still working under another host. It now keeps any
+  that holds commits or edits, and says which tasks they belong to.
+- **One "Started" notice per task in the TUI.** A task start could be
+  announced several times.
 
 - **The planner conversation draws each turn once.** While a run is going, a
   planner turn reaches the surfaces on two subscriptions at the same time; the

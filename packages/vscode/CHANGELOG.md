@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-09-28
+
 ### Added
 
 - **The planner chat streams and shows what it used.** A planner's reply text
@@ -26,6 +28,15 @@
   text stays readable.
 - **A check you marked complete reads "Marked by you"**, not "Model Review" —
   your decision is no longer presented as a model verdict.
+- **Finished tasks stay finished when the planner rewrites the plan.** A
+  planner that answered "add a task" with the whole plan could send finished
+  tasks back to pending, and they ran again. A task that is done, running or
+  waiting on you now keeps its status whatever the planner writes, and an
+  applied queued change is not applied again when the window reloads.
+- **A usage limit or a failed merge no longer marks a finished task
+  failed.** The task waits on you with its work kept, and the notice says why.
+- **Cancelling a task keeps its worktree**, so Mark complete can still land
+  work the runner finished before you cancelled it.
 
 ## [0.5.4] — 2026-09-26
 
