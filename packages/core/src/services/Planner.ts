@@ -174,11 +174,16 @@ export class Planner {
       req.autonomousDefault ?? true,
     );
 
+    // A finished task echoed back is not a request to run it again — the
+    // caller keeps finished work whatever comes back — so it is dropped here
+    // rather than spending a repair round, or the whole edit, on refusing it.
+    const finished = new Set(req.executionLog.filter((t) => t.status === 'completed').map((t) => t.id));
+
     return repairLoop<Task[], ModifyDuringExecutionResult>({
       first: () => send(),
       resend: (corrective) => send(corrective),
       interpret: (tasks) => {
-        const coerced = coerceAssignments(tasks, allowlist, req.runners, req.modelsByRunner);
+        const coerced = coerceAssignments(tasks.filter((t) => !finished.has(t.id)), allowlist, req.runners, req.modelsByRunner);
         const validation = validatePlanModification({
           executionLog: req.executionLog,
           oldPending: req.pendingTasks,

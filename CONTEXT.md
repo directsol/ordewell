@@ -16,8 +16,8 @@ This file is the vocabulary the rest of the documentation is written in (see
 sets, and `planRunners`. Owns structural CRUD (`add`/`remove`/`update`/`merge`/
 `split`), status mutations (`markCompleted`/`markFailed`/
 `markInProgress`/`retry`), the named run-preparation op (`resetForRun` — flip
-AI tasks to approved, preserving completed ones unless the plan is a fresh
-commit), runner-set validation, and the `rebuild` internal seam. Structural
+AI tasks to approved, preserving completed ones unless the plan was freshly
+generated), runner-set validation, and the `rebuild` internal seam. Structural
 removals prune stale completed/failed entries; `removeFromActive` deliberately
 keeps them so a completed task that left the active list still satisfies its
 dependents. The TaskOrchestrator is a
@@ -683,6 +683,24 @@ separate rule implementations — see below.
 a type flip, and a model/mode assignment are all validated by
 `validateTaskEdit` — the one guard the pickers, the API and the planner all
 read, `canSetDependencies` included as one of the checks it runs.
+
+**Planner rewrite** (`keepExecutionState(current, rewrite)`) — a planner
+answering an edit with a whole task list instead of task ops: a `plan` turn on
+a plan that already exists, or the between-batch drain of queued edits
+(`modifyDuringExecution`). The rewrite is laid over the plan's execution
+state, never swapped in for it — the same rule `applyTaskOps` enforces, for
+the path that has no ops to check. A *settled* task (`completed`,
+`in_progress`, `awaiting_user`) is kept exactly as it stands where the rewrite
+names it and put back beside its old neighbour where the rewrite leaves it out;
+every other task keeps its status, and one the rewrite adds starts `pending`. A
+planner restates tasks, it never witnessed one run, so no status is ever read
+from a rewrite. Without this, a planner that answered "add a task" with the
+full plan echoed finished tasks as `pending` and they ran again. The drain
+shows the planner only unfinished tasks as pending and every finished one —
+earlier runs' too — in the execution log.
+*Avoid:* "regenerating" the plan for an edit — only `generatePlan` and the
+first plan commit start from zero, and only `rearm` or Mark not done re-runs a
+finished task.
 
 **TaskEditValidator** (`validateTaskEdit(actor, tasks, taskId, changes,
 catalog?)`) — the one checker behind both edit paths described above:

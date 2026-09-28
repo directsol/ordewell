@@ -606,6 +606,49 @@ export function renumberTasks(tasks: Task[]): Task[] {
   }));
 }
 
+/** Done, running, or held for the user: execution state only a runner or the user can change. */
+const SETTLED_STATUSES: ReadonlySet<TaskStatus> = new Set<TaskStatus>(['completed', 'in_progress', 'awaiting_user']);
+
+function holdsSettledWork(task: Task): boolean {
+  return SETTLED_STATUSES.has(task.status) || (task.subtasks ?? []).some(holdsSettledWork);
+}
+
+/**
+ * Lay a planner-written task list over the plan it rewrites without letting it
+ * change execution state. A planner restates tasks; it never witnessed one run,
+ * so the status it writes is not evidence. A settled task is kept exactly as
+ * it stands wherever the rewrite names it, and put back beside its old
+ * neighbour where the rewrite leaves it out. Every other task keeps the status
+ * it had; a task the rewrite adds starts pending.
+ */
+export function keepExecutionState(current: Task[], rewrite: Task[]): Task[] {
+  const existing = new Map(flattenTasks(current).map((t) => [t.id, t]));
+  const named = new Set(flattenTasks(rewrite).map((t) => t.id));
+
+  const overlay = (tasks: Task[], was: Task[]): Task[] => {
+    const result = tasks.map((t): Task => {
+      const prior = existing.get(t.id);
+      if (prior && SETTLED_STATUSES.has(prior.status)) return { ...prior };
+      return {
+        ...t,
+        status: prior?.status ?? 'pending',
+        verdict: prior?.verdict,
+        outputSummary: prior?.outputSummary,
+        subtasks: overlay(t.subtasks ?? [], prior?.subtasks ?? []),
+      };
+    });
+    was.forEach((left, i) => {
+      if (named.has(left.id) || !holdsSettledWork(left)) return;
+      const neighbour = was.slice(0, i).reverse().find((t) => result.some((r) => r.id === t.id));
+      const at = neighbour ? result.findIndex((r) => r.id === neighbour.id) + 1 : 0;
+      result.splice(at, 0, { ...left });
+    });
+    return result;
+  };
+
+  return renumberTasks(overlay(rewrite, current));
+}
+
 export function validateModifiedPlan(original: Task[], modified: Task[]): PlanModificationWarnings {
   const allOriginal = flattenTasks(original);
   const allModified = flattenTasks(modified);

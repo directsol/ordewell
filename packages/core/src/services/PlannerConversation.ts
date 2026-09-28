@@ -399,6 +399,19 @@ export class PlannerConversation {
     ].join('\n'), { kind: 'system' });
   }
 
+  /**
+   * Queued edits the between-batches drain could not apply. Recorded so the
+   * transcript does not go on promising a change that never landed. Call
+   * inside the host's mutation ritual.
+   */
+  recordQueuedEditsFailed(messages: string[], reason: string): void {
+    this.append('assistant', [
+      'Queued change NOT applied — the plan is unchanged:',
+      ...messages.map((m) => `- ${m}`),
+      `Reason: ${reason}`,
+    ].join('\n'), { kind: 'system' });
+  }
+
   /** Open the conversation on a fresh plan: the goal is its first message. */
   async start(goal: string, opening: ConversationOpening, signal?: AbortSignal): Promise<LegacyPlanState> {
     return this.userTurn(goal, signal, async (userTurn) => {

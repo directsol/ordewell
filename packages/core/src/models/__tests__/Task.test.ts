@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createTask, createEmptyPlan, migrateLegacyPlan, migratePlanState, taskOrderLabel, resolveOrderLabel, flattenTasksWithParents } from '../Task';
+import { createTask, createEmptyPlan, migrateLegacyPlan, migratePlanState, taskOrderLabel, resolveOrderLabel, flattenTasksWithParents, keepExecutionState } from '../Task';
 import type { LegacyPlanState, PlanState, Message, TaskSnapshot } from '../Task';
 
 describe('LegacyPlanState conversation fields', () => {
@@ -444,5 +444,57 @@ describe('migratePlanState', () => {
       expect(result.goal).toBe('fix it');
       expect(result.pendingTasks).toEqual([task]);
     }
+  });
+});
+
+describe('keepExecutionState', () => {
+  const done = (id: string, order: number) => createTask({ id, order, title: id.toUpperCase(), prompt: `do ${id}`, status: 'completed' });
+  const todo = (id: string, order: number) => createTask({ id, order, title: id.toUpperCase(), prompt: `do ${id}` });
+
+  it('keeps a settled task exactly as it stands wherever the rewrite names it', () => {
+    const running = createTask({ id: 'b', order: 2, title: 'B', prompt: 'do b', status: 'in_progress' });
+    const held = createTask({ id: 'c', order: 3, title: 'C', prompt: 'do c', status: 'awaiting_user' });
+    const rewrite = [
+      { ...done('a', 1), status: 'pending' as const, prompt: 'placeholder' },
+      { ...running, status: 'pending' as const, title: 'B v2' },
+      { ...held, status: 'pending' as const },
+    ];
+
+    const result = keepExecutionState([done('a', 1), running, held], rewrite);
+
+    expect(result.map((t) => [t.id, t.status, t.title, t.prompt])).toEqual([
+      ['a', 'completed', 'A', 'do a'],
+      ['b', 'in_progress', 'B', 'do b'],
+      ['c', 'awaiting_user', 'C', 'do c'],
+    ]);
+  });
+
+  it('puts a settled task the rewrite left out back beside its old neighbour', () => {
+    const current = [done('a', 1), todo('b', 2), done('c', 3), todo('d', 4)];
+    const rewrite = [todo('b', 1), todo('d', 2), todo('e', 3)];
+
+    const result = keepExecutionState(current, rewrite);
+
+    expect(result.map((t) => [t.id, t.order])).toEqual([['a', 1], ['b', 2], ['c', 3], ['d', 4], ['e', 5]]);
+  });
+
+  it('lets the rewrite drop or edit a task that has not run', () => {
+    const result = keepExecutionState([done('a', 1), todo('b', 2), todo('c', 3)], [{ ...todo('c', 1), title: 'C v2' }]);
+
+    expect(result.map((t) => [t.id, t.title])).toEqual([['a', 'A'], ['c', 'C v2']]);
+  });
+
+  it('never takes a status from the rewrite: a planner cannot mark a task done', () => {
+    const current = [createTask({ id: 'a', order: 1, status: 'failed' }), todo('b', 2)];
+    const rewrite = [
+      { ...current[0], status: 'pending' as const },
+      { ...todo('b', 2), status: 'completed' as const },
+      createTask({ id: 'new', order: 3, status: 'completed', verdict: { outcome: 'pass', reason: 'said so', checks: [], decidedAt: '' } }),
+    ];
+
+    const result = keepExecutionState(current, rewrite);
+
+    expect(result.map((t) => [t.id, t.status])).toEqual([['a', 'failed'], ['b', 'pending'], ['new', 'pending']]);
+    expect(result[2].verdict).toBeUndefined();
   });
 });

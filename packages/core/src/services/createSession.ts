@@ -29,7 +29,7 @@ import { saveSession } from '../utils/sessionStore';
 import { PlannerUsageLedger } from './PlannerUsage';
 import { mintSessionId } from '../utils/sessionId';
 import { savePrdMarkdown, extractPrdBlock } from '../utils/prdStore';
-import { type DiscoveredModel, type LegacyPlanState, type PlanState, type ResearchLogEntry, type ResearchStep, type SubagentLogEntry, type Task, type TaskSnapshot, type RunnerId, type ResearchProgress } from '../models/Task';
+import { flattenTasks, keepExecutionState, type DiscoveredModel, type LegacyPlanState, type PlanState, type ResearchLogEntry, type ResearchStep, type SubagentLogEntry, type Task, type TaskSnapshot, type RunnerId, type ResearchProgress } from '../models/Task';
 import type { AiProvider, IConfig } from '../interfaces/IConfig';
 import type { IFileSystem } from '../interfaces/IFileSystem';
 import type { INotification } from '../interfaces/INotification';
@@ -950,19 +950,26 @@ export class Session {
 
   /**
    * Load planner-produced tasks, coerced to the allowlist read live — it may
-   * have changed since planning started. An edit on an armed scheduler is
+   * have changed since planning started. Tasks adopted on an armed scheduler are
    * reconciled rather than reloaded: `loadPlan` clears the on-hold set and the
    * review approval, so a task the user cancelled would be re-armed and
    * re-spawned by the re-tick that follows.
+   *
+   * A whole-plan commit is the planner restating every task, so it is laid
+   * over the plan's execution state rather than replacing it: a planner that
+   * answers "add a task" with the full plan must not undo the work already
+   * done. Task ops need no overlay — their applier refuses to touch settled
+   * tasks, and `rearm`, the one op meant to change a status, must stand.
    */
   private adoptPlannerTasks(tasks: Task[], how: 'edit' | 'commit'): number {
     const runners = this.plan!.runners;
-    const coerced = coerceAssignments(tasks, this.allowlist(), runners, this.models());
-    if (how === 'edit' && this.orchestrator.isRunning) {
+    let coerced = coerceAssignments(tasks, this.allowlist(), runners, this.models());
+    if (how === 'commit') coerced = keepExecutionState(this.store.planTasks, coerced);
+    if (this.orchestrator.isRunning) {
       this.orchestrator.reconcilePlan(coerced, runners);
     } else {
       this.orchestrator.loadPlan(coerced, runners);
-      this.store.resetForRun(how === 'commit' ? { preserveCompleted: false } : undefined);
+      this.store.resetForRun();
     }
     return coerced.length;
   }
@@ -1069,8 +1076,12 @@ export class Session {
     if (messages.length === 0) return;
 
     this.orchestrator.clearQueuedMessages();
+    // The saved queue goes with the live one, or a reload restores the edit
+    // and it is applied a second time.
+    if (this.plan) this.plan.queuedMessages = [];
 
     const batchText = messages.map((m) => m.text).join('\n');
+    const texts = messages.map((m) => m.text);
     const activeSessions = new Map(
       [...this.orchestrator.activeSessionMap.entries()].map(([taskId, sessionId]) => [
         taskId,
@@ -1078,28 +1089,44 @@ export class Session {
       ])
     );
 
-    const modelsByRunner = await this.modelResolver.modelsForRunners(this.config.enabledRunners);
-    const runnerModes = this.runnerModesFor(this.plan?.runners ?? ['claude-code']);
-    const { modelAllowlist } = this.settingsFn();
+    try {
+      const modelsByRunner = await this.modelResolver.modelsForRunners(this.config.enabledRunners);
+      const runnerModes = this.runnerModesFor(this.plan?.runners ?? ['claude-code']);
+      const { modelAllowlist } = this.settingsFn();
 
-    const result = await this.planner.modifyDuringExecution({
-      executionLog: this.store.getExecutionLog(),
-      pendingTasks: this.store.planTasks,
-      activeSessions,
-      userMessage: batchText,
-      modelsByRunner,
-      runners: this.plan?.runners ?? ['claude-code'],
-      runnerModes,
-      autonomousDefault: this.config.autonomousMode,
-      perRunnerAllowlist: modelAllowlist,
-      isolatedExecution: await this.orchestrator.plannerIsolation(),
-    });
+      // The prompt calls this list the tasks not yet executed, so it must be
+      // exactly that: shown finished tasks as pending, a planner hands them
+      // back pending. Finished work reaches it through the log instead — all
+      // of it, since the per-run log forgets what earlier runs finished.
+      const result = await this.planner.modifyDuringExecution({
+        executionLog: this.finishedWork(),
+        pendingTasks: this.store.planTasks.filter((t) => t.status !== 'completed'),
+        activeSessions,
+        userMessage: batchText,
+        modelsByRunner,
+        runners: this.plan?.runners ?? ['claude-code'],
+        runnerModes,
+        autonomousDefault: this.config.autonomousMode,
+        perRunnerAllowlist: modelAllowlist,
+        isolatedExecution: await this.orchestrator.plannerIsolation(),
+      });
 
-    this.mutatePlan(() => {
-      this.orchestrator.reconcilePlan(result.pendingTasks, this.plan!.runners);
-      this.conversation.recordQueuedEdits(messages.map((m) => m.text), result.pendingTasks.length);
-      return true;
-    });
+      this.mutatePlan(() => {
+        const tasks = keepExecutionState(this.store.planTasks, result.pendingTasks);
+        this.orchestrator.reconcilePlan(tasks, this.plan!.runners);
+        this.conversation.recordQueuedEdits(texts, tasks.length);
+        return true;
+      });
+    } catch (err) {
+      // The edit is lost either way; the run must not be. Left unticked, a run
+      // parked behind the queue stays parked with nothing left to wake it.
+      const reason = err instanceof Error ? err.message : String(err);
+      this.mutatePlan(() => {
+        this.conversation.recordQueuedEditsFailed(texts, reason);
+        return true;
+      });
+      this.onNotice?.({ type: 'notice', level: 'error', message: `Your queued change could not be applied, so the plan is unchanged: ${reason}. Send it again to retry.` });
+    }
 
     // Re-schedule. `onQueueReady` only fires when no task is active, so a paused
     // run still has `running === true` — `start()` would no-op (it early-returns
@@ -1111,6 +1138,20 @@ export class Session {
     } else {
       await this.orchestrator.start();
     }
+  }
+
+  /**
+   * Every finished task as the log records it: this run's own entries, plus
+   * the tasks earlier runs completed, which the log dropped when this run
+   * began but which dependents still count on.
+   */
+  private finishedWork(): TaskSnapshot[] {
+    const log = this.store.getExecutionLog();
+    const logged = new Set(log.map((s) => s.id));
+    const earlier = flattenTasks(this.store.planTasks)
+      .filter((t) => t.status === 'completed' && !logged.has(t.id))
+      .map((t): TaskSnapshot => ({ ...t, completedAt: 0, retryCount: 0, finalized: true }));
+    return [...log, ...earlier];
   }
 
   approveCheckpoint(taskId: string): void {

@@ -354,7 +354,9 @@ describe('task_ops conversation turns', () => {
 
   // The queued edit drains through the planner, and the plan snapshot it works
   // from predates the spawn — so it hands back the live task as 'pending'.
-  // Committing that would drop the runner and offer the same work again.
+  // Committing that would drop the runner and offer the same work again; a
+  // running task is not the rewrite's to change at all, while the rest of the
+  // edit lands.
   it('keeps the live task running and the review approved when a queued edit lands', async () => {
     const spawned: string[] = [];
     const session = makeSession({
@@ -366,7 +368,7 @@ describe('task_ops conversation turns', () => {
             ...t,
             // The snapshot the planner echoes back predates the spawn of 'b'.
             status: t.id === 'b' ? ('pending' as const) : t.status,
-            title: t.id === 'b' ? 'Build v2' : t.title,
+            title: t.id === 'b' ? 'Build v2' : t.id === 'c' ? 'Sign off with the team' : t.title,
           })),
         })),
       },
@@ -388,7 +390,8 @@ describe('task_ops conversation turns', () => {
 
     await session.processQueuedMessages();
 
-    expect(session.getTask('b')!.title).toBe('Build v2');
+    expect(session.getTask('b')!.title).toBe('Build');
+    expect(session.getTask('c')!.title).toBe('Sign off with the team');
     expect(session.getTask('b')!.status).toBe('in_progress');
     expect(session.hasLiveWork).toBe(true);
     expect(session.isReviewApproved).toBe(true);
