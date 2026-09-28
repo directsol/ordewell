@@ -12,6 +12,12 @@ import { clipboardCopyCommand, tmuxSessionName, tmuxSocketName, tmuxWindowName }
 
 const EXIT_RE = /<<<ORDEWELL_TMUX_EXIT:(\d+)>>>/;
 
+/** How long a window's log can stay silent before tmux is asked whether the window still exists. */
+const LIVENESS_INTERVAL_MS = 5000;
+
+/** Looks in a row that must miss the window before it counts as gone: one failed tmux call is not proof. */
+const LIVENESS_MISSES = 2;
+
 export type ExecFileFn = (command: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
 
 const execFileAsync = promisify(execFile);
@@ -36,6 +42,9 @@ class TmuxSession extends AbstractTerminalSession {
   private outputBuffer = '';
   private offset = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private quietPolls = 0;
+  private misses = 0;
+  private looking = false;
 
   constructor(
     id: string,
@@ -86,13 +95,23 @@ class TmuxSession extends AbstractTerminalSession {
 
   private poll(): void {
     if (this.exited) return;
+    if (this.readLog()) {
+      this.quietPolls = 0;
+      this.misses = 0;
+      return;
+    }
+    if (++this.quietPolls % Math.max(1, Math.round(LIVENESS_INTERVAL_MS / this.pollIntervalMs)) === 0) void this.checkWindow();
+  }
+
+  /** Emit what the log gained since the last read; false when it gained nothing. */
+  private readLog(): boolean {
     let content: string;
     try {
       content = existsSync(this.logPath) ? readFileSync(this.logPath, 'utf8') : '';
     } catch {
-      return;
+      return false;
     }
-    if (content.length <= this.offset) return;
+    if (content.length <= this.offset) return false;
 
     const diff = content.slice(this.offset);
     this.offset = content.length;
@@ -104,6 +123,37 @@ class TmuxSession extends AbstractTerminalSession {
     // across two reads must still be seen exactly once.
     const match = this.outputBuffer.slice(-4096).match(EXIT_RE);
     if (match) this.finish(Number(match[1]));
+    return true;
+  }
+
+  /**
+   * The sentinel is printed by the wrapper shell, so a window closed from
+   * outside — killed by the user, or with the whole tmux server — never prints
+   * it, and the session would count as running forever. A silent window is
+   * therefore looked up by exact name (a `-t` target falls back to another
+   * window once its own is gone), and once it is confirmed missing the session
+   * ends as a kill does. Whatever the log still held is read first, so a
+   * completion marker printed just before the close still counts.
+   */
+  private async checkWindow(): Promise<void> {
+    if (this.looking) return;
+    this.looking = true;
+    let listed = false;
+    try {
+      const { stdout } = await this.tmux(['list-windows', '-t', this.tmuxSession, '-F', '#{window_name}']);
+      listed = stdout.split('\n').includes(this.windowName);
+    } catch {
+      /* no server or no session: the window is gone with it */
+    }
+    this.looking = false;
+    if (this.exited) return;
+    if (listed) {
+      this.misses = 0;
+      return;
+    }
+    if (++this.misses < LIVENESS_MISSES) return;
+    this.readLog();
+    if (!this.exited) this.finish(-1);
   }
 
   /**

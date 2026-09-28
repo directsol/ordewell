@@ -231,6 +231,78 @@ describe('TmuxRunner', () => {
     expect(existsSync(logPath)).toBe(false);
   });
 
+  // A window closed from outside — the user killing it, or tmux itself going
+  // away — takes the wrapper shell with it, so no sentinel is ever printed.
+  // Without its own check the session would count as running forever, and so
+  // would its task and the run that waits on it.
+  describe('a window that disappears without printing the sentinel', () => {
+    function listWindows(names: string[] | Error) {
+      execFileImpl.mockImplementation(async (_cmd: string, args: string[]) => {
+        if (args[2] !== 'list-windows') return { stdout: '', stderr: '' };
+        if (names instanceof Error) throw names;
+        return { stdout: names.map((n) => `${n}\n`).join(''), stderr: '' };
+      });
+    }
+
+    it('ends the session once its log goes quiet and tmux no longer lists the window', async () => {
+      const runner = makeRunner();
+      const session = await runner.spawn(baseOpts(manifest()));
+      const logPath = join(logDir, `${session.id}.log`);
+      const exit = vi.fn();
+      const output: string[] = [];
+      session.onExit(exit);
+      session.onOutput((text) => output.push(text));
+
+      appendFileSync(logPath, 'all done\n');
+      await vi.advanceTimersByTimeAsync(100);
+      listWindows(['t-other']);
+      await vi.advanceTimersByTimeAsync(12_000);
+
+      expect(output.join('')).toBe('all done\n');
+      expect(exit).toHaveBeenCalledTimes(1);
+      expect(exit).toHaveBeenCalledWith(-1);
+      expect(runner.activeCount).toBe(0);
+    });
+
+    it('ends the session when the whole tmux server is gone', async () => {
+      const runner = makeRunner();
+      const session = await runner.spawn(baseOpts(manifest()));
+      const exit = vi.fn();
+      session.onExit(exit);
+
+      listWindows(new Error('no server running on /tmp/tmux-1000/ordewell-3742'));
+      await vi.advanceTimersByTimeAsync(12_000);
+
+      expect(exit).toHaveBeenCalledWith(-1);
+    });
+
+    it('leaves a quiet runner alone while its window is still listed', async () => {
+      const runner = makeRunner();
+      const session = await runner.spawn(baseOpts(manifest()));
+      const exit = vi.fn();
+      session.onExit(exit);
+
+      listWindows(['t-task1234abcd']);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(exit).not.toHaveBeenCalled();
+    });
+
+    it('does not end a session on a single failed look', async () => {
+      const runner = makeRunner();
+      const session = await runner.spawn(baseOpts(manifest()));
+      const exit = vi.fn();
+      session.onExit(exit);
+
+      listWindows(new Error('server busy'));
+      await vi.advanceTimersByTimeAsync(5_000);
+      listWindows(['t-task1234abcd']);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(exit).not.toHaveBeenCalled();
+    });
+  });
+
   it('forwards write() as literal tmux send-keys', async () => {
     const runner = makeRunner();
     const session = await runner.spawn(baseOpts(manifest()));
