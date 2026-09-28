@@ -344,10 +344,19 @@ export class TaskOrchestrator {
     };
   }
 
+  /**
+   * Isolated per observer: one that throws must not take down the scheduler
+   * or stop the remaining observers from hearing the event.
+   */
   private emit(event: keyof OrchestratorObserver, ...args: unknown[]): void {
     for (const o of this.observers) {
       const fn = o[event] as (...args: unknown[]) => void;
-      if (fn) fn(...args);
+      if (!fn) continue;
+      try {
+        fn(...args);
+      } catch (err) {
+        console.error(`[TaskOrchestrator] observer threw from ${event}:`, err);
+      }
     }
   }
 
@@ -1228,6 +1237,29 @@ export class TaskOrchestrator {
     this.attempts.set(task.id, attempt);
     this.store.markInProgress(task.id);
     this.emit('onTaskChanged');
+
+    if (!(await this.spawnAttempt(task, attempt))) return;
+
+    // Committed as running: notify observers only now, outside the fallible
+    // spawn path above, so an observer throwing here is never mistaken for a
+    // failed spawn (which would tear down the attempt it just announced).
+    if (attempt.worktree) this.emit('onIsolationChanged');
+    this.emit('onTaskChanged');
+    if (attempt.repair) {
+      const group = this.isolationRun?.repos.some((r) => r.path !== SELF_REPO);
+      this.tell('info', `Repairing the conflict of task "${task.title}" in its own ${group ? 'worktrees' : 'worktree'} (repair ${attempt.repair.n} of ${attempt.repair.limit}).`);
+    } else {
+      this.notifications.info(`Task "${task.title}" started (${attempt.runner})`);
+    }
+  }
+
+  /**
+   * The fallible half of starting a task: resolving its cwd/worktree and
+   * spawning the runner. Resolves false when the attempt never committed —
+   * abandoned because it was ended from under it, or a failed spawn already
+   * unwound (both leave `startTask` with nothing further to announce).
+   */
+  private async spawnAttempt(task: Task, attempt: TaskAttempt): Promise<boolean> {
     try {
       const cwd = await this.resolveAttemptCwd(task, attempt);
       attempt.cwd = cwd;
@@ -1236,7 +1268,8 @@ export class TaskOrchestrator {
         // not release it. A newer attempt's own prepare replaces it instead.
         // A repair's worktree holds work that passed, so it is only handed back.
         if (attempt.worktree && !this.attempts.has(task.id)) await this.releaseWorktree(task.id, { keep: attempt.repair !== null });
-        return this.abandonSpawn(task, attempt);
+        this.abandonSpawn(task, attempt);
+        return false;
       }
       // Through the same augmenting as any spawn, so the marker is the task's
       // own and the VerdictEngine watches for it unchanged.
@@ -1266,7 +1299,10 @@ export class TaskOrchestrator {
       // starting. Do not resurrect that execution after the surface already
       // went idle — and compare identity, not presence, because a newer
       // attempt of the same task may have been claimed in the meantime.
-      if (this.attempts.get(task.id) !== attempt) return this.abandonSpawn(task, attempt, session);
+      if (this.attempts.get(task.id) !== attempt) {
+        this.abandonSpawn(task, attempt, session);
+        return false;
+      }
       attempt.phase = 'running';
       attempt.session = session;
 
@@ -1275,21 +1311,18 @@ export class TaskOrchestrator {
       this.output.attach(task.id, session);
       this.verifier.watch(task, session);
       this.watchBlockingPrompts(task, attempt, session);
-
-      this.emit('onTaskChanged');
-      if (attempt.repair) {
-        const group = this.isolationRun?.repos.some((r) => r.path !== SELF_REPO);
-        this.tell('info', `Repairing the conflict of task "${task.title}" in its own ${group ? 'worktrees' : 'worktree'} (repair ${attempt.repair.n} of ${attempt.repair.limit}).`);
-      } else {
-        this.notifications.info(`Task "${task.title}" started (${attempt.runner})`);
-      }
+      return true;
     } catch (err) {
-      if (this.attempts.get(task.id) !== attempt) return this.abandonSpawn(task, attempt);
+      if (this.attempts.get(task.id) !== attempt) {
+        this.abandonSpawn(task, attempt);
+        return false;
+      }
       this.endAttempt(task.id, 'spawn-failed');
       if (attempt.repair) {
         await this.unrepaired(task, `could not start: ${err instanceof Error ? err.message : String(err)}`);
         this.emit('onTaskChanged');
-        return this.tick();
+        await this.tick();
+        return false;
       }
       await this.releaseWorktree(task.id, { keep: false });
       // Couldn't spawn — the task was never executed, so it stays "to do".
@@ -1299,6 +1332,7 @@ export class TaskOrchestrator {
       this.tell('error', `Failed to start task "${task.title}": ${err}`);
       this.emit('onTaskChanged');
       await this.tick();
+      return false;
     }
   }
 
@@ -1330,12 +1364,15 @@ export class TaskOrchestrator {
   /**
    * The one place an attempt's working directory is decided. Async so a
    * per-attempt workspace (worktree isolation, #12) can be prepared here.
+   * Does not itself emit `onIsolationChanged` for a worktree it creates —
+   * the caller does that once the attempt is committed as running, so a
+   * spawn abandoned or failed after this settles is not misreported as a
+   * change that stuck.
    */
   private async resolveAttemptCwd(task: Task, attempt: TaskAttempt): Promise<string> {
     if (attempt.repair && this.isolationRun) {
       const { cwd } = await this.isolation.reopen(task, this.isolationRun);
       attempt.worktree = true;
-      this.emit('onIsolationChanged');
       return cwd;
     }
     if (this.runMode !== 'isolated' || !this.isolationRun) {
@@ -1346,7 +1383,6 @@ export class TaskOrchestrator {
     }
     const { cwd, copied } = await this.isolation.prepare(task, this.isolationRun);
     attempt.worktree = true;
-    this.emit('onIsolationChanged');
     this.reportCopies(copied);
     return cwd;
   }
@@ -1534,7 +1570,7 @@ export class TaskOrchestrator {
     this.attempts.delete(taskId);
     if (attempt) this.output.detach(taskId);
     if (reason === 'verdict' && attempt?.session) this.lingering.set(taskId, attempt.session.id);
-    if (reason === 'cancel' || reason === 'release' || reason === 'complete' || reason === 'retry') {
+    if (reason === 'cancel' || reason === 'release' || reason === 'complete' || reason === 'retry' || reason === 'spawn-failed') {
       const task = this.store.get(taskId);
       if (task) this.verifier.clear(task);
       if (attempt?.session) this.terminalRunner.stop(attempt.session.id);

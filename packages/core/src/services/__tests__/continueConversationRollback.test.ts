@@ -82,12 +82,16 @@ describe('continueConversation rollback on failure', () => {
   });
 
   // `settleTurn` can persist a task_ops turn and only *then* hit a throwing
-  // step (the re-tick that fans the edited plan out). Rolling back in that
-  // case would erase already-persisted, already-broadcast work — the rollback
-  // guard must leave the longer history in place.
-  it('keeps an already-persisted task_ops turn when a later step throws', async () => {
+  // step (the re-tick that fans the edited plan out, via the orchestrator's
+  // onTaskChanged observer). The orchestrator isolates a throwing observer
+  // from its own scheduling (TaskOrchestrator.emit), so this no longer
+  // reaches the caller as a rejection — but the guard this exercises is that
+  // the already-persisted, already-broadcast task_ops turn is never rolled
+  // back regardless.
+  it('keeps an already-persisted task_ops turn when the re-tick broadcast fails', async () => {
     const spawned: string[] = [];
     let armed = false;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const broadcast = vi.fn((msg: { type: string }) => {
       // The mutatePlan notify broadcasts planner_message/plan_generated; only
       // the re-tick's status_update is the "later step" that fails.
@@ -112,13 +116,17 @@ describe('continueConversation rollback on failure', () => {
     await session.cancelTask('b');
 
     armed = true;
-    await expect(session.continueConversation('add a docs task')).rejects.toThrow('boom after persist');
+    const plan = await session.continueConversation('add a docs task');
     armed = false;
 
     // 2 pre-call + the user message + the assistant task_ops entry — the
-    // persisted turn must survive the later failure.
-    expect(session.planState!.conversationHistory).toHaveLength(4);
-    expect(session.planState!.conversationHistory![3].content).toContain('Tasks updated');
-    expect(session.planState!.researchLog).toHaveLength(1);
+    // persisted turn survives the broadcast failure, and the call itself no
+    // longer fails on account of it.
+    expect(plan.conversationHistory).toHaveLength(4);
+    expect(plan.conversationHistory![3].content).toContain('Tasks updated');
+    expect(plan.researchLog).toHaveLength(1);
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
   });
 });
