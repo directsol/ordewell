@@ -11,20 +11,17 @@ import { PlanStore } from './PlanStore';
 import type { RunnerRegistry } from '../plugins/RunnerRegistry';
 import type {
   IsolationHandoff,
-  IsolationInactiveReason,
   IsolationMergeResult,
   IsolationOutcome,
-  IsolationRun,
   IsolationView,
   IWorktreeIsolation,
   PlanIsolation,
   RepairEvidence,
-  RepoGroupLayout,
   TaskIsolation,
 } from '../interfaces/IWorktreeIsolation';
 import { createWorktreeIsolation } from './GitWorktreeIsolation';
-import { describeMergeResult } from './mergeResultNotice';
-import { capConflictFiles, handoffOf, integrationBranchNameOf, layoutOf, SELF_REPO, taskIsolationOf } from './isolationRecord';
+import { capConflictFiles, integrationBranchNameOf, SELF_REPO } from './isolationRecord';
+import { IsolationRunController } from './IsolationRunController';
 import type { IsolatedExecution } from './plannerModes';
 import { buildConflictRepairPrompt } from './PlanPrompts';
 import { watchBlockingPrompts } from './blockingPrompts';
@@ -59,15 +56,6 @@ export interface OrchestratorObserver {
   onIsolationNotice?(data: { level: 'info' | 'warn' | 'error'; message: string }): void;
 }
 
-type SharedRootReason = Exclude<IsolationInactiveReason, 'dirty'>;
-
-type RunDecision =
-  | { mode: 'isolated'; continuing: boolean; layout: RepoGroupLayout }
-  | { mode: 'blocked'; repos: string[] }
-  | { mode: 'shared'; reason: SharedRootReason; repos: string[] };
-
-const SHARED_ROOT_TAIL = 'tasks run in the workspace root without worktree isolation.';
-
 /**
  * What a runner says when its account, not the task, ran out. A marker-less
  * stop that names a limit is retryable once the limit resets, so it pauses the
@@ -79,35 +67,6 @@ const USAGE_LIMIT_RE = /\b(?:usage|session|weekly|daily|monthly) limit\b|\brate 
 
 /** How much of a stopped runner's tail is read for the limit signature: the error is the last thing it prints. */
 const USAGE_LIMIT_TAIL = 4096;
-
-/** Why a run fell back to the shared workspace root, as the one line the user is told. */
-function sharedRootNotice(reason: SharedRootReason, repos: string[]): string {
-  switch (reason) {
-    case 'disabled': return 'Worktree isolation is off — tasks run in the workspace root.';
-    case 'git-missing': return `git was not found — ${SHARED_ROOT_TAIL}`;
-    case 'no-commits':
-      return repos.length > 0
-        ? `No repository in this folder has commits yet (${repos.join(', ')}) — ${SHARED_ROOT_TAIL}`
-        : `The repository has no commits yet — ${SHARED_ROOT_TAIL}`;
-    case 'not-git': return `Not a git repository — ${SHARED_ROOT_TAIL}`;
-    case 'nested-repos':
-      return `This repository contains nested repositories that are not submodules (${repos.join(', ')}) — ${SHARED_ROOT_TAIL} Ignore them in git or make them submodules to isolate this repository.`;
-  }
-}
-
-/** What a new run shares live instead of isolating, as one line; null when it shares nothing. */
-function sharedPathsNotice(run: IsolationRun): string | null {
-  const loose = run.shared.filter((p) => !run.sharedRepos.includes(p));
-  if (run.sharedRepos.length === 0) {
-    if (loose.length === 0) return null;
-    const one = loose.length === 1;
-    return `${loose.join(', ')} ${one ? 'is' : 'are'} shared live with every task, so edits to ${one ? 'it' : 'them'} are not isolated.`;
-  }
-  const one = run.sharedRepos.length === 1 && loose.length === 0;
-  const subject = [run.sharedRepos.length === 1 ? 'It' : 'They', ...(loose.length > 0 ? [`and ${loose.join(', ')}`] : [])].join(' ');
-  return `Could not isolate ${run.sharedRepos.join(', ')} (no commits, or git refused a worktree). `
-    + `${subject} ${one ? 'is' : 'are'} shared live with every task, so edits to ${one ? 'it' : 'them'} are not isolated.`;
-}
 
 /**
  * One run of one task, from the moment the scheduler claims it until its
@@ -128,7 +87,7 @@ interface TaskAttempt {
   phase: AttemptPhase;
   session: ITerminalSession | null;
   readonly runner: string;
-  /** Null until {@link TaskOrchestrator.resolveAttemptCwd} settles. */
+  /** Null until {@link IsolationRunController.attemptCwd} settles. */
   cwd: string | null;
   /** Whether `cwd` is a worktree prepared for this attempt rather than the workspace root. */
   worktree: boolean;
@@ -215,22 +174,8 @@ export class TaskOrchestrator {
 
   private isolation: IWorktreeIsolation;
   /** The plan's isolation run (ADR-0013). Outlives one run: a resumed plan continues it. */
-  private isolationRun: IsolationRun | null = null;
-  /** Copied paths already reported for the current run: every task gets the same copies. */
-  private reportedCopies = new Set<string>();
-  /**
-   * How the open run executes; null while no run is open. A run is one
-   * Execute-Plan or one manual task run, from its start until it settles or
-   * is stopped.
-   */
-  private runMode: 'isolated' | 'shared' | null = null;
-  /** Resolver task id → the conflicted task it resolves; see {@link linkConflictResolver}. */
-  private resolvers: Record<string, string> = {};
-  private opening: Promise<boolean> | null = null;
-  /** The start a dirty tree turned away, replayed once the user chooses how to go on. */
-  private blockedStart: (() => Promise<void>) | null = null;
-  /** The dirty repos behind {@link blockedStart}, for the stash notice. */
-  private blockedRepos: string[] = [];
+  /** The plan's isolation run and the open run's lifecycle (ADR-0013); see {@link IsolationRunController}. */
+  private runs: IsolationRunController;
 
   private registry: RunnerRegistry | null = null;
   private workspaceRootFn: () => string = () => process.cwd();
@@ -247,6 +192,19 @@ export class TaskOrchestrator {
   ) {
     this.store = store ?? new PlanStore();
     this.isolation = isolation ?? createWorktreeIsolation({ config });
+    this.runs = new IsolationRunController({
+      isolation: this.isolation,
+      config,
+      notifications,
+      workspaceRoot: () => this.workspaceRootFn(),
+      listener: {
+        changed: () => this.emit('onIsolationChanged'),
+        blocked: (repos) => this.emit('onIsolationBlocked', { reason: 'dirty', repos }),
+        handoff: (handoff) => this.emit('onIsolationHandoff', handoff),
+        notice: (level, message) => this.emit('onIsolationNotice', { level, message }),
+        releasing: (taskIds) => { for (const taskId of taskIds) this.closeLingering(taskId); },
+      },
+    });
     this.store.onMutate = () => this.emit('onTaskChanged');
     this.verifier.onVerdict((taskId, verdict) => this.onVerdict(taskId, verdict));
     this.verifier.onCheckpoint((taskId, summary) => {
@@ -393,10 +351,7 @@ export class TaskOrchestrator {
 
   /** Where a task's isolated work stands; null when the plan has no isolation run to speak of. */
   getTaskIsolation(taskId: string): TaskIsolation | null {
-    if (!this.isolationRun) return null;
-    const record = this.isolationRun.tasks[taskId];
-    if (!record) return { state: 'none' };
-    return taskIsolationOf(record, this.config.conflictRepairAttempts);
+    return this.runs.taskIsolation(taskId);
   }
 
   /**
@@ -404,10 +359,7 @@ export class TaskOrchestrator {
    * told it — a reconnected webview, a session just loaded. Null without a run.
    */
   isolationView(): IsolationView | null {
-    const run = this.isolationRun;
-    if (!run) return null;
-    const tasks = Object.fromEntries(Object.values(run.tasks).map((r): [string, TaskIsolation] => [r.taskId, taskIsolationOf(r, this.config.conflictRepairAttempts)]));
-    return { tasks, handoff: handoffOf(run) };
+    return this.runs.view();
   }
 
   getAttemptSession(taskId: string): ITerminalSession | undefined {
@@ -416,79 +368,34 @@ export class TaskOrchestrator {
   get queuedCount(): number { return this.messageQueue.length; }
 
   /** A run is waiting on the user to stash or to go on without isolation. */
-  get awaitingIsolationChoice(): boolean { return this.blockedStart !== null; }
+  get awaitingIsolationChoice(): boolean { return this.runs.blocked; }
 
   /**
    * Take over a plan's persisted isolation, or none for a plan that has not
-   * isolated yet. Whatever a crashed process left behind for the run — a
-   * worktree still marked active, a directory no record owns — is pruned,
-   * while kept, failed and conflicted worktrees stay for the user.
-   *
-   * Deliberately silent on the observer: adopting is not a change to persist,
-   * and a host that adopts without persisting (VS Code's restore) would
-   * otherwise write a new session file on every reload.
+   * isolated yet, pruning what a crashed process left behind. Silent on the
+   * observer: adopting is not a change to persist.
    */
   async adoptIsolation(state: PlanIsolation | null): Promise<void> {
-    this.isolationRun = state?.run ?? null;
-    this.resolvers = { ...(state?.resolvers ?? {}) };
-    if (!this.isolationRun) return;
-    try {
-      const { kept } = await this.isolation.pruneOrphans(this.isolationRun);
-      // Never silently: work kept back from the sweep has to be named, or the
-      // user has a worktree they do not know about and a task that looks done.
-      for (const task of kept) {
-        this.tell('warn', `Task "${task.title}" was still holding unlanded work when this plan was re-opened, so its worktree and branch were kept. Retry it to land the work, or review it by hand.`);
-      }
-    } catch (err) {
-      this.tell('warn', `Could not prune leftover worktrees: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    await this.runs.adopt(state);
   }
 
   async reviewRunDiff(): Promise<string> {
-    return this.isolation.reviewDiff(this.requireRun());
+    return this.runs.reviewDiff();
   }
 
-  /**
-   * "Merge all": the run's integration branches into whatever the user has
-   * checked out, in every repo or none. Once everything merged, the run has
-   * nothing left to hand over, so it is cleared up and forgotten; a branch
-   * the user's HEAD somehow does not contain stays for the next run's sweep.
-   */
+  /** "Merge all"; a run that merged everything is cleared up and forgotten. */
   async mergeRun(): Promise<IsolationMergeResult> {
-    const run = this.requireRun();
-    const result = await this.isolation.mergeIntoCheckedOut(run);
-    const branch = integrationBranchNameOf(run);
-    const group = run.repos.some((r) => r.path !== SELF_REPO);
-    const repaired = handoffOf(run).landed.filter((t) => t.repairedFiles?.length);
-    const { level, message } = describeMergeResult(result, branch, group, repaired);
-    this.tell(level, message);
-    if (result.outcome === 'merged') await this.clearMergedRun(run);
-    return result;
-  }
-
-  private async clearMergedRun(run: IsolationRun): Promise<void> {
-    this.closeLingeringOf(run);
-    try {
-      await this.isolation.discard(run, { integration: 'delete-merged' });
-    } catch (err) {
-      this.tell('warn', `Merged, but could not clean up the run's worktrees and branches: ${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
-    this.forgetRun();
+    return this.runs.merge();
   }
 
   /** Worktrees and task branches go; the integration branch and the record stay for review and merge. */
   async cleanupRun(): Promise<void> {
-    this.closeLingeringOf(this.requireRun());
-    await this.isolation.discard(this.requireRun(), { integration: 'keep' });
-    this.emit('onIsolationChanged');
+    await this.runs.cleanup();
   }
 
   /** The run and everything it made go, and the plan forgets it; the next run starts afresh. */
   async discardRun(): Promise<void> {
-    this.closeLingeringOf(this.requireRun());
-    await this.isolation.discard(this.requireRun(), { integration: 'delete' });
-    this.forgetRun();
+    await this.runs.discard();
   }
 
   private watchBlockingPrompts(task: Task, attempt: TaskAttempt, session: ITerminalSession): void {
@@ -506,24 +413,9 @@ export class TaskOrchestrator {
     this.terminalRunner.stop(sessionId);
   }
 
-  private closeLingeringOf(run: IsolationRun): void {
-    for (const taskId of Object.keys(run.tasks)) this.closeLingering(taskId);
-  }
-
-  private forgetRun(): void {
-    this.isolationRun = null;
-    this.resolvers = {};
-    this.emit('onIsolationChanged');
-  }
-
-  private requireRun(): IsolationRun {
-    if (!this.isolationRun) throw new Error('This plan has no isolated run');
-    return this.isolationRun;
-  }
-
   /** What the plan persists of isolated execution; null when no run ever isolated. */
   get isolationRecord(): PlanIsolation | null {
-    return this.isolationRun ? { run: this.isolationRun, resolvers: this.resolvers } : null;
+    return this.runs.planIsolation;
   }
 
   queueMessage(text: string): void {
@@ -566,11 +458,10 @@ export class TaskOrchestrator {
   loadPlan(tasks: readonly Task[], planRunners: RunnerId[] = ['claude-code']): void {
     this.store.load(tasks, planRunners);
     const repairs = this.endAllAttempts('load').filter((a) => a.repair && a.worktree);
-    for (const a of repairs) void this.releaseWorktree(a.taskId, { keep: true }, a.integration);
+    for (const a of repairs) void this.runs.release(a.taskId, { keep: true }, a.integration);
     // A plan committed while the scheduler runs keeps that run, and its mode
     // with it; otherwise the next start decides afresh.
-    if (!this.running) this.runMode = null;
-    this.blockedStart = null;
+    this.runs.interrupt({ keepOpen: this.running });
     this.planStatus = 'approved';
     this.reviewApproved = false;
     this.retryCounts.clear();
@@ -609,7 +500,7 @@ export class TaskOrchestrator {
   }
 
   async start(): Promise<void> {
-    if (this.blockedStart) return;
+    if (this.runs.blocked) return;
     if (this.running) {
       console.error('[TaskOrchestrator] start() called but already running — no-op');
       return;
@@ -619,7 +510,7 @@ export class TaskOrchestrator {
       this.emit('onReviewNeeded', { tasks: this.store.planTasks, planRunners: this.store.planRunners });
       return;
     }
-    if (!(await this.openRun(() => this.start())) || this.running) return;
+    if (!(await this.runs.open(() => this.start())) || this.running) return;
     console.log(`[TaskOrchestrator] Starting with ${this.store.allTasks.length} tasks (${this.store.allTasks.filter(t => t.type === 'ai' && t.prompt).length} AI ready)`);
     this.running = true;
     this.haltedByFailure = false;
@@ -644,10 +535,9 @@ export class TaskOrchestrator {
     // repair did not land, so its task waits on the user as its conflict did.
     for (const a of this.endAllAttempts('stop')) {
       if (a.repair) this.store.markAwaitingUser(a.taskId);
-      if (a.worktree) void this.releaseWorktree(a.taskId, { keep: true }, a.integration);
+      if (a.worktree) void this.runs.release(a.taskId, { keep: true }, a.integration);
     }
-    this.runMode = null;
-    this.blockedStart = null;
+    this.runs.interrupt();
     this.onHold.clear();
     this.emit('onTaskChanged');
   }
@@ -689,7 +579,7 @@ export class TaskOrchestrator {
       this.store.markAwaitingUser(taskId);
       this.haltOnFailure();
       this.tell('warn', `Task "${task.title}" stopped before its completion marker: ${attempt.runner} hit its usage limit. Retry it once the limit resets — its worktree is kept.`);
-      if (attempt.worktree) await this.releaseWorktree(taskId, { keep: true });
+      if (attempt.worktree) await this.runs.release(taskId, { keep: true });
     } else {
       this.store.markFailed(taskId);
       // Missing completion evidence is a hard boundary: do not launch more
@@ -697,7 +587,7 @@ export class TaskOrchestrator {
       // Already-active parallel tasks may finish, but no new task is spawned.
       this.haltOnFailure();
       this.notifications.error(`Task "${task.title}" failed verification: ${verdict.reason}`);
-      if (attempt.worktree) await this.releaseWorktree(taskId, { keep: true });
+      if (attempt.worktree) await this.runs.release(taskId, { keep: true });
     }
 
     this.store.setTaskOutputSummary(taskId, summarizeOutput(verdict.reason, summary));
@@ -718,7 +608,7 @@ export class TaskOrchestrator {
       if (this.attempts.size === 0) {
         if (this.store.isAllComplete()) this.planStatus = 'completed';
         this.emit('onTick');
-        await this.closeRun();
+        await this.runs.close();
         this.emit('onExecutionComplete');
       }
       return;
@@ -749,14 +639,14 @@ export class TaskOrchestrator {
    * so a repair the tip has moved past again is a fresh conflict, not a pass.
    */
   private async landRepair(task: Task, attempt: TaskAttempt): Promise<{ evidence: RepairEvidence; outcome: IsolationOutcome }> {
-    const run = this.isolationRun;
+    const run = this.runs.current;
     let evidence: RepairEvidence = { ok: false, reason: 'failed', repo: SELF_REPO };
     if (!run) return { evidence, outcome: 'failed' };
     attempt.phase = 'integrating';
     attempt.integration = (async (): Promise<IsolationOutcome> => {
       evidence = await this.isolation.verifyRepair(task, run).catch((): RepairEvidence => ({ ok: false, reason: 'failed', repo: run.tasks[task.id]?.conflictRepo ?? SELF_REPO }));
       if (evidence.ok) return this.integrateWork(task);
-      await this.releaseWorktree(task.id, { keep: true });
+      await this.runs.release(task.id, { keep: true });
       return 'conflict';
     })();
     const outcome = await attempt.integration;
@@ -764,7 +654,7 @@ export class TaskOrchestrator {
   }
 
   private async landedRepair(task: Task, verdict: Verdict): Promise<void> {
-    const files = this.isolationRun?.tasks[task.id]?.repairedFiles ?? [];
+    const files = this.runs.current?.tasks[task.id]?.repairedFiles ?? [];
     this.store.markCompleted(task.id);
     this.store.unblockDependents(task.id);
     this.logAndArchive(task, task.verdict ?? verdict);
@@ -774,14 +664,14 @@ export class TaskOrchestrator {
 
   /** A repair that did not land leaves the task as its conflict did: waiting on the user, worktree and refs kept. */
   private async unrepaired(task: Task, why: string): Promise<void> {
-    await this.releaseWorktree(task.id, { keep: true });
+    await this.runs.release(task.id, { keep: true });
     this.store.markAwaitingUser(task.id);
-    const group = this.isolationRun?.repos.some((r) => r.path !== SELF_REPO);
+    const group = this.runs.current?.repos.some((r) => r.path !== SELF_REPO);
     this.tell('warn', `The conflict repair of task "${task.title}" ${why}, so it did not land. Its ${group ? 'worktrees are' : 'worktree is'} kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.`);
   }
 
   private describeEvidence(evidence: Exclude<RepairEvidence, { ok: true }>): string {
-    const run = this.isolationRun;
+    const run = this.runs.current;
     const inRepo = evidence.repo !== SELF_REPO ? ` in ${evidence.repo}` : '';
     const branch = run ? integrationBranchNameOf(run) : 'the integration branch';
     switch (evidence.reason) {
@@ -809,12 +699,12 @@ export class TaskOrchestrator {
 
   /** A worktree whose work is not on the integration branch yet. */
   private hasUnlandedWork(taskId: string): boolean {
-    const record = this.isolationRun?.tasks[taskId];
+    const record = this.runs.current?.tasks[taskId];
     return !!record && record.status !== 'merged';
   }
 
   private async integrateWork(task: Task): Promise<IsolationOutcome> {
-    const run = this.isolationRun;
+    const run = this.runs.current;
     if (!run) return 'failed';
     // Saved before the first merge, so a crash mid-landing leaves the tips to roll back to.
     const outcome = await this.isolation.integrate(task, run, () => this.emit('onIsolationChanged')).catch((): IsolationOutcome => 'failed');
@@ -831,8 +721,8 @@ export class TaskOrchestrator {
   }
 
   private landUnmerged(task: Task, landing: Exclude<IsolationOutcome, 'merged'>): void {
-    const branch = this.isolationRun ? integrationBranchNameOf(this.isolationRun) : 'the integration branch';
-    const record = this.isolationRun?.tasks[task.id];
+    const branch = this.runs.current ? integrationBranchNameOf(this.runs.current) : 'the integration branch';
+    const record = this.runs.current?.tasks[task.id];
     // Named only where there is a repo to name: a group of one reads as it always has.
     const inRepo = record?.conflictRepo && record.conflictRepo !== SELF_REPO ? record.conflictRepo : null;
     if (landing === 'conflict') {
@@ -872,7 +762,7 @@ export class TaskOrchestrator {
 
   /** The repair a conflicted task is owed next; null when repair is off, used up, or there is no isolated run to repair it in. */
   private nextRepair(taskId: string): RepairAttempt | null {
-    const record = this.runMode === 'isolated' ? this.isolationRun?.tasks[taskId] : undefined;
+    const record = this.runs.openRecord(taskId);
     const limit = this.config.conflictRepairAttempts;
     const spent = record?.repairs ?? 0;
     return record?.status === 'conflict' && spent < limit ? { n: spent + 1, limit } : null;
@@ -881,7 +771,7 @@ export class TaskOrchestrator {
   private noRepairReason(task: Task): string | null {
     const limit = this.config.conflictRepairAttempts;
     if (limit === 0) return `Conflict repair is off (conflictRepairAttempts is 0), so task "${task.title}" waits for you.`;
-    const spent = this.isolationRun?.tasks[task.id]?.repairs ?? 0;
+    const spent = this.runs.current?.tasks[task.id]?.repairs ?? 0;
     return spent >= limit ? `Task "${task.title}" has had ${spent} of its ${limit} conflict repairs, so its conflict waits for you.` : null;
   }
 
@@ -893,43 +783,22 @@ export class TaskOrchestrator {
    * bring it along conflicts again instead of being taken at its word.
    */
   linkConflictResolver(resolverId: string, conflictedId: string): void {
-    this.resolvers[resolverId] = conflictedId;
-    this.emit('onIsolationChanged');
+    this.runs.linkResolver(resolverId, conflictedId);
   }
 
   private async landResolved(resolverId: string): Promise<void> {
-    const conflictedId = this.resolvers[resolverId];
+    const conflictedId = this.runs.takeResolver(resolverId);
     if (!conflictedId) return;
-    delete this.resolvers[resolverId];
-    this.emit('onIsolationChanged');
     const conflicted = this.store.get(conflictedId);
     // Only the conflict it was added for: a task retried since has a new
     // attempt of its own, whose worktree it would merge half-done.
-    if (!conflicted || this.isolationRun?.tasks[conflictedId]?.status !== 'conflict') return;
+    if (!conflicted || this.runs.current?.tasks[conflictedId]?.status !== 'conflict') return;
     const landing = await this.integrateWork(conflicted);
     if (landing !== 'merged') return this.landUnmerged(conflicted, landing);
     this.store.markCompleted(conflictedId);
     this.store.unblockDependents(conflictedId);
     if (conflicted.verdict) this.logAndArchive(conflicted, conflicted.verdict);
     this.notifications.info(`Task "${conflicted.title}" landed through its conflict resolution.`);
-  }
-
-  /**
-   * Let go of a task's worktree. `keep` leaves it and its branch for
-   * inspection; otherwise both go. A merge still in flight finishes first, so
-   * the worktree is never torn down underneath it.
-   */
-  private async releaseWorktree(taskId: string, opts: { keep: boolean }, integration?: Promise<IsolationOutcome> | null): Promise<void> {
-    await integration;
-    const run = this.isolationRun;
-    if (!run?.tasks[taskId]) return;
-    if (!opts.keep) this.closeLingering(taskId);
-    try {
-      await this.isolation.release(run, taskId, opts);
-    } catch (err) {
-      this.notifications.warn(`Could not clean up the worktree of task ${taskId}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    this.emit('onIsolationChanged');
   }
 
   getReadyTasks(): Task[] {
@@ -973,7 +842,7 @@ export class TaskOrchestrator {
    */
   private dependencyMet(depId: string): boolean {
     if (!this.store.isCompleted(depId)) return false;
-    const record = this.runMode === 'isolated' ? this.isolationRun?.tasks[depId] : undefined;
+    const record = this.runs.openRecord(depId);
     return !record || record.status === 'merged';
   }
 
@@ -1003,7 +872,7 @@ export class TaskOrchestrator {
     this.store.markPending(taskId);
     this.onHold.add(taskId);
     this.emit('onTaskChanged');
-    await this.releaseWorktree(taskId, worktree, ended?.integration);
+    await this.runs.release(taskId, worktree, ended?.integration);
     await this.tick();
   }
 
@@ -1020,7 +889,7 @@ export class TaskOrchestrator {
     if (phase === 'running' || phase === 'integrating') await this.cancelAttempt(taskId, { keep: false });
     else {
       this.endAttempt(taskId, 'release');
-      await this.releaseWorktree(taskId, { keep: false });
+      await this.runs.release(taskId, { keep: false });
     }
     this.onHold.delete(taskId);
     this.retryCounts.delete(taskId);
@@ -1106,7 +975,7 @@ export class TaskOrchestrator {
     this.emit('onTaskChanged');
     // A retry starts over from the integration tip, which by now holds what its
     // predecessors landed; the old attempt's worktree has nothing to offer it.
-    await this.releaseWorktree(taskId, { keep: false }, ended?.integration);
+    await this.runs.release(taskId, { keep: false }, ended?.integration);
     if (this.haltedByFailure && !this.running) await this.start();
     else await this.tick();
   }
@@ -1122,7 +991,7 @@ export class TaskOrchestrator {
     const task = this.store.get(taskId);
     if (!task || task.type !== 'ai') return;
     if (this.attempts.has(taskId)) return;
-    if (!(await this.openRun(() => this.forceStartTask(taskId)))) return;
+    if (!(await this.runs.open(() => this.forceStartTask(taskId)))) return;
     this.onHold.delete(taskId);
     await this.startTask(task);
   }
@@ -1137,7 +1006,7 @@ export class TaskOrchestrator {
     if (this.hasLiveWork) return;
     const task = this.store.get(taskId);
     if (!task || task.type !== 'ai') return;
-    if (!(await this.openRun(() => this.runTask(taskId)))) return;
+    if (!(await this.runs.open(() => this.runTask(taskId)))) return;
     this.onHold.delete(taskId);
     await this.startTask(task);
   }
@@ -1167,7 +1036,7 @@ export class TaskOrchestrator {
       // plan's remaining attempts — is closed by a verdict only. Ended by
       // cancel, Mark complete or a failed spawn instead, it would stay open, and
       // the next run would inherit its mode rather than decide its own.
-      if (this.attempts.size === 0 && this.runMode) await this.closeRun();
+      if (this.attempts.size === 0 && this.runs.isOpen) await this.runs.close();
       return;
     }
 
@@ -1196,7 +1065,7 @@ export class TaskOrchestrator {
         this.notifications.info('All tasks completed!');
         this.emit('onTaskChanged');
         this.emit('onTick');
-        await this.closeRun();
+        await this.runs.close();
         this.emit('onExecutionComplete');
       } else {
         // Not done — just waiting on a user task, checkpoint, or held task.
@@ -1246,7 +1115,7 @@ export class TaskOrchestrator {
     if (attempt.worktree) this.emit('onIsolationChanged');
     this.emit('onTaskChanged');
     if (attempt.repair) {
-      const group = this.isolationRun?.repos.some((r) => r.path !== SELF_REPO);
+      const group = this.runs.current?.repos.some((r) => r.path !== SELF_REPO);
       this.tell('info', `Repairing the conflict of task "${task.title}" in its own ${group ? 'worktrees' : 'worktree'} (repair ${attempt.repair.n} of ${attempt.repair.limit}).`);
     } else {
       this.notifications.info(`Task "${task.title}" started (${attempt.runner})`);
@@ -1261,13 +1130,14 @@ export class TaskOrchestrator {
    */
   private async spawnAttempt(task: Task, attempt: TaskAttempt): Promise<boolean> {
     try {
-      const cwd = await this.resolveAttemptCwd(task, attempt);
+      const { cwd, worktree } = await this.runs.attemptCwd(task, { repair: attempt.repair !== null });
       attempt.cwd = cwd;
+      attempt.worktree = worktree;
       if (this.attempts.get(task.id) !== attempt) {
         // Ended while its worktree was being made, so whatever ended it could
         // not release it. A newer attempt's own prepare replaces it instead.
         // A repair's worktree holds work that passed, so it is only handed back.
-        if (attempt.worktree && !this.attempts.has(task.id)) await this.releaseWorktree(task.id, { keep: attempt.repair !== null });
+        if (attempt.worktree && !this.attempts.has(task.id)) await this.runs.release(task.id, { keep: attempt.repair !== null });
         this.abandonSpawn(task, attempt);
         return false;
       }
@@ -1324,7 +1194,7 @@ export class TaskOrchestrator {
         await this.tick();
         return false;
       }
-      await this.releaseWorktree(task.id, { keep: false });
+      await this.runs.release(task.id, { keep: false });
       // Couldn't spawn — the task was never executed, so it stays "to do".
       // Held out of auto-scheduling to avoid a spawn-throw retry loop.
       this.store.markPending(task.id);
@@ -1350,7 +1220,7 @@ export class TaskOrchestrator {
   }
 
   private repairPrompt(task: Task): string {
-    const run = this.requireRun();
+    const run = this.runs.requireRun();
     const record = run.tasks[task.id];
     const conflict = {
       branch: record?.branch ?? '',
@@ -1361,174 +1231,17 @@ export class TaskOrchestrator {
     return buildConflictRepairPrompt(task, conflict, integrationBranchNameOf(run));
   }
 
-  /**
-   * The one place an attempt's working directory is decided. Async so a
-   * per-attempt workspace (worktree isolation, #12) can be prepared here.
-   * Does not itself emit `onIsolationChanged` for a worktree it creates —
-   * the caller does that once the attempt is committed as running, so a
-   * spawn abandoned or failed after this settles is not misreported as a
-   * change that stuck.
-   */
-  private async resolveAttemptCwd(task: Task, attempt: TaskAttempt): Promise<string> {
-    if (attempt.repair && this.isolationRun) {
-      const { cwd } = await this.isolation.reopen(task, this.isolationRun);
-      attempt.worktree = true;
-      return cwd;
-    }
-    if (this.runMode !== 'isolated' || !this.isolationRun) {
-      // A worktree left by an earlier attempt describes work this attempt
-      // replaces; left alone it could later be integrated as if it were this one's.
-      await this.releaseWorktree(task.id, { keep: false });
-      return this.workspaceRootFn();
-    }
-    const { cwd, copied } = await this.isolation.prepare(task, this.isolationRun);
-    attempt.worktree = true;
-    this.reportCopies(copied);
-    return cwd;
-  }
-
   private tell(level: 'info' | 'warn' | 'error', message: string): void {
     this.notifications[level](message);
     this.emit('onIsolationNotice', { level, message });
   }
 
-  private reportCopies(copied: string[]): void {
-    const fresh = copied.filter((p) => !this.reportedCopies.has(p));
-    if (fresh.length === 0) return;
-    for (const p of fresh) this.reportedCopies.add(p);
-    const one = fresh.length === 1;
-    this.tell(
-      'warn',
-      `${fresh.join(', ')} could not be linked into task workspaces (a hard link is impossible there), so each task gets ${one ? 'a copy' : 'copies'}: edits to ${one ? 'it' : 'them'} stay in the task.`,
-    );
-  }
-
-  /**
-   * Open a run if none is: decide once, at its start, whether it executes in
-   * worktrees. `resume` is what a dirty tree parks until the user chooses how
-   * to go on. Resolves false when the run did not start.
-   */
-  private openRun(resume: () => Promise<void>): Promise<boolean> {
-    if (this.runMode) return Promise.resolve(true);
-    this.opening ??= this.activate(resume).finally(() => { this.opening = null; });
-    return this.opening;
-  }
-
   /**
    * Whether the run in force, or else the next one, gives each task its own
-   * worktrees, and of which repo group — what the planner is told, since it
-   * decides whether tasks on the same file have to be ordered and which shared
-   * paths two tasks must not edit at once. A tree that would block counts as
-   * not isolating: the user may yet run without isolation, and ordering is
-   * the safe rule then.
+   * worktrees, and of which repo group — what the planner is told.
    */
   async plannerIsolation(): Promise<IsolatedExecution> {
-    if (this.runMode) return this.runMode === 'isolated' && this.isolationRun ? layoutOf(this.isolationRun) : false;
-    const decision = await this.decideRun(this.workspaceRootFn());
-    return decision.mode === 'isolated' ? decision.layout : false;
-  }
-
-  private async decideRun(root: string): Promise<RunDecision> {
-    const availability = await this.isolation.isActive(root);
-    const continued = this.continuableRun(root);
-    const continuing = continued !== null;
-    // A continued run keeps the group it started with.
-    if (availability.active) {
-      const layout = continued ? layoutOf(continued) : { repos: availability.repos ?? [SELF_REPO], shared: availability.shared ?? [] };
-      return { mode: 'isolated', continuing, layout };
-    }
-    // A continued run's base is already fixed, so edits the user has made in
-    // their own tree since cannot change what its tasks start from.
-    if (availability.reason === 'dirty') {
-      return continued ? { mode: 'isolated', continuing, layout: layoutOf(continued) } : { mode: 'blocked', repos: availability.repos ?? [] };
-    }
-    return { mode: 'shared', reason: availability.reason, repos: availability.repos ?? [] };
-  }
-
-  private async activate(resume: () => Promise<void>): Promise<boolean> {
-    const root = this.workspaceRootFn();
-    const decision = await this.decideRun(root);
-    if (decision.mode === 'blocked') {
-      this.blockedStart = resume;
-      this.blockedRepos = decision.repos;
-      this.emit('onIsolationBlocked', { reason: 'dirty', repos: decision.repos });
-      return false;
-    }
-    if (decision.mode === 'shared') {
-      this.tell('info', sharedRootNotice(decision.reason, decision.repos));
-      this.runMode = 'shared';
-      return true;
-    }
-    if (!decision.continuing) {
-      try {
-        await this.mintRun(root);
-      } catch (err) {
-        // Git can still refuse every repo of the group once a run is minted — the one check `isActive` cannot make.
-        this.tell('info', `${err instanceof Error ? err.message : String(err)} — ${SHARED_ROOT_TAIL}`);
-        this.emit('onIsolationChanged');
-        this.runMode = 'shared';
-        return true;
-      }
-    }
-    this.runMode = 'isolated';
-    await this.sweep();
-    return true;
-  }
-
-  /** What earlier runs left merged in the group goes; a failure here is worth a word, never a stopped run. */
-  private async sweep(): Promise<void> {
-    if (!this.isolationRun) return;
-    try {
-      await this.isolation.sweep(this.isolationRun);
-    } catch (err) {
-      this.tell('warn', `Could not clear merged branches of earlier runs: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  /**
-   * The plan's run carries on while it still has any record: anything landed
-   * means a resumed plan's dependents must start from a tip that holds their
-   * predecessors' work, and anything held — a kept attempt, a conflict, a
-   * repair — is work the user may still want, which a fresh run's mint would
-   * delete. Only a run with no records at all is superseded.
-   */
-  private continuableRun(root: string): IsolationRun | null {
-    const run = this.isolationRun;
-    return run && run.workspaceRoot === root && Object.values(run.tasks).some((r) => r.status !== 'active') ? run : null;
-  }
-
-  /**
-   * A run with no records at all holds only superseded attempts, so it goes
-   * whole. One that cannot be continued for another reason — it ran from a
-   * different workspace path — keeps its integration branch in each repo that
-   * has not merged it: only the user gives landed work up.
-   */
-  private async mintRun(root: string): Promise<void> {
-    const previous = this.isolationRun;
-    if (previous) {
-      const landed = Object.values(previous.tasks).some((r) => r.status === 'merged');
-      await this.isolation.discard(previous, { integration: landed ? 'delete-merged' : 'delete' }).catch(() => undefined);
-      this.isolationRun = null;
-    }
-    this.isolationRun = await this.isolation.startRun(root);
-    this.resolvers = {};
-    this.reportedCopies.clear();
-    this.emit('onIsolationChanged');
-    const shared = sharedPathsNotice(this.isolationRun);
-    if (shared) this.tell('info', shared);
-  }
-
-  /** Close the open run. An isolated one hands its integration branch over for review. */
-  private async closeRun(): Promise<void> {
-    const mode = this.runMode;
-    this.runMode = null;
-    if (mode !== 'isolated' || !this.isolationRun) return;
-    try {
-      this.emit('onIsolationHandoff', await this.isolation.handoff(this.isolationRun));
-    } catch (err) {
-      this.tell('warn', `Could not hand the run's integration branch over: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    this.emit('onIsolationChanged');
+    return this.runs.plannerLayout();
   }
 
   /**
@@ -1537,19 +1250,8 @@ export class TaskOrchestrator {
    * run in the workspace root, knowingly.
    */
   async continueBlockedRun(how: 'stash' | 'shared'): Promise<void> {
-    const resume = this.blockedStart;
-    if (!resume) return;
-    this.blockedStart = null;
-    if (how === 'stash') {
-      await this.isolation.stash(this.workspaceRootFn());
-      this.tell('info', this.blockedRepos.length > 0
-        ? `Stashed your uncommitted changes in ${this.blockedRepos.join(', ')} — \`git stash pop\` in each brings them back.`
-        : 'Stashed your uncommitted changes — `git stash pop` brings them back.');
-    } else {
-      this.runMode = 'shared';
-      this.tell('info', 'Running without worktree isolation — tasks share the workspace root for this run.');
-    }
-    await resume();
+    const resume = await this.runs.continueBlocked(how);
+    if (resume) await resume();
   }
 
   /**
