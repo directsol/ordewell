@@ -138,6 +138,26 @@ describe('TaskOrchestrator with worktree isolation', () => {
     expect(orchestrator.status).toBe('running');
   });
 
+  it('does not halt the run when a landing fails: independent work starts in the freed slot, dependents wait', async () => {
+    const { orchestrator, isolation, pass, spawnedCwd } = setup({ config: { maxParallelSessions: 1 } });
+    isolation.outcomes.set('t1', 'failed');
+    const t1 = task('t1', 1);
+    const t2 = task('t2', 2);
+    orchestrator.loadPlan([t1, t2, task('t3', 3, { dependencies: ['t1'] })]);
+    await orchestrator.approveReview();
+    expect(spawnedCwd('t2')).toBeUndefined();
+
+    pass(t1);
+    await vi.waitFor(() => expect(spawnedCwd('t2')).toBe('/fake-worktrees/run1/2-t2'));
+
+    expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user');
+    expect(orchestrator.status).toBe('running');
+    pass(t2);
+    await vi.waitFor(() => expect(orchestrator.storeInstance.get('t2')!.status).toBe('completed'));
+    expect(spawnedCwd('t3')).toBeUndefined();
+    expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user');
+  });
+
   it('keeps a failed task\'s worktree for inspection', async () => {
     const { orchestrator, isolation, sessionFor } = setup();
     orchestrator.loadPlan([task('t1', 1)]);

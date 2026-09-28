@@ -12,18 +12,16 @@ import type { RunnerRegistry } from '../plugins/RunnerRegistry';
 import type {
   IsolationHandoff,
   IsolationMergeResult,
-  IsolationOutcome,
   IsolationView,
   IWorktreeIsolation,
   PlanIsolation,
-  RepairEvidence,
   TaskIsolation,
 } from '../interfaces/IWorktreeIsolation';
 import { createWorktreeIsolation } from './GitWorktreeIsolation';
-import { capConflictFiles, integrationBranchNameOf, SELF_REPO } from './isolationRecord';
+import { SELF_REPO } from './isolationRecord';
 import { IsolationRunController } from './IsolationRunController';
+import { completesTask, Landing, type LandingMessage, type LandingOutcome, type RepairAttempt, type UnlandedOutcome } from './Landing';
 import type { IsolatedExecution } from './plannerModes';
-import { buildConflictRepairPrompt } from './PlanPrompts';
 import { watchBlockingPrompts } from './blockingPrompts';
 import { resolveWorkspaceEnv, type WorkspaceEnv } from './workspaceEnv';
 
@@ -80,9 +78,9 @@ interface TaskAttempt {
   readonly attempt: number;
   /**
    * `starting` while the async spawn is in flight; `session` is null until
-   * `running`. `integrating` once a passed verdict is merging the attempt's
-   * worktree — still live, so the task neither completes nor frees its
-   * dependents until the merge says so.
+   * `running`. `integrating` once its verdict is with {@link Landing} — still
+   * live, so the task neither completes nor frees its dependents until the
+   * landing says so.
    */
   phase: AttemptPhase;
   session: ITerminalSession | null;
@@ -91,20 +89,14 @@ interface TaskAttempt {
   cwd: string | null;
   /** Whether `cwd` is a worktree prepared for this attempt rather than the workspace root. */
   worktree: boolean;
-  /** The merge in flight, so a cancel waits for it before tearing the worktree down. */
-  integration: Promise<IsolationOutcome> | null;
+  /** The landing in flight, so a cancel waits for it before tearing the worktree down. */
+  integration: Promise<LandingOutcome> | null;
   /** Set when this attempt is a conflict repair (ADR-0015) of work that already passed. */
   readonly repair: RepairAttempt | null;
   readonly startedAt: string;
 }
 
 type AttemptPhase = 'starting' | 'running' | 'integrating';
-
-/** Which repair of a task an attempt is, of the most `conflictRepairAttempts` allows. */
-interface RepairAttempt {
-  n: number;
-  limit: number;
-}
 
 /** Read-only view of a task's live attempt. */
 export interface TaskAttemptSnapshot {
@@ -173,9 +165,10 @@ export class TaskOrchestrator {
   private onHold = new Set<string>();
 
   private isolation: IWorktreeIsolation;
-  /** The plan's isolation run (ADR-0013). Outlives one run: a resumed plan continues it. */
   /** The plan's isolation run and the open run's lifecycle (ADR-0013); see {@link IsolationRunController}. */
   private runs: IsolationRunController;
+  /** A passed attempt's work onto the integration branch, and the conflict repair a landing may need. */
+  private landing: Landing;
 
   private registry: RunnerRegistry | null = null;
   private workspaceRootFn: () => string = () => process.cwd();
@@ -205,6 +198,7 @@ export class TaskOrchestrator {
         releasing: (taskIds) => { for (const taskId of taskIds) this.closeLingering(taskId); },
       },
     });
+    this.landing = new Landing({ runs: this.runs, config, tasks: this.store });
     this.store.onMutate = () => this.emit('onTaskChanged');
     this.verifier.onVerdict((taskId, verdict) => this.onVerdict(taskId, verdict));
     this.verifier.onCheckpoint((taskId, summary) => {
@@ -564,13 +558,13 @@ export class TaskOrchestrator {
     // complete, stop or plan load in that window ends it — and has decided the
     // task since. A stale verdict must not overwrite that decision.
     if (this.attempts.get(taskId) !== attempt) return;
-    const landing = verdict.outcome === 'pass' && attempt.worktree ? await this.integrate(task, attempt) : 'merged';
+    const landing = verdict.outcome === 'pass' ? await this.land(attempt, () => this.landing.landPassed(task, attempt)) : null;
     if (this.attempts.get(taskId) !== attempt) return;
     this.endAttempt(taskId, 'verdict');
     this.store.setTaskVerdict(taskId, verdict);
     console.error(`[TaskOrchestrator] Output summary:\n${summary || '(empty — no output captured)'}`);
-    if (verdict.outcome === 'pass') {
-      await this.landPassed(task, landing);
+    if (landing) {
+      await this.applyLanding(task, landing, () => this.notifications.info(`Task "${task.title}" completed.`));
     } else if (this.stoppedOnUsageLimit(attempt)) {
       // No marker, but what stopped the runner was its account rather than the
       // work. Failing would paint a red X on a task the user can simply retry,
@@ -617,162 +611,57 @@ export class TaskOrchestrator {
   }
 
   /**
-   * A repair's verdict decides only whether its work may try to land. It never
-   * replaces the verdict the task's own work earned, and a repair that does not
-   * land leaves the task waiting on the user — never a failed task, so never a
-   * halted run.
+   * A repair's verdict never replaces the verdict the task's own work earned,
+   * and a repair that does not land leaves the task waiting on the user —
+   * never a failed task, so never a halted run.
    */
   private async settleRepair(task: Task, attempt: TaskAttempt, verdict: Verdict): Promise<void> {
-    const landed = verdict.outcome === 'pass' ? await this.landRepair(task, attempt) : null;
+    const outcome = await this.land(attempt, () => this.landing.settleRepair(task, verdict));
     if (this.attempts.get(task.id) !== attempt) return;
     this.endAttempt(task.id, 'verdict');
-    if (!landed) await this.unrepaired(task, `did not finish (${verdict.reason})`);
-    else if (!landed.evidence.ok) await this.unrepaired(task, this.describeEvidence(landed.evidence));
-    else if (landed.outcome === 'merged') await this.landedRepair(task, verdict);
-    else this.landUnmerged(task, landed.outcome);
+    await this.applyLanding(task, outcome, () => {
+      this.store.unblockDependents(task.id);
+      this.logAndArchive(task, task.verdict ?? verdict);
+    });
     await this.afterVerdict();
   }
 
   /**
-   * Evidence before the queue: the repair's work is committed and checked, and
-   * only then merged, through the same serialized landing as any other task —
-   * so a repair the tip has moved past again is a fresh conflict, not a pass.
-   */
-  private async landRepair(task: Task, attempt: TaskAttempt): Promise<{ evidence: RepairEvidence; outcome: IsolationOutcome }> {
-    const run = this.runs.current;
-    let evidence: RepairEvidence = { ok: false, reason: 'failed', repo: SELF_REPO };
-    if (!run) return { evidence, outcome: 'failed' };
-    attempt.phase = 'integrating';
-    attempt.integration = (async (): Promise<IsolationOutcome> => {
-      evidence = await this.isolation.verifyRepair(task, run).catch((): RepairEvidence => ({ ok: false, reason: 'failed', repo: run.tasks[task.id]?.conflictRepo ?? SELF_REPO }));
-      if (evidence.ok) return this.integrateWork(task);
-      await this.runs.release(task.id, { keep: true });
-      return 'conflict';
-    })();
-    const outcome = await attempt.integration;
-    return { evidence, outcome };
-  }
-
-  private async landedRepair(task: Task, verdict: Verdict): Promise<void> {
-    const files = this.runs.current?.tasks[task.id]?.repairedFiles ?? [];
-    this.store.markCompleted(task.id);
-    this.store.unblockDependents(task.id);
-    this.logAndArchive(task, task.verdict ?? verdict);
-    this.tell('info', `Task "${task.title}" landed after repairing a conflict${files.length > 0 ? ` in ${capConflictFiles(files)}` : ''}.`);
-    await this.landResolved(task.id);
-  }
-
-  /** A repair that did not land leaves the task as its conflict did: waiting on the user, worktree and refs kept. */
-  private async unrepaired(task: Task, why: string): Promise<void> {
-    await this.runs.release(task.id, { keep: true });
-    this.store.markAwaitingUser(task.id);
-    const group = this.runs.current?.repos.some((r) => r.path !== SELF_REPO);
-    this.tell('warn', `The conflict repair of task "${task.title}" ${why}, so it did not land. Its ${group ? 'worktrees are' : 'worktree is'} kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.`);
-  }
-
-  private describeEvidence(evidence: Exclude<RepairEvidence, { ok: true }>): string {
-    const run = this.runs.current;
-    const inRepo = evidence.repo !== SELF_REPO ? ` in ${evidence.repo}` : '';
-    const branch = run ? integrationBranchNameOf(run) : 'the integration branch';
-    switch (evidence.reason) {
-      case 'not-merged': return `finished, but its branch${inRepo} does not contain ${branch}`;
-      case 'conflict-markers': {
-        const files = (evidence.files ?? []).map((file) => (evidence.repo !== SELF_REPO ? `${evidence.repo}/${file}` : file));
-        return `finished, but left conflict markers in ${capConflictFiles(files)}`;
-      }
-      case 'failed': return `finished, but git could not check its work${inRepo}`;
-    }
-  }
-
-  /**
-   * Merge a passed attempt's worktree. The attempt stays live while it waits on
-   * the module's merge queue, so a cancel, retry or stop in that window still
-   * wins, and nothing counts the task as done before its work is on the
+   * Hand an attempt's verdict to Landing. The attempt stays live while that
+   * settles — it may wait on the module's merge queue — so a cancel, retry or
+   * stop in that window still wins, and waits for the merge before tearing the
+   * worktree down; nothing counts the task as done before its work is on the
    * integration branch.
    */
-  private async integrate(task: Task, attempt: TaskAttempt): Promise<IsolationOutcome> {
-    if (!this.hasUnlandedWork(task.id)) return 'failed';
+  private land(attempt: TaskAttempt, settle: () => Promise<LandingOutcome>): Promise<LandingOutcome> {
     attempt.phase = 'integrating';
-    attempt.integration = this.integrateWork(task);
+    attempt.integration = settle();
     return attempt.integration;
   }
 
-  /** A worktree whose work is not on the integration branch yet. */
-  private hasUnlandedWork(taskId: string): boolean {
-    const record = this.runs.current?.tasks[taskId];
-    return !!record && record.status !== 'merged';
-  }
-
-  private async integrateWork(task: Task): Promise<IsolationOutcome> {
-    const run = this.runs.current;
-    if (!run) return 'failed';
-    // Saved before the first merge, so a crash mid-landing leaves the tips to roll back to.
-    const outcome = await this.isolation.integrate(task, run, () => this.emit('onIsolationChanged')).catch((): IsolationOutcome => 'failed');
-    this.emit('onIsolationChanged');
-    return outcome;
-  }
-
-  /** Settle a task whose work passed, by what its integration reported. */
-  private async landPassed(task: Task, landing: IsolationOutcome): Promise<void> {
-    if (landing !== 'merged') return this.landUnmerged(task, landing);
+  /** Settle a task by how its landing went; `onLanded` is what the path that landed it adds to completing it. */
+  private async applyLanding(task: Task, outcome: LandingOutcome, onLanded: () => void): Promise<void> {
+    if (!completesTask(outcome)) return this.settleUnlanded(task, outcome);
     this.store.markCompleted(task.id);
-    this.notifications.info(`Task "${task.title}" completed.`);
+    onLanded();
+    this.say(outcome.messages);
     await this.landResolved(task.id);
   }
 
-  private landUnmerged(task: Task, landing: Exclude<IsolationOutcome, 'merged'>): void {
-    const branch = this.runs.current ? integrationBranchNameOf(this.runs.current) : 'the integration branch';
-    const record = this.runs.current?.tasks[task.id];
-    // Named only where there is a repo to name: a group of one reads as it always has.
-    const inRepo = record?.conflictRepo && record.conflictRepo !== SELF_REPO ? record.conflictRepo : null;
-    if (landing === 'conflict') {
-      // Never resolved here: the first answer is a bounded repair by the task
-      // itself, on a new attempt in its own worktree (ADR-0015); until one
-      // lands, the task's dependents wait on it.
-      const repair = this.nextRepair(task.id);
-      this.store.markAwaitingUser(task.id);
-      const files = record?.conflictFiles?.length ? ` (${capConflictFiles(record.conflictFiles)})` : '';
-      const conflicted = inRepo
-        ? `Task "${task.title}" passed, but landing it on ${branch} conflicted in ${inRepo}${files}, so none of it landed.`
-        : `Task "${task.title}" passed, but merging it into ${branch} conflicted${files}.`;
-      if (repair) {
-        this.notifications.warn(conflicted);
-        // The slot the ending attempt freed, never one more than the run allows.
-        if (this.attempts.size < this.config.maxParallelSessions) void this.startTask(task);
-        else {
-          this.store.markPending(task.id);
-          this.tell('info', `Task "${task.title}" is repaired once a slot is free.`);
-        }
-        return;
-      }
-      this.notifications.warn(`${conflicted} ${inRepo ? 'Its worktrees are' : 'Its worktree is'} kept — resolve it by hand and mark it complete, retry it, or resolve it as a task.`);
-      const whyNot = this.noRepairReason(task);
-      if (whyNot) this.tell('info', whyNot);
-    } else {
-      // The verdict passed; only the landing did not. A red X would say the
-      // task failed verification and contradict the marker evidence, so it
-      // waits on the user like a conflict does, with its work kept.
-      const why = record?.landingError ? ` (${record.landingError})` : '';
-      this.store.markAwaitingUser(task.id);
-      this.notifications.error(inRepo
-        ? `Task "${task.title}" passed, but git could not integrate its work in ${inRepo}${why}, so none of it landed. Its worktrees are kept for inspection.`
-        : `Task "${task.title}" passed, but git could not integrate its work${why}. Its worktree is kept for inspection.`);
+  /**
+   * Work that did not land waits on the user — it never fails the task or
+   * halts the run — unless its conflict is owed a repair, which takes the slot
+   * the ending attempt freed and never one more than the run allows.
+   */
+  private settleUnlanded(task: Task, outcome: UnlandedOutcome): void {
+    this.store.markAwaitingUser(task.id);
+    this.say(outcome.messages);
+    if (outcome.kind !== 'repair-needed') return;
+    if (this.attempts.size < this.config.maxParallelSessions) void this.startTask(task);
+    else {
+      this.store.markPending(task.id);
+      this.tell('info', `Task "${task.title}" is repaired once a slot is free.`);
     }
-  }
-
-  /** The repair a conflicted task is owed next; null when repair is off, used up, or there is no isolated run to repair it in. */
-  private nextRepair(taskId: string): RepairAttempt | null {
-    const record = this.runs.openRecord(taskId);
-    const limit = this.config.conflictRepairAttempts;
-    const spent = record?.repairs ?? 0;
-    return record?.status === 'conflict' && spent < limit ? { n: spent + 1, limit } : null;
-  }
-
-  private noRepairReason(task: Task): string | null {
-    const limit = this.config.conflictRepairAttempts;
-    if (limit === 0) return `Conflict repair is off (conflictRepairAttempts is 0), so task "${task.title}" waits for you.`;
-    const spent = this.runs.current?.tasks[task.id]?.repairs ?? 0;
-    return spent >= limit ? `Task "${task.title}" has had ${spent} of its ${limit} conflict repairs, so its conflict waits for you.` : null;
   }
 
   /**
@@ -787,18 +676,13 @@ export class TaskOrchestrator {
   }
 
   private async landResolved(resolverId: string): Promise<void> {
-    const conflictedId = this.runs.takeResolver(resolverId);
-    if (!conflictedId) return;
-    const conflicted = this.store.get(conflictedId);
-    // Only the conflict it was added for: a task retried since has a new
-    // attempt of its own, whose worktree it would merge half-done.
-    if (!conflicted || this.runs.current?.tasks[conflictedId]?.status !== 'conflict') return;
-    const landing = await this.integrateWork(conflicted);
-    if (landing !== 'merged') return this.landUnmerged(conflicted, landing);
-    this.store.markCompleted(conflictedId);
-    this.store.unblockDependents(conflictedId);
-    if (conflicted.verdict) this.logAndArchive(conflicted, conflicted.verdict);
-    this.notifications.info(`Task "${conflicted.title}" landed through its conflict resolution.`);
+    const resolved = await this.landing.landResolved(resolverId);
+    if (!resolved) return;
+    const { task, outcome } = resolved;
+    await this.applyLanding(task, outcome, () => {
+      this.store.unblockDependents(task.id);
+      if (task.verdict) this.logAndArchive(task, task.verdict);
+    });
   }
 
   getReadyTasks(): Task[] {
@@ -903,19 +787,19 @@ export class TaskOrchestrator {
     const ended = this.endAttempt(taskId, 'complete');
     const verdict = this.verifier.markComplete(task);
     // The user vouches for the work, so it lands the way a passed verdict's
-    // would — including a merge a passed verdict already has in flight.
-    const merging = ended?.integration ?? (this.hasUnlandedWork(taskId) ? this.integrateWork(task) : null);
-    const landing = merging ? await merging : 'merged';
+    // would — including a landing a passed verdict already has in flight.
+    const landing = await (ended?.integration ?? this.landing.landVouched(task));
 
-    if (landing === 'merged') this.store.markCompleted(taskId);
-    else this.landUnmerged(task, landing);
+    if (completesTask(landing)) this.store.markCompleted(taskId);
+    else this.settleUnlanded(task, landing);
     this.store.setTaskVerdict(taskId, verdict);
     this.store.setTaskOutputSummary(taskId, summarizeOutput(verdict.reason, ''));
     this.logAndArchive(task, verdict);
-    if (landing === 'merged') {
+    if (completesTask(landing)) {
       this.store.unblockDependents(taskId);
       this.onHold.delete(taskId);
       this.notifications.info(`Task "${task.title}" marked complete.`);
+      this.say(landing.messages);
       await this.landResolved(taskId);
     }
 
@@ -1099,7 +983,7 @@ export class TaskOrchestrator {
       cwd: null,
       worktree: false,
       integration: null,
-      repair: this.nextRepair(task.id),
+      repair: this.landing.nextRepair(task.id),
       startedAt: new Date().toISOString(),
     };
     this.spawnCounts.set(task.id, attempt.attempt);
@@ -1143,7 +1027,7 @@ export class TaskOrchestrator {
       }
       // Through the same augmenting as any spawn, so the marker is the task's
       // own and the VerdictEngine watches for it unchanged.
-      const finalPrompt = composeAugmentedPrompt(attempt.repair ? { ...task, prompt: this.repairPrompt(task) } : task, this.store.planTasks, {
+      const finalPrompt = composeAugmentedPrompt(attempt.repair ? { ...task, prompt: this.landing.repairPrompt(task) } : task, this.store.planTasks, {
         planMapEnabled: this.config.planMapEnabled,
         // A merge to resolve is not new behaviour to drive test-first.
         tddEnabled: !attempt.repair && this.tddEnabled(),
@@ -1189,7 +1073,7 @@ export class TaskOrchestrator {
       }
       this.endAttempt(task.id, 'spawn-failed');
       if (attempt.repair) {
-        await this.unrepaired(task, `could not start: ${err instanceof Error ? err.message : String(err)}`);
+        this.settleUnlanded(task, await this.landing.unrepaired(task, `could not start: ${err instanceof Error ? err.message : String(err)}`));
         this.emit('onTaskChanged');
         await this.tick();
         return false;
@@ -1219,21 +1103,16 @@ export class TaskOrchestrator {
     this.emit('onTaskChanged');
   }
 
-  private repairPrompt(task: Task): string {
-    const run = this.runs.requireRun();
-    const record = run.tasks[task.id];
-    const conflict = {
-      branch: record?.branch ?? '',
-      repos: Object.keys(record?.repairBase ?? {}),
-      ...(record?.conflictRepo ? { conflictRepo: record.conflictRepo } : {}),
-      ...(record?.conflictFiles ? { conflictFiles: record.conflictFiles } : {}),
-    };
-    return buildConflictRepairPrompt(task, conflict, integrationBranchNameOf(run));
-  }
-
   private tell(level: 'info' | 'warn' | 'error', message: string): void {
     this.notifications[level](message);
     this.emit('onIsolationNotice', { level, message });
+  }
+
+  private say(messages: readonly LandingMessage[]): void {
+    for (const { level, text, repairLog } of messages) {
+      if (repairLog) this.tell(level, text);
+      else this.notifications[level](text);
+    }
   }
 
   /**

@@ -151,7 +151,8 @@ the surfaces is separate work.
   race. The setup command is the escape hatch.
 - Git hooks run on the per-task and merge commits as they would for the user.
   A hook that assumes a single worktree fails the commit, the task lands
-  `failed` with its refs kept, and the user can opt out.
+  `failed` with its refs kept, and the user can opt out. (Since 2026-09-28 the
+  task itself waits on the user rather than failing; see that update.)
 - Not yet true when this was accepted: the orchestrator did not use the module
   and nothing was persisted. See the updates below.
 
@@ -175,7 +176,9 @@ first draft of the wiring was wrong, and what was chosen instead:
   handoff it landed in.
 - **The other outcomes.** `conflict` → the task is `awaiting_user`, worktree
   and refs kept, dependents wait. `failed` (git refused, e.g. a hook) → the task
-  is `failed` and the run halts exactly as for a failed verdict, refs kept. A
+  is `failed` and the run halts exactly as for a failed verdict, refs kept.
+  (Superseded 2026-09-28 — the task waits on the user and the run goes on; see
+  the update of that date below.) A
   failed verdict, a stop and a cancel keep the worktree (`keep: true`); retry,
   removal from the plan and a failed spawn remove it. (Cancel removed it at
   first; amended 2026-09-28 — a runner is often cancelled because it looked
@@ -362,3 +365,31 @@ Rejected: linking each workspace package's folder into the worktree's
 which package goes where, for every package manager that writes them; reading
 them avoids a second, drifting model of the workspace. Links inside a real
 package (pnpm's `.pnpm` store) still resolve to the main checkout.
+
+## Update (2026-09-28) — a landing git refuses waits on the user
+
+The wiring update above says a `failed` landing — git refused the merge, a hook
+for instance — makes the task `failed` and halts the run as a failed verdict
+does. The orchestrator stopped doing that in 94745a8. This records what it does
+instead, and keeps it:
+
+- **The task is `awaiting_user`, not `failed`.** Its verdict stays `pass`; its
+  worktree and branch are kept (the record is `failed`, which surfaces show as
+  `kept`), and the error names what git stopped on. Its dependents wait on it,
+  as they wait on a conflict. Mark complete lands the work once the cause is
+  fixed; retry and review by hand still work.
+- **The run is not halted.** Other ready tasks go on starting in the slot the
+  landing freed; only the task's dependents wait.
+- **Why.** The work is finished — its completion marker is the evidence — and
+  it sits intact in its worktree. A red X would contradict the marker, and
+  halting would stop every other task over one git problem the user has to fix
+  anyway. Finished work is kept for the user to land or repair, the rule that
+  keeps a cancelled task's worktree (245b10e) and a planner rewrite's finished
+  tasks (45145e5). A failed *verdict* — no marker — still halts the run.
+
+The outcome comes from the `Landing` module (`services/Landing.ts`), which
+lands a passed attempt through the isolation run controller and answers
+`landed`, `nothing-to-land`, `repair-needed` or `awaiting_user` (`conflict`,
+`landing-failed`, `repair-failed`). It never marks a task, starts an attempt or
+emits; the orchestrator applies what it answers, and none of the
+`awaiting_user` reasons halts the run.

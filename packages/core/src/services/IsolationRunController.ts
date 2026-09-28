@@ -11,6 +11,7 @@ import type {
   IsolationView,
   IWorktreeIsolation,
   PlanIsolation,
+  RepairEvidence,
   RepoGroupLayout,
   TaskIsolation,
 } from '../interfaces/IWorktreeIsolation';
@@ -265,12 +266,34 @@ export class IsolationRunController {
   }
 
   /**
-   * Let go of a task's worktree. `keep` leaves it and its branch for
-   * inspection; otherwise both go. A merge still in flight finishes first, so
-   * the worktree is never torn down underneath it.
+   * Land a task's work on the run's integration branches. The record is
+   * reported changed once the landing is set and before the first merge, so
+   * a crash mid-landing leaves the tips to roll back to, and again once it
+   * settles. A git error is `failed`, never a throw.
    */
-  async release(taskId: string, opts: { keep: boolean }, integration?: Promise<IsolationOutcome> | null): Promise<void> {
-    await integration;
+  async integrate(task: Task): Promise<IsolationOutcome> {
+    const run = this.run;
+    if (!run) return 'failed';
+    const outcome = await this.isolation.integrate(task, run, () => this.listener.changed()).catch((): IsolationOutcome => 'failed');
+    this.listener.changed();
+    return outcome;
+  }
+
+  /** What a conflict repair's work shows (ADR-0015); git that cannot tell counts against it. */
+  async verifyRepair(task: Task): Promise<RepairEvidence> {
+    const run = this.run;
+    const unverified = (): RepairEvidence => ({ ok: false, reason: 'failed', repo: run?.tasks[task.id]?.conflictRepo ?? SELF_REPO });
+    if (!run) return unverified();
+    return this.isolation.verifyRepair(task, run).catch(unverified);
+  }
+
+  /**
+   * Let go of a task's worktree. `keep` leaves it and its branch for
+   * inspection; otherwise both go. A landing still in flight settles first, so
+   * the worktree is never torn down underneath its merge.
+   */
+  async release(taskId: string, opts: { keep: boolean }, landing?: Promise<unknown> | null): Promise<void> {
+    await landing;
     const run = this.run;
     if (!run?.tasks[taskId]) return;
     if (!opts.keep) this.listener.releasing([taskId]);
