@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { createSession, flattenTasks, RunnerRegistry, BufferedTaskOutputSource, createTask } from '@ordewell/core';
+import { createSession, flattenTasks, loadSession, RunnerRegistry, BufferedTaskOutputSource, createTask } from '@ordewell/core';
 import type { IAiService, ITerminalRunner, LegacyPlanState, ModelResolver, Session, SessionMessage } from '@ordewell/core';
 import { fakeConfig, fakeFileSystem } from '@ordewell/core/testing';
 import { ChatViewProvider } from '../../providers/ChatViewProvider';
@@ -156,6 +156,17 @@ describe('webview messages reach the session through one entry point each', () =
       await h.route({ type: 'sendSystemCommand', command: 'skip', taskId: 't1' });
 
       expect(taskOf(h.session, 't1')?.status).toBe('completed');
+    });
+
+    // Execute re-adopts the plan into the Session; adopting it under an empty
+    // workspace sent every later save (one per verdict) to the extension
+    // host's cwd instead of the workspace's session store.
+    it('execute keeps the session saving into the workspace', async () => {
+      await h.route({ type: 'sendSystemCommand', command: 'executePlan', taskId: '' });
+      await h.route({ type: 'sendSystemCommand', command: 'skip', taskId: 't1' });
+
+      const saved = loadSession(h.session.sessionId, h.workspace);
+      expect(saved?.plan.tasks.find((t) => t.id === 't1')?.status).toBe('completed');
     });
 
     it('retry reaches the session', async () => {

@@ -236,7 +236,7 @@ export async function handleApprovePlan(deps: PlanManagerDeps): Promise<void> {
   // snapshot of its store, and the plan object itself must stay the same one
   // so `loadPlan` keeps the live planner conversation.
   plan.tasks = approvedTasks(plan.tasks);
-  deps.session.loadPlan(plan, deps.getCurrentGoal(), '');
+  deps.session.loadPlan(plan, deps.getCurrentGoal(), deps.fsAdapter.getWorkspaceRoot());
   deps.chatProvider.planApproved();
   deps.chatProvider.clearIsolationHandoff();
   saveState(plan, deps.fsAdapter.getWorkspaceRoot());

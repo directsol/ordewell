@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createTask, type LegacyPlanState } from '../../models/Task';
-import { FakeTerminalSession, makeSession, testWorkspace } from './sessionTestKit';
+import { FakeTerminalSession, makeSession, saves, testWorkspace } from './sessionTestKit';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
 
 /** A runner double that records the order tasks were spawned in. */
@@ -128,5 +128,54 @@ describe('continueConversation rollback on failure', () => {
     expect(errorSpy).toHaveBeenCalled();
 
     errorSpy.mockRestore();
+  });
+});
+
+describe('continueConversation rollback when a task settles mid-turn', () => {
+  // A verdict is saved the moment it lands, the in-flight turn's user message
+  // with it. That save is not the turn landing: a turn that then fails still
+  // takes its message back out, and the undo reaches disk too.
+  it('rolls back the failed turn in memory and on disk', async () => {
+    const live = new Map<string, FakeTerminalSession>();
+    const runner = {
+      spawn: vi.fn(async ({ taskId }: { taskId: string }) => {
+        const s = new FakeTerminalSession(`s-${taskId}`, taskId);
+        live.set(taskId, s);
+        return s;
+      }),
+      stop: vi.fn(),
+      stopAll: vi.fn(),
+      activeCount: 0,
+    } as unknown as ITerminalRunner;
+    let finishTask = (): void => {};
+    const session = makeSession({
+      runner,
+      aiService: {
+        startConversation: vi.fn(),
+        continueConversation: vi.fn(async () => {
+          finishTask();
+          await vi.waitFor(() => expect(session.planTasks[0].status).toBe('completed'));
+          throw new Error('planner transport down');
+        }),
+        hasActiveConversation: () => true,
+        reset: vi.fn(),
+      },
+    });
+    const plan = dialoguePlan();
+    plan.tasks = [createTask({ id: 'a', order: 1, title: 'Setup', prompt: 'p', assignedRunner: 'claude-code' })];
+    session.loadPlan(plan, 'build me a parser', testWorkspace, { persist: false });
+    await session.executePlan();
+    finishTask = () => {
+      const marker = session.planTasks[0].completionMarker;
+      live.get('a')!.emitOutput(`<<<ORDEWELL_DONE_${marker}>>>\n`);
+      live.get('a')!.emitExit(0);
+    };
+
+    await expect(session.continueConversation('JSON and YAML')).rejects.toThrow('planner transport down');
+
+    expect(session.planState!.conversationHistory!.map((m) => m.content)).toEqual(['build me a parser', 'Which file formats?']);
+    const onDisk = saves(session).mock.calls.at(-1)![0];
+    expect(onDisk.conversationHistory!.map((m) => m.content)).toEqual(['build me a parser', 'Which file formats?']);
+    expect(onDisk.tasks[0].status).toBe('completed');
   });
 });
