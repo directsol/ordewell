@@ -186,7 +186,7 @@ export const TASK_QUERY_REMINDER =
   `- To READ a task in full (prompt, user steps, verdict, output, user stories) or the whole model/mode catalog before editing, reply with ONLY {"${TASK_QUERY_ENVELOPE_KEY}":{"tasks":["<id or #order>"],"catalog":true}} — it changes nothing, and you then reply again with your ops.`;
 
 /** Resolve a query reference — an id, "#order", a bare order, or an exact title. */
-function findTask(tasks: Task[], ref: string): Task | undefined {
+function findTask(tasks: readonly Task[], ref: string): Task | undefined {
   const byId = tasks.find((t) => t.id === ref);
   if (byId) return byId;
   const orderStr = ref.startsWith('#') ? ref.slice(1) : ref;
@@ -320,7 +320,7 @@ function renderCatalog(catalog: TaskQueryCatalog): string[] {
  */
 export function renderTaskQueryAnswer(
   query: TaskQuery,
-  tasks: Task[],
+  tasks: readonly Task[],
   catalog: TaskQueryCatalog,
   liveOutput?: LiveOutputLookup,
 ): string {

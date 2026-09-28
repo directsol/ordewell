@@ -563,7 +563,7 @@ export class TaskOrchestrator {
     return this.messageQueue.shift() ?? null;
   }
 
-  loadPlan(tasks: Task[], planRunners: RunnerId[] = ['claude-code']): void {
+  loadPlan(tasks: readonly Task[], planRunners: RunnerId[] = ['claude-code']): void {
     this.store.load(tasks, planRunners);
     const repairs = this.endAllAttempts('load').filter((a) => a.repair && a.worktree);
     for (const a of repairs) void this.releaseWorktree(a.taskId, { keep: true }, a.integration);

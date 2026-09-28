@@ -710,6 +710,49 @@ describe('currentPlanState — the live plan a surface refreshes from', () => {
   });
 });
 
+describe('planState.tasks — written from the store, never shared with it', () => {
+  function planOf(tasks: ReturnType<typeof createTask>[]): LegacyPlanState {
+    return { tasks, generatedAt: '', status: 'approved', runners: ['claude-code'], lastUpdated: '' };
+  }
+
+  it('does not let an edit to the plan object reach the store, or the store reach the caller\'s tasks', () => {
+    const input = [createTask({ id: 't1', order: 1, title: 'First', prompt: 'p', status: 'failed' })];
+    const session = makeSession();
+    session.loadPlan(planOf(input), 'Test', '/repo');
+
+    expect(input[0].status).toBe('failed');
+    expect(session.planState!.tasks[0].status).toBe('pending');
+
+    session.planState!.tasks[0].status = 'completed';
+    expect(session.planTasks[0].status).toBe('pending');
+    expect(session.getTask('t1')!.status).toBe('pending');
+  });
+
+  // VS Code re-renders from its plan object when a status_update lands, so the
+  // plan has to carry the statuses that broadcast announces.
+  it('is current by the time a status_update is broadcast', async () => {
+    const seen: (string | undefined)[] = [];
+    const runner = {
+      spawn: vi.fn().mockImplementation((req: { taskId: string }) => Promise.resolve(new FakeTerminalSession(`s-${req.taskId}`, req.taskId))),
+      stop: vi.fn(),
+      stopAll: vi.fn(),
+      activeCount: 0,
+    } as unknown as ITerminalRunner;
+    const session: Session = makeSession({
+      runner,
+      broadcast: vi.fn((msg: { type: string }) => {
+        if (msg.type === 'status_update') seen.push(session.planState?.tasks[0].status);
+      }),
+    });
+    session.loadPlan(planOf([createTask({ id: 't1', order: 1, title: 'First', prompt: 'p', completionMarker: 'mk-1' })]), 'Test', '/repo');
+
+    await session.executePlan();
+
+    expect(seen).toContain('in_progress');
+    expect(seen.at(-1)).toBe(session.getTask('t1')!.status);
+  });
+});
+
 describe('session id stability (persist seam)', () => {
   function smallPlan(): LegacyPlanState {
     return {

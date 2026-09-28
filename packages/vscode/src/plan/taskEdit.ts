@@ -9,7 +9,7 @@ import type { TaskDraft } from '../shared/protocol';
  * `removeTaskFromPlan` strips the dead id from every dependency list, so a user
  * who is not told loses edges they never edited.
  */
-export function removalPrompt(tasks: Task[], taskId: string): string {
+export function removalPrompt(tasks: readonly Task[], taskId: string): string {
   const all = flattenTasks(tasks);
   const title = all.find((t) => t.id === taskId)?.title;
   const question = title ? `Remove "${title}"?` : 'Remove this task?';

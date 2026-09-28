@@ -20,7 +20,7 @@ export function summarizeOutput(reviewReason: string | undefined, output: string
   };
 }
 
-export function collectDirectDependencyOutputs(task: Task, allTasks: Task[]): PriorOutput[] {
+export function collectDirectDependencyOutputs(task: Task, allTasks: readonly Task[]): PriorOutput[] {
   const byId = new Map(allTasks.map((t) => [t.id, t]));
   const out: PriorOutput[] = [];
   for (const depId of task.dependencies ?? []) {
@@ -67,7 +67,7 @@ export function renderPriorOutputs(outputs: PriorOutput[]): string {
   return `## Prior task outputs\n\n${blocks.join('\n\n')}`;
 }
 
-export function augmentPromptWithPriorOutputs(task: Task, allTasks: Task[]): string {
+export function augmentPromptWithPriorOutputs(task: Task, allTasks: readonly Task[]): string {
   const basePrompt = task.prompt ?? '';
   const outputs = collectDirectDependencyOutputs(task, allTasks);
   if (outputs.length === 0) return basePrompt;
@@ -107,7 +107,7 @@ function pickWindow(sorted: PlanMapRow[], currentIdx: number, max: number): { wi
  * `taskOrderLabel` the other surfaces use, so an `N.M` the model echoes back
  * matches what `resolveTaskId` accepts.
  */
-export function renderPlanMap(planTasks: Task[], currentTaskId: string, opts?: { maxEntries?: number }): string {
+export function renderPlanMap(planTasks: readonly Task[], currentTaskId: string, opts?: { maxEntries?: number }): string {
   const rows = flattenTasksWithParents(planTasks);
   if (rows.length < PLAN_MAP_MIN_TASKS) return '';
 
@@ -205,7 +205,7 @@ function isHitlTask(task: Task): boolean {
   return task.autonomy === 'HITL' || task.sliceType === 'HITL';
 }
 
-export function composeAugmentedPrompt(task: Task, allTasks: Task[], opts?: ComposeOptions): string {
+export function composeAugmentedPrompt(task: Task, allTasks: readonly Task[], opts?: ComposeOptions): string {
   const basePrompt = task.prompt ?? '';
   const blocks: string[] = [];
 

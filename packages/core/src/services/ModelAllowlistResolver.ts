@@ -101,7 +101,7 @@ export function clampThinkingEffort(
 }
 
 export function coerceAssignments(
-  tasks: Task[],
+  tasks: readonly Task[],
   perRunnerAllowlist: Partial<Record<RunnerId, string[]>>,
   allowedRunners?: RunnerId[],
   modelsByRunner?: Partial<Record<RunnerId, DiscoveredModel[]>>,

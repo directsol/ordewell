@@ -40,7 +40,7 @@ function halfDonePlan(): LegacyPlanState {
  * new one. Recorded from a real session — the finished tasks came back
  * `pending` with a placeholder prompt.
  */
-function rewrittenWithAddedTask(current: Task[]): Task[] {
+function rewrittenWithAddedTask(current: readonly Task[]): Task[] {
   return [
     ...current.map((t) => ({
       ...t,
@@ -131,7 +131,7 @@ describe('a planner rewrite never undoes finished work', () => {
       },
       aiService: {
         startConversation: vi.fn(),
-        continueConversation: vi.fn(async () => ({ kind: 'plan' as const, tasks: session.planTasks, text: '', researchLog: [] })),
+        continueConversation: vi.fn(async () => ({ kind: 'plan' as const, tasks: [...session.planTasks], text: '', researchLog: [] })),
         hasActiveConversation: () => true,
         reset: vi.fn(),
       },
@@ -187,7 +187,7 @@ describe('a planner rewrite never undoes finished work', () => {
       },
       aiService: {
         startConversation: vi.fn(),
-        continueConversation: vi.fn(async () => ({ kind: 'plan' as const, tasks: session.planTasks, text: '', researchLog: [] })),
+        continueConversation: vi.fn(async () => ({ kind: 'plan' as const, tasks: [...session.planTasks], text: '', researchLog: [] })),
         hasActiveConversation: () => true,
         reset: vi.fn(),
       },
@@ -215,7 +215,7 @@ describe('a planner rewrite never undoes finished work', () => {
       },
       aiService: {
         startConversation: vi.fn(),
-        continueConversation: vi.fn(async () => ({ kind: 'plan' as const, tasks: session.planTasks, text: '', researchLog: [] })),
+        continueConversation: vi.fn(async () => ({ kind: 'plan' as const, tasks: [...session.planTasks], text: '', researchLog: [] })),
         hasActiveConversation: () => true,
         reset: vi.fn(),
       },

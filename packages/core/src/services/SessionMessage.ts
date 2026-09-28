@@ -248,7 +248,7 @@ export function serializePlan(plan: LegacyPlanState): SerializedPlan {
   };
 }
 
-export function executionSummary(tasks: Task[]): { total: number; completed: number; failed: number } {
+export function executionSummary(tasks: readonly Task[]): { total: number; completed: number; failed: number } {
   return {
     total: tasks.length,
     completed: tasks.filter((t) => t.status === 'completed').length,

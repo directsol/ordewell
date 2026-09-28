@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { PlanStore } from '../PlanStore';
 import { createTask } from '../../models/Task';
-import type { TaskSnapshot } from '../../models/Task';
+import type { Task, TaskSnapshot } from '../../models/Task';
 
 function makeSnapshot(taskId: string, overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
   const task = createTask({ id: taskId, title: taskId });
@@ -71,25 +71,8 @@ describe('PlanStore execution log', () => {
     });
   });
 
-  describe('completedTasks survive removeFromActive', () => {
-    it('keeps isCompleted true for a completed task after removeFromActive + rebuild', () => {
-      const t1 = createTask({ id: 't1', title: 'Task 1' });
-      const t2 = createTask({ id: 't2', title: 'Task 2', dependencies: ['t1'] });
-      store.load([t1, t2], ['claude-code']);
-
-      store.markCompleted('t1');
-      expect(store.isCompleted('t1')).toBe(true);
-
-      store.removeFromActive('t1');
-      expect(store.get('t1')).toBeUndefined();
-      expect(store.planTasks.find(t => t.id === 't1')).toBeUndefined();
-
-      expect(store.isCompleted('t1')).toBe(true);
-    });
-  });
-
-  describe('structural removals prune terminal sets', () => {
-    it('remove() drops the task from completedTasks', () => {
+  describe('structural removals leave no terminal record behind', () => {
+    it('remove() leaves no completed record behind', () => {
       const t1 = createTask({ id: 't1', title: 'Task 1' });
       const t2 = createTask({ id: 't2', title: 'Task 2' });
       store.load([t1, t2], ['claude-code']);
@@ -101,7 +84,7 @@ describe('PlanStore execution log', () => {
       expect(store.completedCount).toBe(0);
     });
 
-    it('remove() drops the task from failedTasks', () => {
+    it('remove() leaves no failed record behind', () => {
       const t1 = createTask({ id: 't1', title: 'Task 1' });
       const t2 = createTask({ id: 't2', title: 'Task 2' });
       store.load([t1, t2], ['claude-code']);
@@ -127,7 +110,7 @@ describe('PlanStore execution log', () => {
       expect(store.get('t2')!.dependencies).toEqual([]);
     });
 
-    it('merge() drops both original ids from the terminal sets', () => {
+    it('merge() leaves neither original id completed or failed', () => {
       const t1 = createTask({ id: 't1', title: 'Task 1' });
       const t2 = createTask({ id: 't2', title: 'Task 2' });
       store.load([t1, t2], ['claude-code']);
@@ -217,6 +200,8 @@ describe('PlanStore.resetForRun', () => {
     store.resetForRun({ preserveCompleted: false });
 
     expect(store.get('a')!.status).toBe('approved');
+    expect(store.isCompleted('a')).toBe(false);
+    expect(store.completedCount).toBe(0);
     expect(store.get('b')!.status).toBe('approved');
   });
 
@@ -230,5 +215,123 @@ describe('PlanStore.resetForRun', () => {
 
     expect(store.get('a')!.status).toBe('pending');
     expect(store.get('b')!.status).toBe('approved');
+  });
+});
+
+describe('PlanStore completion and failure have one source', () => {
+  function expectConsistent(store: PlanStore): void {
+    for (const t of store.allTasks) {
+      expect(store.isCompleted(t.id), `isCompleted(${t.id})`).toBe(t.status === 'completed');
+      expect(store.isFailed(t.id), `isFailed(${t.id})`).toBe(t.status === 'failed');
+    }
+    expect(store.completedCount).toBe(store.allTasks.filter((t) => t.status === 'completed').length);
+    expect(store.failedCount).toBe(store.allTasks.filter((t) => t.status === 'failed').length);
+    expect(store.isAnyFailed()).toBe(store.allTasks.some((t) => t.status === 'failed'));
+    expect(store.isAllComplete()).toBe(store.allTasks.every((t) => t.status === 'completed'));
+  }
+
+  function plan(): Task[] {
+    return [
+      createTask({ id: 'a', title: 'A', status: 'completed' }),
+      createTask({ id: 'b', title: 'B', status: 'failed', dependencies: ['a'] }),
+      createTask({ id: 'c', title: 'C', status: 'pending', dependencies: ['b'] }),
+      createTask({ id: 'd', title: 'D', type: 'user', status: 'completed' }),
+      createTask({ id: 'e', title: 'E', status: 'pending' }),
+    ];
+  }
+
+  const ops: [string, (store: PlanStore) => void][] = [
+    ['load', () => {}],
+    ['markCompleted', (s) => s.markCompleted('c')],
+    ['markFailed', (s) => s.markFailed('a')],
+    ['markInProgress', (s) => { s.markCompleted('e'); s.markInProgress('e'); }],
+    ['markPending', (s) => { s.markFailed('e'); s.markPending('e'); }],
+    ['markAwaitingUser', (s) => { s.markCompleted('e'); s.markAwaitingUser('e'); }],
+    ['retry', (s) => { s.markFailed('b'); s.retry('b'); }],
+    ['blockDependents', (s) => { s.markFailed('b'); s.blockDependents('b'); }],
+    ['unblockDependents', (s) => { s.markFailed('b'); s.blockDependents('b'); s.unblockDependents('b'); }],
+    ['remove', (s) => s.remove('a')],
+    ['merge', (s) => { s.markFailed('e'); s.merge('a', 'e'); }],
+    ['split', (s) => { s.markCompleted('e'); s.split('e', [{ title: 'E1' }, { title: 'E2' }]); }],
+    ['update', (s) => s.update('a', { title: 'A2' })],
+    ['resetForRun (preserve)', (s) => { s.markFailed('e'); s.resetForRun(); }],
+    ['resetForRun (fresh)', (s) => { s.markFailed('e'); s.resetForRun({ preserveCompleted: false }); }],
+  ];
+
+  it.each(ops)('agrees with task.status after %s', (_name, op) => {
+    const store = new PlanStore();
+    store.load(plan(), ['claude-code']);
+    op(store);
+    expectConsistent(store);
+  });
+
+  // generatePlan loads a new plan and then resets it fresh. A completed id the
+  // new plan reuses must not stay "done" for its dependents while its own
+  // status says it is ready to run again.
+  it('does not leave a reused completed id satisfying dependents after a fresh reset', () => {
+    const store = new PlanStore();
+    store.load([createTask({ id: 'x', title: 'X', status: 'completed' })], ['claude-code']);
+    store.load([
+      createTask({ id: 'x', title: 'X again', status: 'completed' }),
+      createTask({ id: 'y', title: 'Y', dependencies: ['x'] }),
+    ], ['claude-code']);
+
+    store.resetForRun({ preserveCompleted: false });
+
+    expect(store.get('x')!.status).toBe('approved');
+    expect(store.isCompleted('x')).toBe(false);
+    expectConsistent(store);
+  });
+
+  it('notifies after resetForRun like the other structural ops', () => {
+    const store = new PlanStore();
+    store.load(plan(), ['claude-code']);
+    let calls = 0;
+    store.onMutate = () => { calls++; };
+    store.resetForRun();
+    expect(calls).toBe(1);
+  });
+});
+
+describe('PlanStore owns its tasks', () => {
+  it('load() changes neither the caller\'s array nor its task objects', () => {
+    const tasks = [
+      createTask({ id: 'a', title: 'A', status: 'failed', subtasks: [createTask({ id: 'a1', title: 'A1', status: 'failed' })] }),
+      createTask({ id: 'b', title: 'B', dependencies: ['a'] }),
+    ];
+    const before = structuredClone(tasks);
+    const store = new PlanStore();
+
+    store.load(tasks, ['claude-code']);
+    store.markCompleted('b');
+    store.setTaskVerdict('b', { outcome: 'pass', reason: 'r', checks: [], decidedAt: 'now' });
+    store.markFailed('a1');
+    store.remove('a');
+
+    expect(tasks).toEqual(before);
+    expect(store.get('b')!.status).toBe('completed');
+  });
+
+  it('keeps its own view when a returned array is changed', () => {
+    const store = new PlanStore();
+    store.load([createTask({ id: 'a', title: 'A' })], ['claude-code']);
+
+    // @ts-expect-error — the getters hand out readonly views
+    expect(() => store.planTasks.push(createTask({ id: 'z', title: 'Z' }))).toThrow();
+    // @ts-expect-error — the getters hand out readonly views
+    expect(() => store.allTasks.pop()).toThrow();
+    expect(store.allTasks.map((t) => t.id)).toEqual(['a']);
+  });
+
+  it('hands out snapshots that later status changes do not reach', () => {
+    const store = new PlanStore();
+    store.load([createTask({ id: 'a', title: 'A' })], ['claude-code']);
+    const snap = store.snapshot();
+
+    store.markCompleted('a');
+    expect(snap[0].status).toBe('pending');
+
+    snap[0].status = 'failed';
+    expect(store.get('a')!.status).toBe('completed');
   });
 });

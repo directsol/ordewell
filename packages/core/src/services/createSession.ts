@@ -255,6 +255,8 @@ export class Session {
   /** Last discovered model catalog — lets sync plan commits clamp thinking efforts to real variants. */
   private modelsCache: Partial<Record<RunnerId, DiscoveredModel[]>> = {};
   private unsubObserver: (() => void) | null = null;
+  private statusHeld = false;
+  private statusOwed = false;
   private readonly hostSessionId?: string;
   private currentSessionId: string;
   private readonly skillsService: SkillsService;
@@ -404,9 +406,9 @@ export class Session {
 
   /** The stable id this session persists under — matches the host's id when one was provided. */
   get sessionId(): string { return this.currentSessionId; }
-  get executionLog(): TaskSnapshot[] { return this.store.getExecutionLog(); }
+  get executionLog(): ReadonlyArray<TaskSnapshot> { return this.store.getExecutionLog(); }
   /** Tasks always read from PlanStore — the single source of truth. */
-  get planTasks(): Task[] { return this.store.planTasks; }
+  get planTasks(): ReadonlyArray<Readonly<Task>> { return this.store.planTasks; }
 
   private attachObserver(): void {
     if (this.unsubObserver) this.unsubObserver();
@@ -462,6 +464,11 @@ export class Session {
 
   private broadcastStatus(): void {
     if (!this.plan) return;
+    this.statusOwed = this.statusHeld;
+    if (this.statusHeld) return;
+    // Hosts that render from the plan object (VS Code) read statuses off it
+    // when a status_update arrives, so it has to be current by then.
+    this.syncPlanTasks();
     const tasks = this.store.allTasks;
     this.broadcast({
       type: 'status_update',
@@ -570,12 +577,21 @@ export class Session {
     this.pendingSubagents = [];
   }
 
-  /** Persists PlanStore state to disk. PlanStore is the single authority;
-   * LegacyPlanState.tasks is populated only here, at persist time. */
+  /**
+   * Refresh the plan's task list from the store. LegacyPlanState.tasks is only
+   * ever written here, and always as a detached copy: sharing the store's live
+   * tree let a host that edits `plan.tasks` rewrite task state behind the
+   * store's back.
+   */
+  private syncPlanTasks(): void {
+    if (this.plan) this.plan.tasks = this.store.snapshot();
+  }
+
+  /** Persists PlanStore state to disk. PlanStore is the single authority. */
   private persist(): void {
     if (!this.plan) return;
     this.flushSubagentRuns();
-    this.plan.tasks = this.store.planTasks;
+    this.syncPlanTasks();
     this.plan.isolation = this.orchestrator.isolationRecord ?? undefined;
     this.plan.plannerUsage = this.usageLedger.snapshot();
     this.plan.lastUpdated = new Date().toISOString();
@@ -698,7 +714,7 @@ export class Session {
       phase: 'executing',
       history: [],
       message: '',
-      executionLog,
+      executionLog: [...executionLog],
       pendingTasks,
       goal: this.goal,
       runners: this.plan.runners,
@@ -790,9 +806,12 @@ export class Session {
     }
 
     this.plan = plan;
-    this.orchestrator.loadPlan(plan.tasks, plan.runners);
-    this.store.resetForRun({ preserveCompleted: false });
+    this.withStatusHeld(() => {
+      this.orchestrator.loadPlan(plan.tasks, plan.runners);
+      this.store.resetForRun({ preserveCompleted: false });
+    });
     this.persist();
+    this.releaseHeldStatus();
     this.broadcastPlan();
     return plan;
   }
@@ -961,7 +980,7 @@ export class Session {
    * done. Task ops need no overlay — their applier refuses to touch settled
    * tasks, and `rearm`, the one op meant to change a status, must stand.
    */
-  private adoptPlannerTasks(tasks: Task[], how: 'edit' | 'commit'): number {
+  private adoptPlannerTasks(tasks: readonly Task[], how: 'edit' | 'commit'): number {
     const runners = this.plan!.runners;
     let coerced = coerceAssignments(tasks, this.allowlist(), runners, this.models());
     if (how === 'commit') coerced = keepExecutionState(this.store.planTasks, coerced);
@@ -1293,10 +1312,32 @@ export class Session {
    */
   private mutatePlan(op: () => boolean, notify: () => void = () => this.broadcastPlan()): LegacyPlanState | null {
     if (!this.plan) return null;
-    if (!op()) return null;
-    this.persist();
+    const changed = this.withStatusHeld(op);
+    if (changed) this.persist();
+    this.releaseHeldStatus();
+    if (!changed) return null;
     notify();
     return this.plan;
+  }
+
+  /**
+   * Run a plan adoption with observer status broadcasts held back. Store ops
+   * signal the observer as they go, which would put a status_update on the
+   * wire before the persist the adoption owes — surfaces must never see plan
+   * state the disk does not have yet. {@link releaseHeldStatus} sends it after.
+   */
+  private withStatusHeld<T>(op: () => T): T {
+    const outer = this.statusHeld;
+    this.statusHeld = true;
+    try {
+      return op();
+    } finally {
+      this.statusHeld = outer;
+    }
+  }
+
+  private releaseHeldStatus(): void {
+    if (this.statusOwed) this.broadcastStatus();
   }
 
   /**
@@ -1544,6 +1585,9 @@ export class Session {
     // same file instead of forking the session under a fresh identity.
     if (opts?.sessionId) this.currentSessionId = opts.sessionId;
     this.orchestrator.loadPlan(plan.tasks, plan.runners);
+    // Loading normalizes statuses (a failed task gets a fresh chance) on the
+    // store's copy; the adopted plan shows that result, not the caller's input.
+    this.syncPlanTasks();
     migratePlanStateIsolation(plan);
     // The run record is taken synchronously; only the orphan prune is awaited
     // in the background, and git serializes it ahead of any worktree a run adds.
@@ -1594,6 +1638,7 @@ export class Session {
 
   private broadcastPlan(turnId?: string): void {
     if (!this.plan) return;
+    this.syncPlanTasks();
     this.broadcast({
       type: 'plan_generated',
       plan: serializePlan(this.plan),

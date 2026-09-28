@@ -116,7 +116,7 @@ type RefResolution = { id: string } | { error: string };
  */
 function resolveRef(
   ref: unknown,
-  originalScope: Task[],
+  originalScope: readonly Task[],
   liveScope: Task[],
   handleOwner: Map<string, number>,
   handleId: Map<string, string>,
@@ -285,7 +285,7 @@ function pinnedRefusal(other: Task, pin: Task, side: 'before' | 'after'): string
 
 export interface ApplyTaskOpsResult {
   ok: boolean;
-  tasks: Task[];
+  tasks: readonly Task[];
   errors: string[];
   /** Human-readable summary of what changed, for the chat transcript. */
   summary: string[];
@@ -300,7 +300,7 @@ export interface ApplyTaskOpsResult {
  * which {@link applyTaskOps} repairs; refusing on order would make this
  * pre-flight stricter than the applier it stands in for.
  */
-export function canMergeTasks(tasks: Task[], selectedIds: string[]): { ok: boolean; error?: string } {
+export function canMergeTasks(tasks: readonly Task[], selectedIds: string[]): { ok: boolean; error?: string } {
   if (selectedIds.length < 2) return { ok: false, error: 'Select at least two tasks to merge' };
   const idSet = new Set(selectedIds);
   const toMerge = tasks.filter((t) => idSet.has(t.id));
@@ -348,7 +348,7 @@ export function dependentsOf<T extends Pick<TaskRef, 'id' | 'dependencies'>>(tas
  * the same invariant `applyTaskOps` enforces. Omit `taskId` for a task that does
  * not exist yet: it lands last, so every current task is a candidate.
  */
-export function dependencyCandidates<T extends Pick<TaskRef, 'id' | 'order'>>(tasks: T[], taskId?: string): T[] {
+export function dependencyCandidates<T extends Pick<TaskRef, 'id' | 'order'>>(tasks: readonly T[], taskId?: string): T[] {
   if (!taskId) return [...tasks];
   const target = tasks.find((t) => t.id === taskId);
   return target ? tasks.filter((t) => t.order < target.order) : [];
@@ -356,7 +356,7 @@ export function dependencyCandidates<T extends Pick<TaskRef, 'id' | 'order'>>(ta
 
 /** Pre-flight check for a hand-edited dependency list: every id exists and comes earlier. */
 export function canSetDependencies<T extends TaskRef>(
-  tasks: T[],
+  tasks: readonly T[],
   taskId: string,
   dependencies: string[],
 ): { ok: boolean; error?: string } {
@@ -375,7 +375,7 @@ export function canSetDependencies<T extends TaskRef>(
 }
 
 /** Pre-flight check for a split: the task exists and is not locked by execution. */
-export function canSplitTask(tasks: Task[], taskId: string): { ok: boolean; error?: string } {
+export function canSplitTask(tasks: readonly Task[], taskId: string): { ok: boolean; error?: string } {
   const target = tasks.find((t) => t.id === taskId);
   if (!target) return { ok: false, error: 'Task not found' };
   if (target.status === 'in_progress') return { ok: false, error: `"${target.title}" is running and cannot be split` };
@@ -389,7 +389,7 @@ export function canSplitTask(tasks: Task[], taskId: string): { ok: boolean; erro
  * completed tasks untouched), or nothing is returned and `errors` explains
  * why. The caller commits `tasks` on ok.
  */
-export function applyTaskOps(currentTasks: Task[], ops: TaskOp[], runners: RunnerId[], catalog?: EditCatalog): ApplyTaskOpsResult {
+export function applyTaskOps(currentTasks: readonly Task[], ops: TaskOp[], runners: RunnerId[], catalog?: EditCatalog): ApplyTaskOpsResult {
   let tasks: Task[] = JSON.parse(JSON.stringify(currentTasks));
   const errors: string[] = [];
   const summary: string[] = [];
