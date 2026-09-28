@@ -91,6 +91,7 @@ export {
   type SkillMetadata,
 } from './services/SkillsService';
 export { globalDataDir, migrateOldConfigDir } from './utils/globalDataDir';
+export { writePrivateFile, ensurePrivateDir } from './utils/privateFile';
 export type {
   SessionMessage,
   SessionBroadcaster,

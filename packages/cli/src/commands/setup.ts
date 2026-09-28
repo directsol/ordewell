@@ -1,4 +1,5 @@
-import { writeFileSync, existsSync } from 'fs';
+import { existsSync } from 'fs';
+import { writePrivateFile } from '@ordewell/core';
 import { findEnvFile } from '../utils/env';
 
 export function handleSetup(subArgs: string[]): void {
@@ -75,7 +76,7 @@ export function handleSetup(subArgs: string[]): void {
 # SILICONFLOW_API_KEY=...
 `;
 
-  writeFileSync(envFile, content);
+  writePrivateFile(envFile, content);
   console.log(`Wrote: ${envFile}`);
   console.log('Review and edit the file, then run: ordewell tui');
 }

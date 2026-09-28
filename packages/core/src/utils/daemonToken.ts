@@ -12,9 +12,10 @@
  */
 
 import { randomBytes, timingSafeEqual } from 'crypto';
-import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from 'fs';
+import { readFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { globalDataDir } from './globalDataDir';
+import { writePrivateFile } from './privateFile';
 
 const BEARER_PREFIX = 'bearer ';
 
@@ -47,28 +48,16 @@ export function daemonTokenPath(port: number): string {
 /**
  * Mint this daemon's token and hand it off through the filesystem.
  *
- * Unlink-then-create-exclusively rather than a plain write: `mode` is ignored
- * when the file already exists, so writing over a pre-created file would leave
- * the token at whatever permissions that file already had, and an existing
- * symlink would carry the write somewhere else entirely.
+ * The write goes through `writePrivateFile` rather than a plain write because
+ * `mode` is ignored when the file already exists: writing over a pre-created
+ * file would leave the token at whatever permissions that file already had, and
+ * an existing symlink would carry the write somewhere else entirely. The helper
+ * writes a fresh 0600 temp file and renames it into place, so neither applies.
  */
 export function mintDaemonToken(port: number): { token: string; file: string } {
   const token = randomBytes(32).toString('base64url');
   const file = daemonTokenPath(port);
-
-  mkdirSync(configDir(), { recursive: true });
-  try {
-    unlinkSync(file);
-  } catch {
-    // Nothing there is the normal case.
-  }
-  const fd = openSync(file, 'wx', 0o600);
-  try {
-    writeSync(fd, token);
-  } finally {
-    closeSync(fd);
-  }
-
+  writePrivateFile(file, token);
   return { token, file };
 }
 
