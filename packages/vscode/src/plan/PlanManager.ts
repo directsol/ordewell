@@ -214,6 +214,14 @@ export async function handleSplitPlan(taskId: string, deps: PlanManagerDeps): Pr
   });
 }
 
+function approvedTasks(tasks: Task[]): Task[] {
+  return tasks.map((t) => ({
+    ...t,
+    status: t.status === 'completed' ? t.status : 'approved',
+    subtasks: approvedTasks(t.subtasks ?? []),
+  }));
+}
+
 export async function handleApprovePlan(deps: PlanManagerDeps): Promise<void> {
   deps.log('=== handleApprovePlan START ===');
   if (deps.session.isExecuting) {
@@ -224,8 +232,10 @@ export async function handleApprovePlan(deps: PlanManagerDeps): Promise<void> {
   const plan = deps.getCurrentPlan();
   plan.status = 'approved';
   saveState(plan, deps.fsAdapter.getWorkspaceRoot());
-  const allTasks = flattenTasks(plan.tasks);
-  for (const task of allTasks) { if (task.status !== 'completed') task.status = 'approved'; }
+  // New task objects, not edits in place: the plan's tasks are the Session's
+  // snapshot of its store, and the plan object itself must stay the same one
+  // so `loadPlan` keeps the live planner conversation.
+  plan.tasks = approvedTasks(plan.tasks);
   deps.session.loadPlan(plan, deps.getCurrentGoal(), '');
   deps.chatProvider.planApproved();
   deps.chatProvider.clearIsolationHandoff();

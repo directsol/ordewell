@@ -123,7 +123,7 @@ function typeCoherenceCheck(target: Task, changes: Partial<Task>): TaskEditCheck
  */
 export function validateTaskEdit(
   actor: TaskEditActor,
-  tasks: Task[],
+  tasks: readonly Task[],
   taskId: string,
   changes: Partial<Task>,
   catalog?: EditCatalog,

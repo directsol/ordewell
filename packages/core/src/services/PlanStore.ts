@@ -1,60 +1,66 @@
 import {
-  Task, TaskSnapshot, RunnerId, flattenTasks,
+  Task, TaskSnapshot, TaskStatus, RunnerId, flattenTasks,
   addTaskToPlan, removeTaskFromPlan, updateTaskInPlan,
   createTask, renumberTasks,
 } from '../models/Task';
 
+/** Deep copy of a task tree, down to the arrays the store rewrites. */
+function cloneTasks(tasks: ReadonlyArray<Readonly<Task>>): Task[] {
+  return tasks.map((t) => ({ ...t, dependencies: [...t.dependencies], subtasks: cloneTasks(t.subtasks ?? []) }));
+}
+
 /**
  * The deep module owning all plan-shaped state. Holds `planTasks` (the ordered
- * tree the user edits), the flattened `allTasks` view, the `taskMap` index, and
- * the `completedTasks`/`failedTasks` sets the scheduler reads. The orchestrator
- * calls `markCompleted`/`markFailed`/`markInProgress`/`retry` to update task
- * status — it never mutates task state directly.
+ * tree the user edits), the flattened `allTasks` view and the `taskMap` index.
+ * The orchestrator calls `markCompleted`/`markFailed`/`markInProgress`/`retry`
+ * to update task status — it never mutates task state directly.
+ *
+ * Completion and failure are read from `task.status` and nothing else, so
+ * `isCompleted`, `completedCount`, `isAllComplete` and the scheduler's
+ * dependency checks cannot disagree. The store owns its task objects: `load`
+ * copies what it is given, the getters hand out readonly views, and
+ * `snapshot` is the copy a caller may keep or write to disk.
  *
  * `rebuild` is the internal seam that keeps the flat views in sync with the
- * tree. Structural removals (remove/merge/split) additionally prune
- * `completedTasks`/`failedTasks` for ids that no longer exist; `removeFromActive`
- * deliberately does not, so a completed task that leaves the active list still
- * satisfies its dependents' dependency checks.
+ * tree.
  *
  * `planRunners` lives here because it's part of the plan's identity (the runner
  * set, carried on the plan). `validateAssignedRunners` is pure store logic.
  */
 export class PlanStore {
-  private _planTasks: Task[] = [];
-  private _allTasks: Task[] = [];
+  private _planTasks: readonly Task[] = [];
+  private _allTasks: readonly Task[] = [];
   private _taskMap = new Map<string, Task>();
-  private _completedTasks = new Set<string>();
-  private _failedTasks = new Set<string>();
   private _planRunners: RunnerId[] = ['claude-code'];
   private _onMutate: (() => void) | null = null;
   private _executionLog: TaskSnapshot[] = [];
 
-  /** Hook called after every structural mutation (add/remove/update/merge/split/load). */
+  /** Hook called after every structural mutation (add/remove/update/merge/split/resetForRun). */
   set onMutate(cb: (() => void) | null) { this._onMutate = cb; }
 
-  get planTasks(): Task[] { return this._planTasks; }
-  get allTasks(): Task[] { return this._allTasks; }
+  get planTasks(): ReadonlyArray<Readonly<Task>> { return this._planTasks; }
+  get allTasks(): ReadonlyArray<Readonly<Task>> { return this._allTasks; }
   get planRunners(): RunnerId[] { return this._planRunners; }
-  get completedCount(): number { return this._completedTasks.size; }
-  get failedCount(): number { return this._failedTasks.size; }
+  get completedCount(): number { return this.countStatus('completed'); }
+  get failedCount(): number { return this.countStatus('failed'); }
 
   isAllComplete(): boolean { return this._allTasks.every((t) => t.status === 'completed'); }
-  isAnyFailed(): boolean { return this._failedTasks.size > 0; }
-  isCompleted(id: string): boolean { return this._completedTasks.has(id); }
-  isFailed(id: string): boolean { return this._failedTasks.has(id); }
+  isAnyFailed(): boolean { return this._allTasks.some((t) => t.status === 'failed'); }
+  isCompleted(id: string): boolean { return this._taskMap.get(id)?.status === 'completed'; }
+  isFailed(id: string): boolean { return this._taskMap.get(id)?.status === 'failed'; }
 
-  get(taskId: string): Task | undefined { return this._taskMap.get(taskId); }
+  get(taskId: string): Readonly<Task> | undefined { return this._taskMap.get(taskId); }
 
-  getExecutionLog(): TaskSnapshot[] { return this._executionLog; }
+  /** A copy of the task tree, detached from the store: later status changes do not reach it. */
+  snapshot(): Task[] { return cloneTasks(this._planTasks); }
+
+  getExecutionLog(): ReadonlyArray<TaskSnapshot> { return this._executionLog; }
 
   appendToLog(snapshot: TaskSnapshot): void {
     const idx = this._executionLog.findIndex((s) => s.id === snapshot.id);
-    if (idx >= 0) {
-      this._executionLog[idx] = snapshot;
-    } else {
-      this._executionLog.push(snapshot);
-    }
+    this._executionLog = idx >= 0
+      ? this._executionLog.map((s, i) => (i === idx ? snapshot : s))
+      : [...this._executionLog, snapshot];
   }
 
   /**
@@ -66,23 +72,19 @@ export class PlanStore {
     this._executionLog = this._executionLog.filter((s) => s.id !== taskId);
   }
 
-  removeFromActive(taskId: string): void {
-    this._planTasks = this._planTasks.filter((t) => t.id !== taskId);
-    this.rebuild();
-    this.notifyMutate();
-  }
-
   clearLog(): void {
     this._executionLog = [];
   }
 
   private notifyMutate(): void { this._onMutate?.(); }
 
-  load(tasks: Task[], runners: RunnerId[]): void {
-    this._planTasks = tasks;
-    this._planRunners = runners;
-    this._completedTasks.clear();
-    this._failedTasks.clear();
+  private countStatus(status: TaskStatus): number {
+    return this._allTasks.filter((t) => t.status === status).length;
+  }
+
+  load(tasks: ReadonlyArray<Readonly<Task>>, runners: readonly RunnerId[]): void {
+    this._planTasks = cloneTasks(tasks);
+    this._planRunners = [...runners];
     this.rebuild();
     // Completed tasks survive a reload so a half-finished plan resumes the
     // remainder (their output summaries still feed dependents). Failed tasks
@@ -90,11 +92,7 @@ export class PlanStore {
     // a task's terminal session is live (forceStartTask); orphaned in_progress
     // from a saved session is normalized at the disk-load boundary instead.
     for (const task of this._allTasks) {
-      if (task.status === 'completed') {
-        this._completedTasks.add(task.id);
-      } else if (task.status === 'failed') {
-        task.status = 'pending';
-      }
+      if (task.status === 'failed') task.status = 'pending';
     }
     this.validateAssignedRunners();
   }
@@ -116,7 +114,6 @@ export class PlanStore {
     this.unblockDependents(taskId);
     this._planTasks = removeTaskFromPlan(this._planTasks, taskId);
     this.rebuild();
-    this.pruneTerminalSets();
     this.notifyMutate();
   }
 
@@ -189,7 +186,6 @@ export class PlanStore {
 
     this._planTasks = renumberTasks([...sanitized, merged]);
     this.rebuild();
-    this.pruneTerminalSets();
     this.notifyMutate();
     return merged;
   }
@@ -230,7 +226,6 @@ export class PlanStore {
 
     this._planTasks = renumberTasks([...updatedOthers, ...finalized]);
     this.rebuild();
-    this.pruneTerminalSets();
     this.notifyMutate();
     return finalized;
   }
@@ -249,25 +244,20 @@ export class PlanStore {
       if (preserveCompleted && t.status === 'completed') continue;
       t.status = 'approved';
     }
+    this.notifyMutate();
   }
 
   markCompleted(id: string): void {
-    this._failedTasks.delete(id);
-    this._completedTasks.add(id);
     const task = this._taskMap.get(id);
     if (task) task.status = 'completed';
   }
 
   markFailed(id: string): void {
-    this._completedTasks.delete(id);
-    this._failedTasks.add(id);
     const task = this._taskMap.get(id);
     if (task) task.status = 'failed';
   }
 
   markInProgress(id: string): void {
-    this._completedTasks.delete(id);
-    this._failedTasks.delete(id);
     const task = this._taskMap.get(id);
     if (task) task.status = 'in_progress';
   }
@@ -278,15 +268,11 @@ export class PlanStore {
   }
 
   markPending(id: string): void {
-    this._completedTasks.delete(id);
-    this._failedTasks.delete(id);
     const task = this._taskMap.get(id);
     if (task) task.status = 'pending';
   }
 
   retry(id: string): void {
-    this._failedTasks.delete(id);
-    this._completedTasks.delete(id);
     const task = this._taskMap.get(id);
     if (task) {
       task.status = 'pending';
@@ -342,7 +328,7 @@ export class PlanStore {
     }
 
     return {
-      tasks: this._planTasks.map(t => ({ id: t.id, title: t.title, dependencies: t.dependencies, parallelGroups: [] })),
+      tasks: this._planTasks.map(t => ({ id: t.id, title: t.title, dependencies: [...t.dependencies], parallelGroups: [] })),
       parallelGroups,
     };
   }
@@ -357,7 +343,7 @@ export class PlanStore {
     if (!this._planRunners.includes(runner)) this._planRunners = [...this._planRunners, runner];
   }
 
-  resolveTaskRunner(task: Task): RunnerId {
+  resolveTaskRunner(task: Readonly<Task>): RunnerId {
     if (task.assignedRunner && this._planRunners.includes(task.assignedRunner)) return task.assignedRunner;
     const fallback = this._planRunners[0] ?? 'claude-code';
     if (task.assignedRunner) {
@@ -370,25 +356,13 @@ export class PlanStore {
   }
 
   private rebuild(): void {
-    this._allTasks = flattenTasks(this._planTasks);
+    // Frozen because the getters return these arrays as they are; a caller
+    // that casts the readonly type away still cannot reshape the plan.
+    Object.freeze(this._planTasks);
+    this._allTasks = Object.freeze(flattenTasks(this._planTasks));
     this._taskMap.clear();
     for (const task of this._allTasks) {
       this._taskMap.set(task.id, task);
-    }
-  }
-
-  /**
-   * Drop completed/failed ids that no longer exist in the plan. Called by the
-   * structural removals (remove/merge/split) — but NOT by removeFromActive,
-   * where a completed task leaves the active list yet must still satisfy its
-   * dependents' dependency checks.
-   */
-  private pruneTerminalSets(): void {
-    for (const id of [...this._completedTasks]) {
-      if (!this._taskMap.has(id)) this._completedTasks.delete(id);
-    }
-    for (const id of [...this._failedTasks]) {
-      if (!this._taskMap.has(id)) this._failedTasks.delete(id);
     }
   }
 

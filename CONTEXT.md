@@ -12,15 +12,17 @@ This file is the vocabulary the rest of the documentation is written in (see
 ## Planning & execution
 
 **PlanStore** — the deep module owning all plan-shaped state: the task tree
-(`planTasks`), the flattened index (`allTasks`, `taskMap`), the completed/failed
-sets, and `planRunners`. Owns structural CRUD (`add`/`remove`/`update`/`merge`/
+(`planTasks`), the flattened index (`allTasks`, `taskMap`), and `planRunners`.
+Owns structural CRUD (`add`/`remove`/`update`/`merge`/
 `split`), status mutations (`markCompleted`/`markFailed`/
 `markInProgress`/`retry`), the named run-preparation op (`resetForRun` — flip
 AI tasks to approved, preserving completed ones unless the plan was freshly
-generated), runner-set validation, and the `rebuild` internal seam. Structural
-removals prune stale completed/failed entries; `removeFromActive` deliberately
-keeps them so a completed task that left the active list still satisfies its
-dependents. The TaskOrchestrator is a
+generated), runner-set validation, and the `rebuild` internal seam. Completed
+and failed are read from `task.status` alone — there is no second record — so
+`isCompleted`, `completedCount`, `isAllComplete` and the scheduler's
+dependency checks always agree. The store owns its task objects: `load` copies
+what it is given, the getters return readonly views, and `snapshot()` is the
+detached copy a caller may keep or persist. The TaskOrchestrator is a
 pure scheduler that calls `store.markCompleted(id)` instead of mutating task
 state directly; Session owns the store and routes plan mutations through it.
 *Avoid:* "the task list", "the plan state" — PlanStore is the module; the
@@ -51,8 +53,8 @@ directly. Direct (non-planner) edits go one step further
 through `editPlan`, which adds the reschedule they owe an armed scheduler:
 nothing else wakes one after a hand edit, because a direct edit never queues,
 so a task the edit unblocked would sit ready and never start. PlanStore is the single source of truth for task
-state; `LegacyPlanState.tasks` is written from it at persist time and never read
-back into it. The old
+state; `LegacyPlanState.tasks` is written from it (a `snapshot()`, never the
+live tree) at persist and status-broadcast time and never read back into it. The old
 `syncStoreFromPlan` (plan → store direction) is removed — there is only one
 direction (store → plan, at persist). Emits
 **SessionMessage** (the plan-lifecycle events) through the `broadcast` seam;

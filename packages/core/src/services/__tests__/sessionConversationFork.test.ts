@@ -7,6 +7,7 @@ import * as sessionStore from '../../utils/sessionStore';
 import type { ConversationTurn } from '../AiService';
 import { ConversationBusyError, ConversationEditError } from '../PlannerConversation';
 import { makeSession } from './sessionTestKit';
+import { forkPlanState } from '../conversationFork';
 import { FakeWorktreeIsolation } from '../../testing';
 
 const GOAL = 'build me a parser';
@@ -93,20 +94,25 @@ describe('Session.forkConversation', () => {
   it('carries no run: in-flight and checkpointed tasks become pending, finished ones keep their outcome, queued edits stay behind', () => {
     const session = makeSession();
     session.loadPlan(runningPlan(), GOAL, workspace, { sessionId: 'session-original', persist: false });
-    // Adoption re-arms failed tasks, so a failure only exists the way a run leaves one.
-    session.planTasks.find((t) => t.id === 'broken')!.status = 'failed';
     vi.mocked(sessionStore.saveSession).mockRestore();
 
     const fork = session.forkConversation();
 
     const saved = sessionStore.loadSession(fork.sessionId, workspace)!.plan;
     expect(saved.tasks.map((t) => [t.id, t.status])).toEqual([
-      ['done', 'completed'], ['running', 'pending'], ['checkpoint', 'pending'], ['broken', 'failed'], ['later', 'pending'],
+      ['done', 'completed'], ['running', 'pending'], ['checkpoint', 'pending'], ['broken', 'pending'], ['later', 'pending'],
     ]);
     expect(saved.tasks[0].verdict?.reason).toBe('marker seen');
     expect(saved.tasks[1].outputSummary).toBeUndefined();
     expect(saved.queuedMessages).toBeUndefined();
-    expect(session.planTasks.map((t) => t.status)).toEqual(['completed', 'in_progress', 'awaiting_user', 'failed', 'pending']);
+    expect(session.planTasks.map((t) => t.status)).toEqual(['completed', 'in_progress', 'awaiting_user', 'pending', 'pending']);
+  });
+
+  // Adoption re-arms failed tasks, so a failure reaches a fork only the way a
+  // run leaves one in the store — checked on the builder directly.
+  it('keeps a failed task failed', () => {
+    const fork = forkPlanState(runningPlan(), runningPlan().tasks, { conversationHistory: [], researchLog: [] }, '2026-01-02T00:00:00Z');
+    expect(fork.tasks.find((t) => t.id === 'broken')!.status).toBe('failed');
   });
 
   it('is what a rewind forks through: mid-run, the rewound fork carries no run either', () => {

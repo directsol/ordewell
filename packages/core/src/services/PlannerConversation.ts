@@ -78,7 +78,7 @@ export interface PlannerConversationHost {
   opening(runners: RunnerId[]): Promise<ConversationOpening>;
   /** What the per-turn catalog block and every read draw from, as of now. */
   catalog(): TaskQueryCatalog;
-  tasks(): Task[];
+  tasks(): readonly Task[];
   /**
    * The orchestrator's live capture for a task's latest attempt, backing the
    * `output` field of a read. Injected the same way as the catalog so the
@@ -94,7 +94,7 @@ export interface PlannerConversationHost {
   /** Validate a batch against live state. Pure — nothing is applied. */
   validateOps(ops: TaskOp[]): ApplyTaskOpsResult;
   /** Load planner-produced tasks: an edit keeps run state, a commit starts over. Returns how many landed. */
-  adoptTasks(tasks: Task[], how: 'edit' | 'commit'): number;
+  adoptTasks(tasks: readonly Task[], how: 'edit' | 'commit'): number;
   capturePrd(text: string): void;
   /** Park a structural edit until the next batch boundary. Returns the queue length. */
   queueEdit(userMessage: string): number;

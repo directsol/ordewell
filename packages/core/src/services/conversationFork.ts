@@ -30,7 +30,7 @@ function forkTask(task: Task): Task {
  * per-run execution records). A field added to the plan later stays behind
  * until someone decides here that it should travel.
  */
-export function forkPlanState(plan: LegacyPlanState, tasks: Task[], dialogue: ForkedDialogue, now: string): LegacyPlanState {
+export function forkPlanState(plan: LegacyPlanState, tasks: readonly Task[], dialogue: ForkedDialogue, now: string): LegacyPlanState {
   return {
     tasks: tasks.map(forkTask),
     // The fork is a new session: it lists as the newest, not beside the original.

@@ -520,7 +520,7 @@ export function createEmptyPlan(): LegacyPlanState {
   };
 }
 
-export function flattenTasks(tasks: Task[]): Task[] {
+export function flattenTasks(tasks: readonly Task[]): Task[] {
   return tasks.flatMap((t) => [t, ...flattenTasks(t.subtasks ?? [])]);
 }
 
@@ -530,7 +530,7 @@ export interface TaskWithParent {
   parent: Task | null;
 }
 
-export function flattenTasksWithParents(tasks: Task[]): TaskWithParent[] {
+export function flattenTasksWithParents(tasks: readonly Task[]): TaskWithParent[] {
   const rows: TaskWithParent[] = [];
   const walk = (t: Task, parent: Task | null) => {
     rows.push({ task: t, parent });
@@ -568,7 +568,7 @@ export function migrateTask(task: Record<string, unknown>): Task {
   return task as unknown as Task;
 }
 
-export function addTaskToPlan(tasks: Task[], partial: Partial<Task>): Task[] {
+export function addTaskToPlan(tasks: readonly Task[], partial: Partial<Task>): Task[] {
   const maxOrder = tasks.reduce((max, t) => Math.max(max, t.order), 0);
   const newTask = createTask({
     ...partial,
@@ -578,7 +578,7 @@ export function addTaskToPlan(tasks: Task[], partial: Partial<Task>): Task[] {
   return renumberTasks([...tasks, newTask]);
 }
 
-export function removeTaskFromPlan(tasks: Task[], taskId: string): Task[] {
+export function removeTaskFromPlan(tasks: readonly Task[], taskId: string): Task[] {
   const result = tasks
     .filter((t) => t.id !== taskId)
     .map((t) => ({
@@ -589,7 +589,7 @@ export function removeTaskFromPlan(tasks: Task[], taskId: string): Task[] {
   return renumberTasks(result);
 }
 
-export function updateTaskInPlan(tasks: Task[], taskId: string, changes: Partial<Task>): Task[] {
+export function updateTaskInPlan(tasks: readonly Task[], taskId: string, changes: Partial<Task>): Task[] {
   return renumberTasks(
     tasks.map((t) => {
       if (t.id === taskId) return { ...t, ...changes, id: t.id };
@@ -598,7 +598,7 @@ export function updateTaskInPlan(tasks: Task[], taskId: string, changes: Partial
   );
 }
 
-export function renumberTasks(tasks: Task[]): Task[] {
+export function renumberTasks(tasks: readonly Task[]): Task[] {
   return tasks.map((t, i) => ({
     ...t,
     order: i + 1,
@@ -621,11 +621,11 @@ function holdsSettledWork(task: Task): boolean {
  * neighbour where the rewrite leaves it out. Every other task keeps the status
  * it had; a task the rewrite adds starts pending.
  */
-export function keepExecutionState(current: Task[], rewrite: Task[]): Task[] {
+export function keepExecutionState(current: readonly Task[], rewrite: Task[]): Task[] {
   const existing = new Map(flattenTasks(current).map((t) => [t.id, t]));
   const named = new Set(flattenTasks(rewrite).map((t) => t.id));
 
-  const overlay = (tasks: Task[], was: Task[]): Task[] => {
+  const overlay = (tasks: Task[], was: readonly Task[]): Task[] => {
     const result = tasks.map((t): Task => {
       const prior = existing.get(t.id);
       if (prior && SETTLED_STATUSES.has(prior.status)) return { ...prior };

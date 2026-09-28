@@ -704,7 +704,7 @@ export function buildModifyDuringExecutionPrompt(
  * task-ops protocol (with the "merge" op) is injected alongside it by
  * `planContextBlock`. The model emits a single taskOps merge op.
  */
-export function buildMergePrompt(taskIds: string[], tasks: Task[]): string {
+export function buildMergePrompt(taskIds: string[], tasks: readonly Task[]): string {
   const idSet = new Set(taskIds);
   const selected = tasks.filter((t) => idSet.has(t.id)).sort((a, b) => a.order - b.order);
   const refs = selected.map((t) => `#${t.order} "${t.title}" (id=${t.id})`).join(', ');
@@ -724,7 +724,7 @@ export function buildMergePrompt(taskIds: string[], tasks: Task[]): string {
  * one task into a sequence of smaller tasks. The model decides the breakdown —
  * the user does not hand-type the parts.
  */
-export function buildSplitPrompt(taskId: string, tasks: Task[]): string {
+export function buildSplitPrompt(taskId: string, tasks: readonly Task[]): string {
   const task = tasks.find((t) => t.id === taskId);
   if (!task) return `Split task ${taskId} into smaller tasks.`;
   return [
