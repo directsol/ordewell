@@ -52,6 +52,8 @@ The Session adds to the relay's observer only the saves some events owe, each
 made before the event is announced: a task that settles on its own
 (`onTaskSettled` — completed, failed or awaiting the user) is saved as it
 settles, so a shared run no longer waits for its end to record a verdict.
+These execution-event saves are *background* saves: one that lands in the
+middle of a planner turn does not settle that turn (see *PlannerConversation*).
 Mutation is an internal seam — every structural plan mutation *and every
 settled conversation turn* (plan commit, task-ops apply, planner message) runs
 one `mutatePlan` ritual (store op → persist → broadcast), and so does the
@@ -116,7 +118,9 @@ next turn is replayed from the transcript (`reset` runs before every replay,
 so a harness planner never resumes its own memory on top of the replayed
 one). A turn that throws before anything was persisted rolls its own writes
 back (`snapshot`/`restore`); once anything has been persisted, memory already
-matches disk and the rollback declines. Transcript edits are whole-array
+matches disk and the rollback declines. A background save — a task settling
+mid-turn — does not count: the turn still rolls back, and the undo is saved
+through the mutation ritual so disk follows memory. Transcript edits are whole-array
 operations (`append`, `replace`), so compacting a conversation is a
 transcript edit plus a `reset`; forking and rewinding copy it instead
 (`clone`, `cloneBefore`) and leave it as it was.
@@ -331,7 +335,7 @@ planner-facing booleans travel as one `PlannerModes` value rather than a
 positional tail. A toggle's disk and runtime names (`verify` / `verificationEnabled`)
 therefore meet in one row. Its *display* name does not yet: the webview still
 hand-writes the labels and passes them as positional booleans
-(`setSkillToggles` in `extension.ts`), which is the next seam to fold in. Grilling and PRD are `chat` only because
+(`setSkillToggles`, called from `ExtensionHost.ts` and `PlannerSelection.ts`), which is the next seam to fold in. Grilling and PRD are `chat` only because
 both interview the user and the one-shot prompt states there is nobody to ask.
 Before scopes existed, a toggle used to be silently dropped by the one-shot
 planner while every surface still displayed it as ON, and nothing distinguished
