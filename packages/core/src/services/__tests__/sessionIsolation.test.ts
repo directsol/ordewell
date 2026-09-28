@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { makeSession, FakeTerminalSession } from './sessionTestKit';
+import { makeSession, FakeTerminalSession, taskOf, saves } from './sessionTestKit';
 import { FakeWorktreeIsolation } from '../../testing';
 import * as sessionStore from '../../utils/sessionStore';
 import { createTask, type LegacyPlanState, type Task } from '../../models/Task';
@@ -10,6 +10,7 @@ import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
 import type { SessionMessage, SessionNotice } from '../SessionMessage';
 import type { IsolationMergeResult } from '../../interfaces/IWorktreeIsolation';
 import type { ConversationTurn, IAiService } from '../AiService';
+import type { Session } from '../createSession';
 
 function runner() {
   const sessions: FakeTerminalSession[] = [];
@@ -39,7 +40,7 @@ function setup(isolation = new FakeWorktreeIsolation(), aiService?: Partial<IAiS
   return { session, isolation, messages, notices, pass, lastStatus, ...r };
 }
 
-const saved = () => vi.mocked(sessionStore.saveSession).mock.calls.at(-1)?.[0];
+const saved = (session: Session) => saves(session).mock.calls.at(-1)?.[0];
 
 beforeEach(() => { vi.restoreAllMocks(); });
 
@@ -83,7 +84,7 @@ describe('Session with worktree isolation', () => {
       repos: [{ path: '.', integrationBranch: 'ordewell/run1/integration', baseRef: 'base0000', landed: [{ taskId: 't1', order: 1, title: 'Task t1' }] }],
       landed: [{ taskId: 't1', order: 1, title: 'Task t1' }],
     });
-    expect(saved()!.isolation).toEqual({
+    expect(saved(session)!.isolation).toEqual({
       run: expect.objectContaining({ id: 'run1', repos: [expect.objectContaining({ path: '.', integrationBranch: 'ordewell/run1/integration' })] }),
       resolvers: {},
     });
@@ -272,7 +273,7 @@ describe('Session with worktree isolation', () => {
     await vi.waitFor(() => expect(isolation.calls).toEqual([{ op: 'pruneOrphans' }]));
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(sessionStore.saveSession).not.toHaveBeenCalled();
+    expect(saves(session)).not.toHaveBeenCalled();
   });
 
   it('starts a new plan without the previous plan\'s run', async () => {
@@ -281,12 +282,12 @@ describe('Session with worktree isolation', () => {
     session.loadPlan(plan([t1]), 'goal', '/repo');
     await session.executePlan();
     pass(t1);
-    await vi.waitFor(() => expect(saved()?.isolation).toBeDefined());
+    await vi.waitFor(() => expect(saved(session)?.isolation).toBeDefined());
 
     session.loadPlan(plan([task('x1', 1)]), 'other goal', '/repo');
 
     expect(session.planState!.isolation).toBeUndefined();
-    expect(saved()!.isolation).toBeUndefined();
+    expect(saved(session)!.isolation).toBeUndefined();
   });
 
   describe('end-of-run actions', () => {
@@ -345,25 +346,25 @@ describe('Session with worktree isolation', () => {
       const openMerge = isolation.holdIntegration('t1');
 
       pass(t1);
-      await vi.waitFor(() => expect(saved()!.isolation?.run.landing).toEqual({ taskId: 't1', tips: { '.': 'tip-.' } }));
+      await vi.waitFor(() => expect(saved(session)!.isolation?.run.landing).toEqual({ taskId: 't1', tips: { '.': 'tip-.' } }));
 
       openMerge();
-      await vi.waitFor(() => expect(saved()!.isolation?.run.tasks.t1.status).toBe('merged'));
-      expect(saved()!.isolation?.run.landing).toBeUndefined();
+      await vi.waitFor(() => expect(saved(session)!.isolation?.run.tasks.t1.status).toBe('merged'));
+      expect(saved(session)!.isolation?.run.landing).toBeUndefined();
     });
 
     it('cleans up worktrees but keeps the branch and the record', async () => {
       const { session, isolation } = await landed();
       await session.cleanupRun();
       expect(isolation.calls).toContainEqual({ op: 'discard', integration: 'keep' });
-      expect(saved()!.isolation).toBeDefined();
+      expect(saved(session)!.isolation).toBeDefined();
     });
 
     it('discards the whole run and forgets it', async () => {
       const { session, isolation } = await landed();
       await session.discardRun();
       expect(isolation.calls).toContainEqual({ op: 'discard', integration: 'delete' });
-      expect(saved()!.isolation).toBeUndefined();
+      expect(saved(session)!.isolation).toBeUndefined();
     });
 
     it('refuses while the run is still executing', async () => {
@@ -381,7 +382,7 @@ describe('Session with worktree isolation', () => {
     session.loadPlan(plan([t1, task('t2', 2, { dependencies: ['t1'] })]), 'goal', '/repo');
     await session.executePlan();
     pass(t1);
-    await vi.waitFor(() => expect(session.getTask('t1')!.status).toBe('awaiting_user'));
+    await vi.waitFor(() => expect(taskOf(session, 't1')!.status).toBe('awaiting_user'));
     expect(session.planTasks).toHaveLength(2);
 
     await session.resolveConflictAsTask('t1');
@@ -391,7 +392,7 @@ describe('Session with worktree isolation', () => {
     expect(resolver.prompt).toContain('ordewell/run1/1-t1');
     expect(resolver.assignedModel?.modelId).toBe('sonnet');
     expect(resolver.dependencies).toEqual([]);
-    expect(saved()!.isolation!.resolvers).toEqual({ [resolver.id]: 't1' });
+    expect(saved(session)!.isolation!.resolvers).toEqual({ [resolver.id]: 't1' });
   });
 
   it('asks a resolver to merge the conflicted branch in every repository the task changed, naming where it conflicted', async () => {
@@ -404,7 +405,7 @@ describe('Session with worktree isolation', () => {
     session.loadPlan(plan([t1]), 'goal', '/group');
     await session.executePlan();
     pass(t1);
-    await vi.waitFor(() => expect(session.getTask('t1')!.status).toBe('awaiting_user'));
+    await vi.waitFor(() => expect(taskOf(session, 't1')!.status).toBe('awaiting_user'));
 
     await session.resolveConflictAsTask('t1');
 
@@ -441,22 +442,22 @@ describe('Session with worktree isolation', () => {
       await env.session.executePlan();
       env.pass(t1);
       env.pass(t2);
-      await vi.waitFor(() => expect(env.session.getTask('t2')!.status).toBe('awaiting_user'));
+      await vi.waitFor(() => expect(taskOf(env.session, 't2')!.status).toBe('awaiting_user'));
       return env;
     }
 
     it('leaves the run record and every task\'s isolation as they are through a rewind and a compaction', async () => {
       const { session, lastStatus } = await settledRun(vi.fn().mockResolvedValue(say('<conversation_summary>A goal, split and renamed.</conversation_summary>')));
-      const record = structuredClone(saved()!.isolation);
+      const record = structuredClone(saved(session)!.isolation);
       const marks = lastStatus()!.tasks.map((t) => [t.id, t.status, t.isolation]);
       expect(marks.map(([, , i]) => (i as { state: string }).state)).toEqual(['integrated', 'conflict']);
 
-      const saves = vi.mocked(sessionStore.saveSession).mock.calls;
-      const before = saves.length;
+      const calls = saves(session).mock.calls;
+      const before = calls.length;
       const fork = session.rewindConversation(6);
       // The only write is the fork's: the original's record is not rewritten.
-      expect(saves).toHaveLength(before + 1);
-      const [forked, , , forkedId] = saves.at(-1)!;
+      expect(calls).toHaveLength(before + 1);
+      const [forked, , , forkedId] = calls.at(-1)!;
       expect(forkedId).toBe(fork.sessionId);
       expect(forked.conversationHistory).toHaveLength(6);
       expect(forked.isolation).toBeUndefined();
@@ -464,8 +465,8 @@ describe('Session with worktree isolation', () => {
       expect(session.planState!.isolation).toEqual(record);
 
       await session.compactConversation();
-      expect(saved()!.conversationHistory![0].kind).toBe('compaction');
-      expect(saved()!.isolation).toEqual(record);
+      expect(saved(session)!.conversationHistory![0].kind).toBe('compaction');
+      expect(saved(session)!.isolation).toEqual(record);
       expect(lastStatus()!.tasks.map((t) => [t.id, t.status, t.isolation])).toEqual(marks);
     });
 

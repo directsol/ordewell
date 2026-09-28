@@ -12,8 +12,7 @@ import type { SessionMessage } from '../SessionMessage';
 import { createTask, type ConversationMessage, type LegacyPlanState, type Task } from '../../models/Task';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
 import type { IsolationHandoff, IsolationRun, TaskIsolation } from '../../interfaces/IWorktreeIsolation';
-import * as sessionStore from '../../utils/sessionStore';
-import { fakeConfig, FakeTerminalSession, makeSession } from './sessionTestKit';
+import { fakeConfig, FakeTerminalSession, makeSession, taskOf, saves } from './sessionTestKit';
 
 const hasGit = (() => {
   try { execFileSync('git', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; }
@@ -105,7 +104,7 @@ function scriptedAgent(home: string, session: () => Session, jobFor: (taskId: st
           for (const [file, content] of Object.entries(job.write ?? {})) writeFileSync(join(opts.cwd, file), content);
           job.act?.(opts.cwd);
           if (job.answer) writeTranscript(home, opts.cwd, opts.prompt, job.answer);
-          terminal.emitOutput(`<<<ORDEWELL_DONE_${session().getTask(opts.taskId)!.completionMarker}>>>`);
+          terminal.emitOutput(`<<<ORDEWELL_DONE_${taskOf(session(), opts.taskId)!.completionMarker}>>>`);
         } catch (err) {
           errors.push(err);
         }
@@ -206,7 +205,7 @@ async function conflictedRun(env: Env, conversationHistory?: ConversationMessage
   env.jobs.set('t3', {
     say: 'renaming across api and web',
     until: () => {
-      if (['t1', 't2'].some((id) => session.getTask(id)?.status !== 'completed')) return false;
+      if (['t1', 't2'].some((id) => taskOf(session, id)?.status !== 'completed')) return false;
       tipsBeforeTask3 = Object.fromEntries(REPOS.map((r) => [r, git(env.roots[r], 'rev-parse', env.integration())]));
       return true;
     },
@@ -221,7 +220,7 @@ async function conflictedRun(env: Env, conversationHistory?: ConversationMessage
   ];
   session.loadPlan(plan(tasks, conversationHistory), 'goal', env.dir);
   await session.executePlan();
-  await vi.waitFor(() => expect(session.getTask('t3')!.status).toBe('awaiting_user'), { timeout: 20_000 });
+  await vi.waitFor(() => expect(taskOf(session, 't3')!.status).toBe('awaiting_user'), { timeout: 20_000 });
   return { tipsBeforeTask3 };
 }
 
@@ -256,8 +255,8 @@ describe.skipIf(!hasGit)('isolated execution over a folder of three repositories
     const integration = env.integration();
 
     // Tasks 1 and 2 ran side by side, each in its own task workspace laid out like the folder.
-    expect(session.getTask('t1')!.status).toBe('completed');
-    expect(session.getTask('t2')!.status).toBe('completed');
+    expect(taskOf(session, 't1')!.status).toBe('completed');
+    expect(taskOf(session, 't2')!.status).toBe('completed');
     const cwdOf = (taskId: string) => env.agent.spawned.find((s) => s.taskId === taskId)!.cwd;
     expect(cwdOf('t1')).toBe(join(dir, '.ordewell', 'worktrees', env.run().id, '1-add-the-endpoint'));
     expect(git(roots.api, 'log', '--merges', '--format=%s', `${bases.api}..${integration}`)).toBe('Merge task 1: Add the endpoint');
@@ -391,8 +390,8 @@ describe.skipIf(!hasGit)('isolated execution over a folder of three repositories
 
     release = true;
     await settled(env);
-    expect(session.getTask('t1')!.status).toBe('completed');
-    expect(session.getTask('t1')!.outputSummary?.logTail).toBe('Renamed in both repositories.');
+    expect(taskOf(session, 't1')!.status).toBe('completed');
+    expect(taskOf(session, 't1')!.outputSummary?.logTail).toBe('Renamed in both repositories.');
     expect(env.agent.errors).toEqual([]);
   }, 60_000);
 
@@ -405,12 +404,12 @@ describe.skipIf(!hasGit)('isolated execution over a folder of three repositories
     const before = gitState(env.roots);
 
     const fork = session.forkConversation();
-    const [forked] = vi.mocked(sessionStore.saveSession).mock.calls.find((call) => call[3] === fork.sessionId)!;
+    const [forked] = saves(session).mock.calls.find((call) => call[3] === fork.sessionId)!;
     expect(forked.isolation).toBeUndefined();
     expect(JSON.stringify(forked)).not.toContain(env.run().id);
 
     const rewound = session.rewindConversation(6);
-    const [rewoundFork] = vi.mocked(sessionStore.saveSession).mock.calls.find((call) => call[3] === rewound.sessionId)!;
+    const [rewoundFork] = saves(session).mock.calls.find((call) => call[3] === rewound.sessionId)!;
     expect(rewoundFork.conversationHistory).toHaveLength(6);
     expect(rewoundFork.isolation).toBeUndefined();
     expect(session.planState!.conversationHistory).toHaveLength(8);

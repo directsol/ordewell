@@ -1,8 +1,7 @@
-import { vi } from 'vitest';
-import { Session, type SessionDeps, type SessionPlanner } from '../createSession';
+import { vi, type Mock } from 'vitest';
+import { createSession, type SaveSession, type Session, type SessionDeps, type SessionPlanner } from '../createSession';
 import { RunnerRegistry } from '../../plugins/RunnerRegistry';
 import { ModelResolver } from '../ModelResolver';
-import * as sessionStore from '../../utils/sessionStore';
 import type { IAiService } from '../AiService';
 import type { INotification } from '../../interfaces/INotification';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
@@ -11,6 +10,7 @@ import type { SkillsService } from '../SkillsService';
 import type { TaskOutputSource } from '../../interfaces/TaskOutputSource';
 import type { IWorktreeIsolation } from '../../interfaces/IWorktreeIsolation';
 import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
+import { flattenTasks, type Task } from '../../models/Task';
 
 import { fakeConfig, FakeTerminalSession } from '../../testing';
 
@@ -56,12 +56,23 @@ export interface SessionOverrides {
   isolation?: IWorktreeIsolation;
   /** Defaults to the directory the suite runs in; an end-to-end test points it at a temporary workspace. */
   workspaceRoot?: () => string;
+  /**
+   * Defaults to a fake that writes nothing, read back through {@link saves};
+   * pass `saveSession` itself for a test that reads the store back.
+   */
+  saveSession?: SaveSession;
 }
 
-/**
- * A Session over fully faked deps. `saveSession` is stubbed so no test touches
- * the real saved-session store; assert persistence via `vi.mocked(saveSession)`.
- */
+const saveFakes = new WeakMap<Session, Mock<SaveSession>>();
+
+/** The persistence fake a {@link makeSession} session writes through, for a test that asserts what was saved. */
+export function saves(session: Session): Mock<SaveSession> {
+  const fake = saveFakes.get(session);
+  if (!fake) throw new Error('This session was given its own saveSession; assert on that instead');
+  return fake;
+}
+
+/** A Session over fully faked deps, built through the real composition root. */
 export function makeSession(overrides: SessionOverrides = {}): Session {
   const runner = overrides.runner ?? {
     spawn: vi.fn().mockResolvedValue({ id: 's1', taskId: '', onOutput: vi.fn(), onExit: vi.fn(), kill: vi.fn(), getOutput: () => '', write: vi.fn() }),
@@ -70,12 +81,8 @@ export function makeSession(overrides: SessionOverrides = {}): Session {
     activeCount: 0,
   } as unknown as ITerminalRunner;
 
-  vi.spyOn(sessionStore, 'saveSession').mockImplementation(() => ({
-    id: 'test-session-id', goal: 'test', runners: [], taskCount: 0,
-    status: 'approved', createdAt: '', updatedAt: '',
-  }));
-
-  return new Session({
+  const save = vi.fn<SaveSession>();
+  const session = createSession({
     config: overrides.config ?? fakeConfig(),
     notifications: fakeNotification(),
     runner,
@@ -96,5 +103,23 @@ export function makeSession(overrides: SessionOverrides = {}): Session {
     skillsService: overrides.skillsService as SkillsService | undefined,
     taskOutput: overrides.taskOutput ?? new BufferedTaskOutputSource({ transcripts: { finalAssistantText: async () => null } }),
     isolation: overrides.isolation,
+    saveSession: overrides.saveSession ?? save,
   });
+  if (!overrides.saveSession) saveFakes.set(session, save);
+  return session;
+}
+
+/** One task by id, nested subtasks included — read through the public plan tree. */
+export function taskOf(session: Pick<Session, 'planTasks'>, taskId: string): Readonly<Task> | undefined {
+  return flattenTasks(session.planTasks).find((t) => t.id === taskId);
+}
+
+/** Put `texts` on the session's queue, after whatever is already there, the way a mid-run edit waits. */
+export function queue(session: Pick<Session, 'getQueuedMessages' | 'setQueuedMessages'>, ...texts: string[]): void {
+  const now = new Date().toISOString();
+  const queued = session.getQueuedMessages();
+  session.setQueuedMessages([
+    ...queued,
+    ...texts.map((text, i) => ({ id: `q-test-${queued.length + i + 1}`, text, timestamp: now })),
+  ]);
 }

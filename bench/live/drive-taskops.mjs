@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const core = await import(
   pathToFileURL(path.join(REPO, 'packages/core/dist/index.mjs')).href);
-const { Session, RunnerRegistry, createTask } = core;
+const { createSession, RunnerRegistry, createTask } = core;
 
 const MODEL = process.env.MODEL || 'deepseek/deepseek-v4-flash';
 const KEY = process.env.OPENROUTER_API_KEY;
@@ -39,7 +39,7 @@ const fsAdapter = {
   getWorkspaceRoot: () => sandbox,
 };
 const events = [];
-const session = new Session({
+const session = createSession({
   config,
   notifications: { info() {}, warn() {}, error() {}, async confirm() { return undefined; } },
   runner: { spawn: async () => ({ id: 's', taskId: '', onOutput() {}, onExit() {}, kill() {}, getOutput: () => '', write() {} }), stopAll() {}, activeCount: 0 },

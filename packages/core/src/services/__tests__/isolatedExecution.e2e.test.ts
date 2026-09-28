@@ -13,7 +13,7 @@ import type { SessionMessage } from '../SessionMessage';
 import type { Session } from '../createSession';
 import * as sessionStore from '../../utils/sessionStore';
 import { fakeConfig, FakeTerminalSession } from '../../testing';
-import { fakeNotification, makeSession } from './sessionTestKit';
+import { fakeNotification, makeSession, taskOf } from './sessionTestKit';
 
 const hasGit = (() => {
   try { execFileSync('git', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; }
@@ -240,7 +240,7 @@ describe.skipIf(!hasGit)('isolated execution against a real repository', () => {
       JSON.stringify({ meta: { id: 'session-legacy1', goal: 'goal', runners: ['claude-code'], taskCount: 2, status: 'approved', createdAt: now, updatedAt: now }, plan: saved }),
     );
 
-    const { runner, sawPredecessor } = writingRunner({ t2: { write: ['b.txt'], needs: ['a.txt'] } }, (id) => session.getTask(id)!.completionMarker);
+    const { runner, sawPredecessor } = writingRunner({ t2: { write: ['b.txt'], needs: ['a.txt'] } }, (id) => taskOf(session, id)!.completionMarker);
     const messages: SessionMessage[] = [];
     const session: Session = makeSession({
       runner,

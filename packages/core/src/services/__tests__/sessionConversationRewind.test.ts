@@ -6,7 +6,7 @@ import { createTask, type ConversationMessage, type LegacyPlanState } from '../.
 import * as sessionStore from '../../utils/sessionStore';
 import type { ConversationTurn, IAiService } from '../AiService';
 import { ConversationBusyError, ConversationEditError } from '../PlannerConversation';
-import { makeSession, type SessionOverrides } from './sessionTestKit';
+import { makeSession, type SessionOverrides, saves } from './sessionTestKit';
 
 const GOAL = 'build me a parser';
 
@@ -97,7 +97,7 @@ describe('Session.rewindConversation', () => {
   /** A session adopted from the real store, so both sides are read back the way a surface reads them. */
   function adoptedSession(overrides: SessionOverrides = {}) {
     const session = makeSession(overrides);
-    vi.mocked(sessionStore.saveSession).mockRestore();
+    saves(session).mockImplementation(sessionStore.saveSession);
     sessionStore.saveSession(plannedDialogue(), GOAL, workspace, 'session-original');
     session.loadPlan(sessionStore.loadSession('session-original', workspace)!.plan, GOAL, workspace, { sessionId: 'session-original' });
     return session;

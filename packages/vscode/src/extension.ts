@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { Session, RunnerRegistry, ModelResolver, RunnerInstallation, SettingsService, PlannerModelMemory, sessionRuntimeSettings, createEmptyPlan, LegacyPlanState, getProviderMeta, CLI_PROVIDERS, runnerForProvider, PROVIDER_LABEL, PROVIDER_SHORT_LABEL, PROVIDER_PRIORITY, createSkillsService, parseMaxParallel, type AiProvider } from '@ordewell/core';
+import { createSession, type Session, RunnerRegistry, ModelResolver, RunnerInstallation, SettingsService, PlannerModelMemory, sessionRuntimeSettings, createEmptyPlan, LegacyPlanState, getProviderMeta, CLI_PROVIDERS, runnerForProvider, PROVIDER_LABEL, PROVIDER_SHORT_LABEL, PROVIDER_PRIORITY, createSkillsService, parseMaxParallel, type AiProvider } from '@ordewell/core';
 import { ChatViewProvider, type PlannerBackend } from './providers/ChatViewProvider';
 import { VsCodeConfig } from './adapters/VsCodeConfig';
 import { VsCodeFileSystem } from './adapters/VsCodeFileSystem';
@@ -140,7 +140,7 @@ export async function activate(context: vscode.ExtensionContext) {
     plannerModelMemory = new PlannerModelMemory(settingsService);
     modelResolver = new ModelResolver(pluginRegistry, config);
     chatProvider = new ChatViewProvider(context.extensionUri);
-    session = new Session({
+    session = createSession({
       config,
       notifications,
       runner: terminalRunner,

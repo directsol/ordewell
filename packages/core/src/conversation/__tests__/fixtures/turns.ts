@@ -3,7 +3,7 @@ import type { ConversationInput } from '../../reduce';
 
 /**
  * Planner turns as a surface receives them: `SessionMessage`s in the order the
- * Session broadcasts them (see `createSession.translateProgress` and
+ * Session broadcasts them (see `SessionEventRelay.progress` and
  * `PlannerConversation.userTurn`), with the surface's own lines between.
  */
 

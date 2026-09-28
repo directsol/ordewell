@@ -379,12 +379,6 @@ export class PlannerConversation {
     };
   }
 
-  /** A one-shot `modifyPlan` exchange. Call inside the host's mutation ritual. */
-  recordModification(request: string, requestedAt: string, taskCount: number): void {
-    this.append('user', request, { timestamp: requestedAt });
-    this.append('assistant', `Plan updated — now ${taskCount} task${taskCount === 1 ? '' : 's'}.`, { kind: 'plan_generated' });
-  }
-
   /**
    * Queued mid-run edits applied between batches. The user's message is
    * already in the transcript from when it was queued; this records that it

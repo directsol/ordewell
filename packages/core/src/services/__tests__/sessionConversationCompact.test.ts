@@ -1,10 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createTask, type ConversationMessage, type LegacyPlanState } from '../../models/Task';
-import * as sessionStore from '../../utils/sessionStore';
 import type { ConversationTurn, IAiService } from '../AiService';
 import type { SessionMessage } from '../SessionMessage';
 import { ConversationBusyError, ConversationEditError } from '../PlannerConversation';
-import { makeSession, testWorkspace } from './sessionTestKit';
+import { makeSession, testWorkspace, saves } from './sessionTestKit';
 
 const GOAL = 'build me a parser';
 
@@ -92,7 +91,7 @@ describe('Session.compactConversation', () => {
     expect(history.slice(1).map((m) => m.content)).toEqual(['add streaming', 'Tasks updated:\n- added #2', 'and keep it dependency-free', 'Noted.']);
     expect(session.planTasks).toEqual(tasksBefore);
 
-    const saved = vi.mocked(sessionStore.saveSession).mock.calls.at(-1)![0];
+    const saved = saves(session).mock.calls.at(-1)![0];
     expect(saved.conversationHistory).toHaveLength(5);
     expect(saved.tasks.map((t) => t.id)).toEqual(['t1', 't2']);
     const notice = broadcast.mock.calls.map(([m]) => m).find((m) => m.type === 'planner_message');
@@ -163,13 +162,13 @@ describe('Session.compactConversation', () => {
     const broadcast = vi.fn<(msg: SessionMessage) => void>();
     const session = sessionWith(planner, broadcast);
     state.context = ['live'];
-    vi.mocked(sessionStore.saveSession).mockClear();
+    saves(session).mockClear();
     broadcast.mockClear();
 
     await expect(session.compactConversation()).rejects.toThrow('rate limited');
 
     expect(session.planState!.conversationHistory).toEqual(plannedDialogue().conversationHistory);
-    expect(sessionStore.saveSession).not.toHaveBeenCalled();
+    expect(saves(session)).not.toHaveBeenCalled();
     expect(broadcast).not.toHaveBeenCalled();
   });
 

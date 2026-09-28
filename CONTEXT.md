@@ -29,24 +29,34 @@ state directly; Session owns the store and routes plan mutations through it.
 plan is the artifact.
 
 **Session** — the deep module owning one plan's full lifecycle: generation,
-execution, mutation, persistence, and the orchestrator observer wiring. It
+execution, mutation and persistence. It
 *hosts* the planner conversation but does not own it: `startPlanning`,
 `continueConversation` and `isConversationActive` are thin delegations to a
 **PlannerConversation**, which reaches plan state, persistence and scheduling
 only through the host interface Session hands it.
-Constructed with injected adapters (`config`, `runner`, `registry`,
-`fsAdapter`, `broadcast`, `modelResolver`, `settings`, and optionally
-`aiService`/`planner` — the constructor is the test seam; no test reaches
-into private fields) so it is transport-agnostic. The orchestrator's observer is subscribed once for the
+**`createSession(deps)` is the composition root**: hosts pass injected adapters
+(`config`, `runner`, `registry`, `fsAdapter`, `broadcast`, `modelResolver`,
+`settings`, and optionally `aiService`/`planner`/`isolation`/`taskOutput`/
+`saveSession`) and it builds every collaborator — PlanStore, the
+TaskOrchestrator, the approval chain, the web fetcher, the
+**SessionEventRelay**, the live planner transport — and wires them, so the
+Session constructor only receives them. The deps are the test seam
+(`makeSession` builds through `createSession` with a persistence fake); no test
+reaches into private fields, and none spies on a module export. The Session is
+transport-agnostic. The orchestrator's observer is subscribed once for the
 session's lifetime (not per-operation), killing the double-subscribe class of
 bug — and it is the orchestrator's *only* notification channel: refresh and
 queue-ready signals travel over it and become `status_update`/`queue_ready`
 broadcasts (there is no separate `onRefresh` callback for a surface to wire).
+The Session adds to the relay's observer only the saves some events owe, each
+made before the event is announced: a task that settles on its own
+(`onTaskSettled` — completed, failed or awaiting the user) is saved as it
+settles, so a shared run no longer waits for its end to record a verdict.
 Mutation is an internal seam — every structural plan mutation *and every
 settled conversation turn* (plan commit, task-ops apply, planner message) runs
-one `mutatePlan` ritual (store op → persist → broadcast), and so do the one-shot
-`modifyPlan` and the between-batch drain of queued edits. The ritual covers plan
-edits only: scheduler actions (retry, cancel, mark complete, tick) go through
+one `mutatePlan` ritual (store op → persist → broadcast), and so does the
+between-batch drain of queued edits. The ritual covers plan
+edits only: scheduler actions (retry, cancel, mark complete) go through
 the orchestrator, persist after it, and reach surfaces as `status_update` over
 the observer, while `generatePlan` and `loadPlan` persist the plan they adopt
 directly. Direct (non-planner) edits go one step further
@@ -61,7 +71,7 @@ direction (store → plan, at persist). Emits
 catalog/config messages (`setModels`, `setRunnerList`, …) stay on the host.
 The web pool and the VS Code extension are the two real adapters that justify
 the seam. Planner progress is broadcast-only: `ResearchProgress` is translated
-to SessionMessage inside the Session (`translateProgress`), and there is no
+to SessionMessage by the Session's relay, and there is no
 per-call progress override for a surface to bypass it with. The web pool
 itself holds only what earns its keep — the session registry
 (`Map<sessionId, Session>`), the WS fan-out, and the session-creating
@@ -79,6 +89,17 @@ one) otherwise presents the previous session's tasks to the planner as the
 current plan.
 *Avoid:* "the pool" (that's the web transport host), "the session manager" —
 Session is the lifecycle owner, not a registry.
+
+**SessionEventRelay** — the one place a surface's view of a Session is made:
+it turns orchestrator events (task changes, ticks, review, checkpoints,
+isolation, execution complete) and planner progress into **SessionMessage**
+broadcasts, holds status updates back while a mutation is in flight, and
+gathers a turn's subagent runs until the Session's next persist folds them
+into the research log. It never persists; where an event owes a save, the
+Session saves before handing the event on. Built by `createSession`, tested
+directly against a fake broadcast.
+*Avoid:* "the broadcaster" — `SessionBroadcaster` is the transport callback the
+relay sends through, not the relay.
 
 **PlannerConversation** — the deep module owning the planner conversation
 (ADR-0002) end to end: the persisted dialogue record (`conversationHistory` and
@@ -237,8 +258,7 @@ truth for UI redisplay. Tool-call results are NOT stored here — they live in
 the AI service's in-memory tool-use history; `researchLog` remains the
 persisted tool trace. A reloaded session resumes by replaying this transcript
 into a fresh model context; the tool history is gone. Written only by
-**PlannerConversation**: conversation turns, the one-shot `modifyPlan`
-exchange (request plus a `plan_generated` marker), and queued mid-run edits
+**PlannerConversation**: conversation turns, queued mid-run edits
 once `processQueuedMessages` applies them (a `system` entry, so the transcript
 and the plan do not drift apart), and a **Compaction**, which replaces it with
 a summary and its last two exchanges. A **Rewind** never writes it: the
