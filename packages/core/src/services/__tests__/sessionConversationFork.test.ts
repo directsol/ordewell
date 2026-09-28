@@ -6,7 +6,7 @@ import { createTask, type LegacyPlanState, type TaskStatus } from '../../models/
 import * as sessionStore from '../../utils/sessionStore';
 import type { ConversationTurn } from '../AiService';
 import { ConversationBusyError, ConversationEditError } from '../PlannerConversation';
-import { makeSession } from './sessionTestKit';
+import { makeSession, saves } from './sessionTestKit';
 import { forkPlanState } from '../conversationFork';
 import { FakeWorktreeIsolation } from '../../testing';
 
@@ -53,8 +53,7 @@ describe('Session.forkConversation', () => {
 
   /** A session adopted from the real store, so the fork is read back the way a surface reads it. */
   function adoptedSession() {
-    const session = makeSession();
-    vi.mocked(sessionStore.saveSession).mockRestore();
+    const session = makeSession({ saveSession: sessionStore.saveSession });
     const saved = sessionStore.saveSession(runningPlan(), GOAL, workspace, 'session-original');
     session.loadPlan(sessionStore.loadSession(saved.id, workspace)!.plan, GOAL, workspace, { sessionId: saved.id });
     return session;
@@ -76,8 +75,7 @@ describe('Session.forkConversation', () => {
 
   it('leaves the original session, its file and its live planner context untouched', () => {
     const reset = vi.fn();
-    const session = makeSession({ aiService: { reset, hasActiveConversation: () => true } });
-    vi.mocked(sessionStore.saveSession).mockRestore();
+    const session = makeSession({ aiService: { reset, hasActiveConversation: () => true }, saveSession: sessionStore.saveSession });
     sessionStore.saveSession(runningPlan(), GOAL, workspace, 'session-original');
     session.loadPlan(sessionStore.loadSession('session-original', workspace)!.plan, GOAL, workspace, { sessionId: 'session-original' });
     reset.mockClear();
@@ -94,7 +92,7 @@ describe('Session.forkConversation', () => {
   it('carries no run: in-flight and checkpointed tasks become pending, finished ones keep their outcome, queued edits stay behind', () => {
     const session = makeSession();
     session.loadPlan(runningPlan(), GOAL, workspace, { sessionId: 'session-original', persist: false });
-    vi.mocked(sessionStore.saveSession).mockRestore();
+    saves(session).mockImplementation(sessionStore.saveSession);
 
     const fork = session.forkConversation();
 
@@ -120,7 +118,7 @@ describe('Session.forkConversation', () => {
     const plan = runningPlan();
     plan.conversationHistory!.push({ role: 'assistant', content: 'Renamed.', timestamp: '2026-01-01T00:00:03Z' });
     session.loadPlan(plan, GOAL, workspace, { sessionId: 'session-original', persist: false });
-    vi.mocked(sessionStore.saveSession).mockRestore();
+    saves(session).mockImplementation(sessionStore.saveSession);
 
     const fork = session.rewindConversation(2);
 
@@ -140,9 +138,9 @@ describe('Session.forkConversation', () => {
     delete plan.queuedMessages;
     session.loadPlan(plan, GOAL, workspace, { sessionId: 'session-original', persist: false });
     await session.executePlan();
-    const persisted = vi.mocked(sessionStore.saveSession).mock.calls.at(-1)![0];
+    const persisted = saves(session).mock.calls.at(-1)![0];
     expect(persisted.isolation?.run.tasks.first.branch).toBeTruthy();
-    vi.mocked(sessionStore.saveSession).mockRestore();
+    saves(session).mockImplementation(sessionStore.saveSession);
 
     const fork = session.forkConversation();
 
@@ -167,7 +165,7 @@ describe('Session.forkConversation', () => {
     );
     session.loadPlan(plan, GOAL, workspace, { sessionId: 'session-original', persist: false });
     await session.compactConversation();
-    vi.mocked(sessionStore.saveSession).mockRestore();
+    saves(session).mockImplementation(sessionStore.saveSession);
 
     const fork = session.forkConversation();
 
@@ -185,8 +183,7 @@ describe('Session.forkConversation', () => {
     const first = session.forkConversation();
 
     const second = session.forkConversation();
-    const forkOfFork = makeSession();
-    vi.mocked(sessionStore.saveSession).mockRestore();
+    const forkOfFork = makeSession({ saveSession: sessionStore.saveSession });
     forkOfFork.loadPlan(sessionStore.loadSession(first.sessionId, workspace)!.plan, GOAL, workspace, { sessionId: first.sessionId });
     const third = forkOfFork.forkConversation();
 

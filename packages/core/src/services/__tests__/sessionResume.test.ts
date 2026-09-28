@@ -1,8 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { PlanStore } from '../PlanStore';
 import { createTask, type LegacyPlanState } from '../../models/Task';
-import * as sessionStore from '../../utils/sessionStore';
-import { makeSession, testWorkspace } from './sessionTestKit';
+import { makeSession, testWorkspace, saves } from './sessionTestKit';
 
 function savedDialoguePlan(): LegacyPlanState {
   return {
@@ -83,7 +82,7 @@ describe('conversation resume after session load', () => {
     const session = makeSession();
     session.loadPlan(savedDialoguePlan(), 'goal', testWorkspace, { sessionId: 'session-1234' });
     expect(session.sessionId).toBe('session-1234');
-    expect(sessionStore.saveSession).toHaveBeenCalledWith(
+    expect(saves(session)).toHaveBeenCalledWith(
       expect.anything(), 'goal', testWorkspace, 'session-1234',
     );
   });

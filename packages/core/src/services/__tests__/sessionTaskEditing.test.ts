@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createTask, type LegacyPlanState } from '../../models/Task';
-import { FakeTerminalSession, makeSession, testWorkspace } from './sessionTestKit';
+import { FakeTerminalSession, makeSession, testWorkspace, taskOf } from './sessionTestKit';
 import { PlanStore } from '../PlanStore';
 import type { ModelResolver } from '../ModelResolver';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
@@ -172,7 +172,7 @@ describe('Session.addTask', () => {
 
     const added = state!.tasks.find((t) => t.title === 'Docs')!;
     expect(runner.spawned).toEqual([added.id]);
-    expect(session.getTask(added.id)!.status).toBe('in_progress');
+    expect(taskOf(session, added.id)!.status).toBe('in_progress');
   });
 });
 
@@ -230,8 +230,8 @@ describe('Session.removeTask', () => {
     await session.removeTask('a');
 
     expect(session.planTasks.map((t) => t.id)).toEqual(['b', 'c']);
-    expect(session.getTask('b')!.dependencies).toEqual([]);
-    expect(session.getTask('b')!.status).toBe('pending');
+    expect(taskOf(session, 'b')!.dependencies).toEqual([]);
+    expect(taskOf(session, 'b')!.status).toBe('pending');
 
     // Still schedulable: the run is armed, so finishing the user task fans out.
     await session.markTaskComplete('b');

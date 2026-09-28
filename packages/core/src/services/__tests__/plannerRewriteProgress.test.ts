@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createTask, type LegacyPlanState, type Task } from '../../models/Task';
-import { FakeTerminalSession, makeSession, testWorkspace } from './sessionTestKit';
+import { FakeTerminalSession, makeSession, testWorkspace, taskOf } from './sessionTestKit';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
 
 function recordingRunner(spawned: string[]): ITerminalRunner {
@@ -72,9 +72,9 @@ describe('a planner rewrite never undoes finished work', () => {
 
     await session.continueConversation('add a docs task');
 
-    expect(session.getTask('a')).toMatchObject({ status: 'completed', prompt: 'set it up' });
-    expect(session.getTask('b')).toMatchObject({ status: 'completed', prompt: 'build it' });
-    expect(session.getTask('d')).toBeDefined();
+    expect(taskOf(session, 'a')).toMatchObject({ status: 'completed', prompt: 'set it up' });
+    expect(taskOf(session, 'b')).toMatchObject({ status: 'completed', prompt: 'build it' });
+    expect(taskOf(session, 'd')).toBeDefined();
 
     await session.executePlan();
     expect(spawned).toEqual(['c']);
@@ -107,13 +107,13 @@ describe('a planner rewrite never undoes finished work', () => {
     expect(spawned).toEqual(['c']);
 
     await session.continueConversation('add a docs task');
-    expect(session.queuedCount).toBe(1);
+    expect(session.getQueuedMessages().length).toBe(1);
     await session.processQueuedMessages();
 
-    expect(session.getTask('a')).toMatchObject({ status: 'completed', prompt: 'set it up' });
-    expect(session.getTask('b')).toMatchObject({ status: 'completed', prompt: 'build it' });
-    expect(session.getTask('c')!.status).toBe('in_progress');
-    expect(session.getTask('d')).toBeDefined();
+    expect(taskOf(session, 'a')).toMatchObject({ status: 'completed', prompt: 'set it up' });
+    expect(taskOf(session, 'b')).toMatchObject({ status: 'completed', prompt: 'build it' });
+    expect(taskOf(session, 'c')!.status).toBe('in_progress');
+    expect(taskOf(session, 'd')).toBeDefined();
     expect(spawned).toEqual(['c']);
   });
 
@@ -142,13 +142,13 @@ describe('a planner rewrite never undoes finished work', () => {
     session.loadPlan(plan, 'build it', testWorkspace, { persist: false });
     await session.executePlan(); // 'b' and 'e' go live
     await session.markTaskComplete('e'); // finished in this run, so it is in the execution log
-    expect(session.getTask('e')!.status).toBe('completed');
+    expect(taskOf(session, 'e')!.status).toBe('completed');
 
     await session.continueConversation('add a docs task');
     await session.processQueuedMessages();
 
-    expect(session.getTask('a')).toMatchObject({ status: 'completed' });
-    expect(session.getTask('e')).toMatchObject({ status: 'completed', title: 'Lint' });
+    expect(taskOf(session, 'a')).toMatchObject({ status: 'completed' });
+    expect(taskOf(session, 'e')).toMatchObject({ status: 'completed', title: 'Lint' });
   });
 
   it('does not re-spawn a cancelled task when a paused run takes a whole-plan reply', async () => {
@@ -173,7 +173,7 @@ describe('a planner rewrite never undoes finished work', () => {
 
     await session.continueConversation('add a docs task');
 
-    expect(session.getTask('c')!.status).toBe('pending');
+    expect(taskOf(session, 'c')!.status).toBe('pending');
     expect(spawned).toEqual(['c']);
   });
 
@@ -199,7 +199,7 @@ describe('a planner rewrite never undoes finished work', () => {
 
     await expect(session.processQueuedMessages()).resolves.toBeUndefined();
 
-    expect(session.queuedCount).toBe(0);
+    expect(session.getQueuedMessages().length).toBe(0);
     expect(plan.queuedMessages ?? []).toEqual([]);
     expect(session.planTasks.map((t) => t.id)).toEqual(['a', 'b', 'c']);
     expect(onNotice).toHaveBeenCalledWith(expect.objectContaining({ level: 'error', message: expect.stringContaining('could not be applied') }));
@@ -228,7 +228,7 @@ describe('a planner rewrite never undoes finished work', () => {
 
     await session.processQueuedMessages();
 
-    expect(session.queuedCount).toBe(0);
+    expect(session.getQueuedMessages().length).toBe(0);
     expect(plan.queuedMessages ?? []).toEqual([]);
   });
 });

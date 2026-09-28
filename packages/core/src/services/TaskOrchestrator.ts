@@ -36,6 +36,13 @@ import { resolveWorkspaceEnv, type WorkspaceEnv } from './workspaceEnv';
 export interface OrchestratorObserver {
   /** Any task-shaped state changed (store mutation, checkpoint, retry, …). */
   onTaskChanged?(): void;
+  /**
+   * A run reached an outcome that stands until the user acts — completed,
+   * failed, or awaiting the user — on its own, not as the answer to a call.
+   * Emitted before the `onTaskChanged` that announces it, so a listener can
+   * save the outcome before any surface is told.
+   */
+  onTaskSettled?(data: { taskId: string }): void;
   onTick?(): void;
   onExecutionComplete?(): void;
   /** Queued user messages are ready to be processed by the planner. */
@@ -221,6 +228,7 @@ export class TaskOrchestrator {
       const task = this.store.get(taskId);
       if (!task) return;
       this.store.markAwaitingUser(taskId);
+      this.emit('onTaskSettled', { taskId });
       this.emit('onCheckpoint', { taskId, taskTitle: task.title, summary });
     });
     // idleSince is advisory UI state, not a store mutation — broadcast it
@@ -609,10 +617,13 @@ export class TaskOrchestrator {
     this.store.setTaskOutputSummary(taskId, summarizeOutput(verdict.reason, summary));
 
     this.logAndArchive(task, verdict);
-    await this.afterVerdict();
+    await this.afterVerdict(taskId);
   }
 
-  private async afterVerdict(): Promise<void> {
+  private async afterVerdict(taskId: string): Promise<void> {
+    // A conflict owed a repair is back in progress: nothing has settled yet.
+    const status = this.store.get(taskId)?.status;
+    if (status === 'completed' || status === 'failed' || status === 'awaiting_user') this.emit('onTaskSettled', { taskId });
     this.emit('onTaskChanged');
     if (!this.running) {
       if (this.attempts.size === 0) {
@@ -639,7 +650,7 @@ export class TaskOrchestrator {
       this.store.unblockDependents(task.id);
       this.logAndArchive(task, task.verdict ?? verdict);
     });
-    await this.afterVerdict();
+    await this.afterVerdict(task.id);
   }
 
   /**
@@ -1058,6 +1069,7 @@ export class TaskOrchestrator {
       this.endAttempt(task.id, 'spawn-failed');
       if (attempt.repair) {
         this.settleUnlanded(task, await this.landing.unrepaired(task, `could not start: ${err instanceof Error ? err.message : String(err)}`));
+        this.emit('onTaskSettled', { taskId: task.id });
         this.emit('onTaskChanged');
         await this.tick();
         return false;

@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createTask, type LegacyPlanState, type Task } from '../../models/Task';
-import * as sessionStore from '../../utils/sessionStore';
-import { FakeTerminalSession, makeSession, testWorkspace } from './sessionTestKit';
+import { FakeTerminalSession, makeSession, testWorkspace, taskOf, saves } from './sessionTestKit';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
 import type { ModelResolver } from '../ModelResolver';
 import type { SessionMessage } from '../SessionMessage';
@@ -108,8 +107,8 @@ describe('task_ops conversation turns', () => {
       },
     });
     session.loadPlan(planWithTasks(), 'build it', testWorkspace, { persist: false });
-    vi.mocked(sessionStore.saveSession).mockClear();
-    vi.mocked(sessionStore.saveSession).mockImplementation(() => {
+    saves(session).mockClear();
+    saves(session).mockImplementation(() => {
       order.push('persist');
       return { id: 'x', goal: '', runners: [], taskCount: 0, status: 'approved', createdAt: '', updatedAt: '' };
     });
@@ -266,7 +265,7 @@ describe('task_ops conversation turns', () => {
     const plan = await session.continueConversation('rename the sign-off step');
 
     expect(session.planTasks.find((t) => t.id === 'c')!.title).toBe('Sign off with the team');
-    expect(session.queuedCount).toBe(0);
+    expect(session.getQueuedMessages().length).toBe(0);
     const last = plan.conversationHistory![plan.conversationHistory!.length - 1];
     expect(last.content).not.toMatch(/queued/i);
   });
@@ -318,9 +317,9 @@ describe('task_ops conversation turns', () => {
 
     // The edit never reaches the running #2, so it lands now; #2 keeps running.
     expect(session.planTasks.find((t) => t.id === 'c')!.title).toBe('Sign off with the team');
-    expect(session.getTask('b')!.status).toBe('in_progress');
+    expect(taskOf(session, 'b')!.status).toBe('in_progress');
     expect(spawned).toEqual(['b']);
-    expect(session.queuedCount).toBe(0);
+    expect(session.getQueuedMessages().length).toBe(0);
     const last = plan.conversationHistory![plan.conversationHistory!.length - 1];
     expect(last.content).not.toMatch(/queued/i);
   });
@@ -343,10 +342,10 @@ describe('task_ops conversation turns', () => {
 
     const plan = await session.continueConversation('rename the running step');
 
-    expect(session.getTask('b')!.title).toBe('Build'); // nothing applied live
-    expect(session.getTask('b')!.status).toBe('in_progress');
+    expect(taskOf(session, 'b')!.title).toBe('Build'); // nothing applied live
+    expect(taskOf(session, 'b')!.status).toBe('in_progress');
     expect(session.getQueuedMessages().map((m) => m.text)).toEqual(['rename the running step']);
-    expect(session.queuedCount).toBe(1);
+    expect(session.getQueuedMessages().length).toBe(1);
     const last = plan.conversationHistory![plan.conversationHistory!.length - 1];
     expect(last.content).toMatch(/queued your change/i);
     expect(last.content).toContain('(1 queued)');
@@ -386,15 +385,15 @@ describe('task_ops conversation turns', () => {
     session.loadPlan(pausedRunPlan(), 'build it', testWorkspace, { persist: false });
     await session.executePlan(); // spawns #2 and leaves it running
     await session.continueConversation('rename the running step');
-    expect(session.queuedCount).toBe(1);
+    expect(session.getQueuedMessages().length).toBe(1);
 
     await session.processQueuedMessages();
 
-    expect(session.getTask('b')!.title).toBe('Build');
-    expect(session.getTask('c')!.title).toBe('Sign off with the team');
-    expect(session.getTask('b')!.status).toBe('in_progress');
+    expect(taskOf(session, 'b')!.title).toBe('Build');
+    expect(taskOf(session, 'c')!.title).toBe('Sign off with the team');
+    expect(taskOf(session, 'b')!.status).toBe('in_progress');
     expect(session.hasLiveWork).toBe(true);
-    expect(session.isReviewApproved).toBe(true);
+    expect(session.status).toBe('running'); // the run stays armed
     expect(spawned).toEqual(['b']); // the live runner, not a second copy of it
   });
 
@@ -579,7 +578,7 @@ describe('task_ops conversation turns', () => {
 
     expect(session.planTasks.map((t) => t.title)).toEqual(['Build', 'Docs', 'Setup']);
     expect(session.planTasks.map((t) => t.order)).toEqual([1, 2, 3]);
-    expect(session.getTask('a')!.dependencies).toEqual(['c']);
+    expect(taskOf(session, 'a')!.dependencies).toEqual(['c']);
     const last = settled.conversationHistory![settled.conversationHistory!.length - 1];
     expect(last.content).toContain('Reordered to keep dependencies first');
   });

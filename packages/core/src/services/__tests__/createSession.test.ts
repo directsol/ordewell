@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createTask, type LegacyPlanState } from '../../models/Task';
-import * as sessionStore from '../../utils/sessionStore';
-import { makeSession, FakeTerminalSession, fakeConfig } from './sessionTestKit';
+import { makeSession, FakeTerminalSession, fakeConfig, taskOf, queue, saves } from './sessionTestKit';
 import { scriptedAdapter } from './harnessTestKit';
 import { CliAgentAiService } from '../harness/CliAgentAiService';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
 import { parsePlanJson } from '../PlanValidator';
 import type { Session } from '../createSession';
+import type { SessionMessage } from '../SessionMessage';
 import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
 import type { TranscriptQuery } from '../../interfaces/TaskOutputSource';
 import { reduceConversation, EMPTY_CONVERSATION } from '../../conversation';
@@ -134,21 +134,6 @@ describe('model allowlist wiring', () => {
     expect(plan.tasks[0].assignedModel?.thinkingEffort).toBeUndefined();
   });
 
-  it('modifyPlan passes perRunnerAllowlist to planner.modify', async () => {
-    const planner = { modify: vi.fn().mockResolvedValue({ tasks: [] }) };
-    const session = makeSession({
-      settings: () => ({ tddEnabled: false, modelAllowlist: { 'claude-code': ['kimi-2.6'] } }),
-      planner,
-    });
-    session.loadPlan(smallPlan(), 'Test', '/repo');
-
-    await session.modifyPlan('add a task');
-
-    expect(planner.modify).toHaveBeenCalledWith(
-      expect.objectContaining({ perRunnerAllowlist: { 'claude-code': ['kimi-2.6'] } }),
-    );
-  });
-
   it('processQueuedMessages passes perRunnerAllowlist to planner.modifyDuringExecution', async () => {
     const planner = { modifyDuringExecution: vi.fn().mockResolvedValue({ pendingTasks: [], message: 'ok' }) };
     const session = makeSession({
@@ -157,7 +142,7 @@ describe('model allowlist wiring', () => {
     });
     session.loadPlan(smallPlan(), 'Test', '/repo');
 
-    session.queueMessage('change task 1');
+    queue(session, 'change task 1');
     await session.processQueuedMessages();
 
     expect(planner.modifyDuringExecution).toHaveBeenCalledWith(
@@ -201,29 +186,29 @@ describe('removing a queued message', () => {
 
   it('removes one queued message by id and leaves the rest in order', () => {
     const session = loadedSession();
-    session.queueMessage('first');
-    session.queueMessage('second');
-    session.queueMessage('third');
+    queue(session, 'first');
+    queue(session, 'second');
+    queue(session, 'third');
 
     const [first] = session.getQueuedMessages();
     expect(session.removeQueuedMessage(first.id)).toBe(true);
 
     expect(session.getQueuedMessages().map((m) => m.text)).toEqual(['second', 'third']);
-    expect(session.queuedCount).toBe(2);
+    expect(session.getQueuedMessages().length).toBe(2);
   });
 
   it('reports false for an id that is not queued', () => {
     const session = loadedSession();
-    session.queueMessage('only');
+    queue(session, 'only');
 
     expect(session.removeQueuedMessage('q-nope')).toBe(false);
-    expect(session.queuedCount).toBe(1);
+    expect(session.getQueuedMessages().length).toBe(1);
   });
 
   it('gives every queued message its own id, even within one millisecond', () => {
     const session = loadedSession();
-    session.queueMessage('a');
-    session.queueMessage('b');
+    queue(session, 'a');
+    queue(session, 'b');
 
     const ids = session.getQueuedMessages().map((m) => m.id);
     expect(new Set(ids).size).toBe(2);
@@ -250,14 +235,14 @@ describe('processQueuedMessages', () => {
 
     session.loadPlan(plan, 'Test', '/repo');
 
-    session.queueMessage('user says hi');
-    session.queueMessage('user asks something');
+    queue(session, 'user says hi');
+    queue(session, 'user asks something');
 
-    expect(session.queuedCount).toBe(2);
+    expect(session.getQueuedMessages().length).toBe(2);
 
     await session.processQueuedMessages();
 
-    expect(session.queuedCount).toBe(0);
+    expect(session.getQueuedMessages().length).toBe(0);
   });
 
   it('calls planner.modifyDuringExecution with execution context', async () => {
@@ -275,8 +260,8 @@ describe('processQueuedMessages', () => {
     };
 
     session.loadPlan(plan, 'Test', '/repo');
-    await session.startExecution();
-    session.queueMessage('change task 1');
+    await session.executePlan();
+    queue(session, 'change task 1');
 
     await session.processQueuedMessages();
 
@@ -287,14 +272,15 @@ describe('processQueuedMessages', () => {
   });
 
   it('reconciles plan when planner returns modified tasks', async () => {
-    const modifiedTask = createTask({ id: 't1', order: 1, title: 'Modified Task', prompt: 'updated' });
+    const t1 = createTask({ id: 't1', order: 1, title: 'Task 1', prompt: 'do it' });
+    const t2 = createTask({ id: 't2', order: 2, title: 'Task 2', prompt: 'then this', dependencies: ['t1'] });
     const planner = {
-      modifyDuringExecution: vi.fn().mockResolvedValue({ pendingTasks: [modifiedTask], message: 'Plan updated' }),
+      modifyDuringExecution: vi.fn().mockResolvedValue({ pendingTasks: [t1, { ...t2, title: 'Modified Task', prompt: 'updated' }], message: 'Plan updated' }),
     };
     const session = makeSession({ planner });
 
     const plan: LegacyPlanState = {
-      tasks: [createTask({ id: 't1', order: 1, title: 'Task 1', prompt: 'do it' })],
+      tasks: [t1, t2],
       generatedAt: new Date().toISOString(),
       status: 'approved',
       runners: ['claude-code'],
@@ -302,15 +288,16 @@ describe('processQueuedMessages', () => {
     };
 
     session.loadPlan(plan, 'Test', '/repo');
-    await session.startExecution();
-    session.queueMessage('modify');
+    await session.executePlan();
+    queue(session, 'modify');
 
     await session.processQueuedMessages();
 
-    const stored = session.getTask('t1');
+    // t1 is live, so only the task that has not started takes the edit.
+    const stored = taskOf(session, 't2');
     expect(stored).toBeDefined();
     expect(stored!.title).toBe('Modified Task');
-    expect(session.queuedCount).toBe(0);
+    expect(session.getQueuedMessages().length).toBe(0);
   });
 
   it('does nothing when queue is empty', async () => {
@@ -379,7 +366,7 @@ describe('processQueuedMessages', () => {
     // Queue a structural edit, then complete t1. With the queue non-empty, the
     // orchestrator must pause fan-out (emit queue_ready) instead of spawning
     // t2 — but only until the queue is drained.
-    session.queueMessage('an edit');
+    queue(session, 'an edit');
     sessions[0].emitOutput('Done.\n<<<ORDEWELL_DONE_mk-1>>>');
     sessions[0].emitExit(0);
     await new Promise((r) => setTimeout(r, 30));
@@ -390,7 +377,7 @@ describe('processQueuedMessages', () => {
     await session.processQueuedMessages();
     await new Promise((r) => setTimeout(r, 30));
 
-    expect(session.queuedCount).toBe(0);
+    expect(session.getQueuedMessages().length).toBe(0);
     expect(runner.spawn).toHaveBeenCalledTimes(2);
     expect((runner.spawn as unknown as ReturnType<typeof vi.fn>).mock.calls[1][0].taskId).toBe('t2');
   });
@@ -456,7 +443,7 @@ describe('Session phase transitions', () => {
     session.loadPlan(plan, 'Test', '/repo');
     await session.executePlan();
 
-    expect(session.getTask('t1')?.status).toBe('completed');
+    expect(taskOf(session, 't1')?.status).toBe('completed');
     expect(runner.spawn).toHaveBeenCalledOnce();
     expect(runner.spawn).toHaveBeenCalledWith(expect.objectContaining({ taskId: 't2' }));
   });
@@ -485,16 +472,16 @@ describe('Session phase transitions', () => {
     await session.runTask('t1');
 
     expect(session.isExecuting).toBe(true);
-    expect(session.getTask('t1')?.status).toBe('in_progress');
-    expect(session.getTask('t2')?.status).toBe('pending');
+    expect(taskOf(session, 't1')?.status).toBe('in_progress');
+    expect(taskOf(session, 't2')?.status).toBe('pending');
     await expect(session.executePlan()).rejects.toThrow('Session already executing');
 
     terminal.emitOutput('<<<ORDEWELL_DONE_mk-1>>>');
     await new Promise(r => setTimeout(r, 10));
 
     expect(session.isExecuting).toBe(false);
-    expect(session.getTask('t1')?.status).toBe('completed');
-    expect(session.getTask('t2')?.status).toBe('pending');
+    expect(taskOf(session, 't1')?.status).toBe('completed');
+    expect(taskOf(session, 't2')?.status).toBe('pending');
     expect(runner.spawn).toHaveBeenCalledOnce();
   });
 
@@ -519,7 +506,7 @@ describe('Session phase transitions', () => {
     await new Promise(r => setTimeout(r, 10));
 
     expect(queries).toEqual([expect.objectContaining({ runner: 'claude-code', marker: 'mk-1' })]);
-    expect(session.getTask('t1')?.outputSummary?.logTail).toBe('answer from the transcript');
+    expect(taskOf(session, 't1')?.outputSummary?.logTail).toBe('answer from the transcript');
   });
 
   describe('every spawn path composes the same augmented prompt', () => {
@@ -577,13 +564,13 @@ describe('Session phase transitions', () => {
     });
   });
 
-  it('isPlanning is true before execution starts', () => {
+  it('nothing is executing before execution starts', () => {
     const session = makeSession();
-    expect(session.isPlanning).toBe(true);
+    expect(session.status).toBe('approved');
     expect(session.isExecuting).toBe(false);
   });
 
-  it('startExecution clears execution log before starting', async () => {
+  it('executePlan clears execution log before starting', async () => {
     const session = makeSession();
     const plan: LegacyPlanState = {
       tasks: [createTask({ id: 't1', order: 1, title: 'Task 1', prompt: 'do it' })],
@@ -594,12 +581,15 @@ describe('Session phase transitions', () => {
     };
 
     session.loadPlan(plan, 'Test', '/repo');
-    await session.startExecution();
+    await session.markTaskComplete('t1');
+    expect(session.executionLog).toHaveLength(1);
+
+    await session.executePlan();
 
     expect(session.executionLog).toHaveLength(0);
   });
 
-  it('isPlanning flips to false when orchestration starts', async () => {
+  it('the run is armed and executing once executePlan starts it', async () => {
     const session = makeSession();
 
     const plan: LegacyPlanState = {
@@ -611,16 +601,12 @@ describe('Session phase transitions', () => {
     };
 
     session.loadPlan(plan, 'Test', '/repo');
-    expect(session.isPlanning).toBe(true);
+    expect(session.status).toBe('approved');
     expect(session.isExecuting).toBe(false);
 
-    await session.startExecution();
+    await session.executePlan();
 
-    expect(session.isPlanning).toBe(true);
-    expect(session.isExecuting).toBe(false);
-
-    await session.approveReview();
-    expect(session.isPlanning).toBe(false);
+    expect(session.status).toBe('running');
     expect(session.isExecuting).toBe(true);
   });
 });
@@ -725,7 +711,7 @@ describe('planState.tasks — written from the store, never shared with it', () 
 
     session.planState!.tasks[0].status = 'completed';
     expect(session.planTasks[0].status).toBe('pending');
-    expect(session.getTask('t1')!.status).toBe('pending');
+    expect(taskOf(session, 't1')!.status).toBe('pending');
   });
 
   // VS Code re-renders from its plan object when a status_update lands, so the
@@ -749,7 +735,7 @@ describe('planState.tasks — written from the store, never shared with it', () 
     await session.executePlan();
 
     expect(seen).toContain('in_progress');
-    expect(seen.at(-1)).toBe(session.getTask('t1')!.status);
+    expect(seen.at(-1)).toBe(taskOf(session, 't1')!.status);
   });
 });
 
@@ -766,7 +752,7 @@ describe('session id stability (persist seam)', () => {
 
   it('persists under the host-assigned session id on every save', async () => {
     const session = makeSession({ sessionId: 'session-host-42' });
-    const spy = vi.mocked(sessionStore.saveSession);
+    const spy = saves(session);
     spy.mockClear();
 
     session.loadPlan(smallPlan(), 'Test', '/repo');
@@ -782,7 +768,7 @@ describe('session id stability (persist seam)', () => {
 
   it('mints one stable id when the host provides none', async () => {
     const session = makeSession();
-    const spy = vi.mocked(sessionStore.saveSession);
+    const spy = saves(session);
     spy.mockClear();
 
     const id = session.sessionId;
@@ -975,7 +961,7 @@ describe('session id stability (persist seam)', () => {
 
       await session.startPlanning('goal', ['claude-code']);
 
-      const persisted = vi.mocked(sessionStore.saveSession).mock.calls.at(-1)?.[0];
+      const persisted = saves(session).mock.calls.at(-1)?.[0];
       expect(persisted?.plannerUsage).toEqual({
         totals: { inputTokens: 10, outputTokens: 2, reportedCost: { USD: 0.5 } },
         lastPromptTokens: 10,
@@ -1051,7 +1037,7 @@ describe('session id stability (persist seam)', () => {
 
       await session.startPlanning('find the cache', ['claude-code']);
 
-      const saved = vi.mocked(sessionStore.saveSession).mock.calls.at(-1)![0] as LegacyPlanState;
+      const saved = saves(session).mock.calls.at(-1)![0] as LegacyPlanState;
       const log = saved.researchLog ?? [];
       const entry = log.find((e): e is import('../../models/Task').SubagentLogEntry => 'type' in e && e.type === 'subagent');
       expect(entry).toMatchObject({ subagentId: 'sa1', brief: 'find the cache', model: 'haiku', outcome: 'done', digest: 'src/cache.ts' });
@@ -1161,7 +1147,7 @@ describe('session id stability (persist seam)', () => {
 
       await session.startPlanning('add persistence', ['claude-code']);
 
-      const saved = vi.mocked(sessionStore.saveSession).mock.calls.at(-1)![0] as LegacyPlanState;
+      const saved = saves(session).mock.calls.at(-1)![0] as LegacyPlanState;
       const log = saved.researchLog ?? [];
       const subagents = log.filter((e): e is import('../../models/Task').SubagentLogEntry => 'type' in e && e.type === 'subagent');
       const steps = log.filter((e): e is import('../../models/Task').ResearchStep => !('type' in e));
@@ -1200,7 +1186,7 @@ describe('session id stability (persist seam)', () => {
     const broadcast = vi.fn();
     const session = makeSession({ broadcast });
     session.loadPlan(smallPlan(), 'Test', '/repo');
-    const spy = vi.mocked(sessionStore.saveSession);
+    const spy = saves(session);
     spy.mockClear();
     broadcast.mockClear();
 
@@ -1313,12 +1299,12 @@ describe('cross-session isolation', () => {
   it('loadPlan of a different plan clears the previous session\'s queued messages', () => {
     const session = makeSession();
     session.loadPlan(planWith('a1', 'Plan A task'), 'Goal A', '/repo');
-    session.queueMessage('meant for session A');
-    expect(session.queuedCount).toBe(1);
+    queue(session, 'meant for session A');
+    expect(session.getQueuedMessages().length).toBe(1);
 
     session.loadPlan(planWith('b1', 'Plan B task'), 'Goal B', '/repo');
 
-    expect(session.queuedCount).toBe(0);
+    expect(session.getQueuedMessages().length).toBe(0);
   });
 
   it('reset() returns the Session to a blank slate with a fresh identity', () => {
@@ -1327,7 +1313,7 @@ describe('cross-session isolation', () => {
       aiService: { hasActiveConversation: () => true, reset },
     });
     session.loadPlan(planWith('a1', 'Plan A task'), 'Goal A', '/repo');
-    session.queueMessage('pending change');
+    queue(session, 'pending change');
     const oldId = session.sessionId;
 
     session.reset();
@@ -1335,7 +1321,7 @@ describe('cross-session isolation', () => {
     expect(session.planState).toBeNull();
     expect(session.currentGoal).toBe('');
     expect(session.planTasks).toHaveLength(0);
-    expect(session.queuedCount).toBe(0);
+    expect(session.getQueuedMessages().length).toBe(0);
     expect(session.executionLog).toHaveLength(0);
     expect(reset).toHaveBeenCalled();
     expect(session.sessionId).not.toBe(oldId);
@@ -1475,8 +1461,7 @@ describe('idleSince on the status_update broadcast', () => {
     session.loadPlan(onePlan(), 'Test', '/repo');
 
     vi.useFakeTimers();
-    await session.startExecution();
-    await session.approveReview();
+    await session.executePlan();
     fakeSession.emitOutput('working...');
     broadcast.mockClear();
 
@@ -1498,5 +1483,78 @@ describe('idleSince on the status_update broadcast', () => {
     expect(resumeUpdates.length).toBeGreaterThan(0);
     const lastResumed = resumeUpdates[resumeUpdates.length - 1].tasks!.find((t) => t.id === 't1');
     expect(lastResumed?.idleSince).toBeNull();
+  });
+});
+
+describe('saving a run as its tasks settle', () => {
+  function twoTaskRun() {
+    const terminals: FakeTerminalSession[] = [];
+    const runner = {
+      spawn: vi.fn().mockImplementation((req: { taskId: string }) => {
+        const t = new FakeTerminalSession(`s-${req.taskId}`, req.taskId);
+        terminals.push(t);
+        return Promise.resolve(t);
+      }),
+      stop: vi.fn(),
+      stopAll: vi.fn(),
+      activeCount: 0,
+    } as unknown as ITerminalRunner;
+    // Each save and each announcement, tagged with t1's status as it was then.
+    const order: string[] = [];
+    const saveSession = vi.fn((plan: LegacyPlanState) => {
+      order.push(`save:${plan.tasks.find((t) => t.id === 't1')!.status}`);
+    });
+    const broadcast = (msg: SessionMessage) => {
+      if (msg.type === 'status_update') order.push(`status:${msg.tasks.find((t) => t.id === 't1')!.status}`);
+      if (msg.type === 'execution_complete') order.push('complete');
+    };
+    const session = makeSession({ runner, broadcast, saveSession });
+    session.loadPlan({
+      tasks: [
+        createTask({ id: 't1', order: 1, title: 'First', prompt: 'a', completionMarker: 'mk-1' }),
+        createTask({ id: 't2', order: 2, title: 'Second', prompt: 'b', completionMarker: 'mk-2' }),
+      ],
+      generatedAt: new Date().toISOString(),
+      status: 'approved',
+      runners: ['claude-code'],
+      lastUpdated: new Date().toISOString(),
+    }, 'Test', '/repo', { persist: false });
+    const terminal = (taskId: string) => terminals.find((t) => t.taskId === taskId)!;
+    return { session, saveSession, order, terminal };
+  }
+
+  it('saves a task\'s verdict the moment it lands, before announcing it, while the run goes on', async () => {
+    const { session, saveSession, order, terminal } = twoTaskRun();
+    await session.executePlan();
+    saveSession.mockClear();
+    order.length = 0;
+
+    terminal('t1').emitOutput('<<<ORDEWELL_DONE_mk-1>>>');
+    terminal('t1').emitExit(0);
+
+    await vi.waitFor(() => expect(order).toContain('save:completed'));
+    expect(order.indexOf('save:completed')).toBeLessThan(order.indexOf('status:completed'));
+    expect(order).not.toContain('complete');
+    expect(session.hasLiveWork).toBe(true);
+  });
+
+  it('saves a failed verdict as well', async () => {
+    const { session, saveSession, terminal } = twoTaskRun();
+    await session.executePlan();
+    saveSession.mockClear();
+
+    terminal('t1').emitExit(1);
+
+    await vi.waitFor(() => expect(saveSession.mock.calls.some(([p]) => p.tasks.find((t) => t.id === 't1')!.status === 'failed')).toBe(true));
+  });
+
+  it('does not save on a status change that settles nothing', async () => {
+    const { session, saveSession, terminal } = twoTaskRun();
+    await session.executePlan();
+    saveSession.mockClear();
+
+    terminal('t1').emitOutput('still working');
+
+    expect(saveSession).not.toHaveBeenCalled();
   });
 });

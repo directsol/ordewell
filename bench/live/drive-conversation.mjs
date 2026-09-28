@@ -334,7 +334,7 @@ else await mockSuite();
 
 // ---------- full Session scenario (production wiring incl. PRD save) ----------
 async function sessionSuite() {
-  const { Session, RunnerRegistry, ModelResolver } = core;
+  const { createSession, RunnerRegistry, ModelResolver } = core;
   const failures = [];
   const root = makeSandbox();
   const registry = new RunnerRegistry();
@@ -342,7 +342,7 @@ async function sessionSuite() {
   const fakeExec = () => Promise.reject(new Error('no CLI in harness'));
   const modelResolver = new ModelResolver(registry, config, { execImpl: fakeExec });
   const broadcasts = [];
-  const session = new Session({
+  const session = createSession({
     config,
     notifications: { info() {}, warn() {}, error() {}, async confirm() { return undefined; } },
     runner: { async createSession() { throw new Error('not used'); }, stopAll() {} },
@@ -406,7 +406,7 @@ async function approvalsSuite() {
     const fsAdapter = new SandboxFs();
     const base = cfg('mock/prd-flow');
     const config = { ...base, approvalMode: 'ask', approvalPreApproved: [] };
-    const session = new core.Session({
+    const session = core.createSession({
       config,
       notifications: { info() {}, warn() {}, error() {}, async confirm() { return undefined; } },
       runner: { async createSession() { throw new Error('not used'); }, stopAll() {} },
@@ -522,7 +522,7 @@ if (!REAL) await approvalsSuite();
 // tool_call id and an honest outcome. A parallel round with a refused command
 // and an out-of-workspace read exercises all four outcome classes at once.
 async function visibilitySuite() {
-  const { Session, RunnerRegistry, ModelResolver, BaseFileSystem, classifyOutcome } = core;
+  const { createSession, RunnerRegistry, ModelResolver, BaseFileSystem, classifyOutcome } = core;
   const failures = [];
   const root = makeSandbox();
 
@@ -545,7 +545,7 @@ async function visibilitySuite() {
     // real `denied` through the whole request/settle round trip.
     if (m.type === 'approval_request') queueMicrotask(() => session.resolveApproval(m.id, false));
   };
-  session = new Session({
+  session = createSession({
     config,
     notifications: { info() {}, warn() {}, error() {}, async confirm() { return undefined; } },
     runner: { async createSession() { throw new Error('not used'); }, stopAll() {} },
@@ -611,14 +611,14 @@ if (!REAL) await visibilitySuite();
 // omits it — get back exactly that detail, and land an edit derived from what
 // it read, all inside one continued conversation over the real Session loop.
 async function taskQuerySuite() {
-  const { Session, RunnerRegistry, ModelResolver, createTask } = core;
+  const { createSession, RunnerRegistry, ModelResolver, createTask } = core;
   const failures = [];
   const root = makeSandbox();
   const registry = new RunnerRegistry();
   const config = cfg('mock/task-query-editor');
   const modelResolver = new ModelResolver(registry, config, { execImpl: () => Promise.reject(new Error('no CLI in harness')) });
   const broadcasts = [];
-  const session = new Session({
+  const session = createSession({
     config,
     notifications: { info() {}, warn() {}, error() {}, async confirm() { return undefined; } },
     runner: { async createSession() { throw new Error('not used'); }, stopAll() {} },

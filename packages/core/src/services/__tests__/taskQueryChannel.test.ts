@@ -306,7 +306,7 @@ describe('the task-query read channel', () => {
 
     expect(sent(continueConversation, 1)).toContain('Deploy to staging');
     expect(session.planTasks.find((t) => t.id === 'b')!.title).toBe('Build');
-    expect(session.queuedCount).toBe(1);
+    expect(session.getQueuedMessages().length).toBe(1);
     const last = plan.conversationHistory![plan.conversationHistory!.length - 1];
     expect(last.content).toMatch(/queued your change/i);
   });

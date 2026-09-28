@@ -3,8 +3,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { Session, RunnerRegistry, BufferedTaskOutputSource, createTask } from '@ordewell/core';
-import type { IAiService, ITerminalRunner, LegacyPlanState, ModelResolver, SessionMessage } from '@ordewell/core';
+import { createSession, flattenTasks, RunnerRegistry, BufferedTaskOutputSource, createTask } from '@ordewell/core';
+import type { IAiService, ITerminalRunner, LegacyPlanState, ModelResolver, Session, SessionMessage } from '@ordewell/core';
 import { fakeConfig, fakeFileSystem } from '@ordewell/core/testing';
 import { ChatViewProvider } from '../../providers/ChatViewProvider';
 import type { HostToWebview, WebviewToHost } from '../../shared/protocol';
@@ -30,6 +30,11 @@ function plan(): LegacyPlanState {
   };
 }
 
+/** One task as the session holds it now, read through its public plan tree. */
+function taskOf(session: Pick<Session, 'planTasks'>, taskId: string) {
+  return flattenTasks(session.planTasks).find((t) => t.id === taskId);
+}
+
 function harness() {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ordewell-router-'));
   const broadcasts: SessionMessage[] = [];
@@ -37,7 +42,7 @@ function harness() {
   const chatProvider = new ChatViewProvider({ toString: () => 'file:///ext' } as unknown as vscode.Uri);
   chatProvider.postMessage = (msg) => { posts.push(msg); };
   const runner = { spawn: vi.fn(), stop: vi.fn(), stopAll: vi.fn(), activeCount: 0 } as unknown as ITerminalRunner;
-  const session = new Session({
+  const session = createSession({
     config: fakeConfig(),
     notifications: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), confirm: vi.fn().mockResolvedValue(undefined) },
     runner,
@@ -112,7 +117,7 @@ describe('webview messages reach the session through one entry point each', () =
       const assignment = { modelId: 'claude-opus-4-1', modelLabel: 'Claude Opus 4.1' };
       await h.route({ type: 'editTask', taskId: 't1', edit: { kind: 'model', assignment } });
 
-      expect(h.session.getTask('t1')?.assignedModel).toEqual(assignment);
+      expect(taskOf(h.session, 't1')?.assignedModel).toEqual(assignment);
       expect(h.broadcasts).toContainEqual(expect.objectContaining({ type: 'task_updated', taskId: 't1' }));
       expect(h.deps.persistState).toHaveBeenCalled();
     });
@@ -120,7 +125,7 @@ describe('webview messages reach the session through one entry point each', () =
     it('a mode the runner does not offer is refused, and the card is re-shown with what was kept', async () => {
       await h.route({ type: 'editTask', taskId: 't1', edit: { kind: 'mode', mode: 'no-such-mode' } });
 
-      expect(h.session.getTask('t1')?.taskMode).toBe('default');
+      expect(taskOf(h.session, 't1')?.taskMode).toBe('default');
       expect(showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('no-such-mode'));
       expect(h.lastPlan()?.tasks.find((t) => t.id === 't1')?.taskMode).toBe('default');
     });
@@ -128,20 +133,20 @@ describe('webview messages reach the session through one entry point each', () =
     it('a mode the runner offers lands in the session', async () => {
       await h.route({ type: 'editTask', taskId: 't1', edit: { kind: 'mode', mode: 'plan' } });
 
-      expect(h.session.getTask('t1')?.taskMode).toBe('plan');
+      expect(taskOf(h.session, 't1')?.taskMode).toBe('plan');
     });
 
     it('a prompt edit lands in the session and is shown', async () => {
       await h.route({ type: 'editTask', taskId: 't2', edit: { kind: 'prompt', prompt: 'stream it in chunks' } });
 
-      expect(h.session.getTask('t2')?.prompt).toBe('stream it in chunks');
+      expect(taskOf(h.session, 't2')?.prompt).toBe('stream it in chunks');
       expect(h.lastPlan()?.tasks.find((t) => t.id === 't2')?.prompt).toBe('stream it in chunks');
     });
 
     it('clearing every dependency is an edit, not a removal', async () => {
       await h.route({ type: 'editTask', taskId: 't2', edit: { kind: 'dependencies', dependencies: [] } });
 
-      expect(h.session.getTask('t2')?.dependencies).toEqual([]);
+      expect(taskOf(h.session, 't2')?.dependencies).toEqual([]);
       expect(h.session.planTasks).toHaveLength(2);
     });
   });
@@ -150,7 +155,7 @@ describe('webview messages reach the session through one entry point each', () =
     it('skip completes the task through the scheduler, so its dependents can start', async () => {
       await h.route({ type: 'sendSystemCommand', command: 'skip', taskId: 't1' });
 
-      expect(h.session.getTask('t1')?.status).toBe('completed');
+      expect(taskOf(h.session, 't1')?.status).toBe('completed');
     });
 
     it('retry reaches the session', async () => {

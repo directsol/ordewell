@@ -1,6 +1,7 @@
 import { WebSocket } from 'ws';
 import {
   Session,
+  createSession,
   ConversationBusyError,
   type ConversationCompaction,
   type ConversationFork,
@@ -158,7 +159,7 @@ export class OrchestratorPool {
     const fsAdapter = new PoolFileSystem(workspace);
     const broadcast = (msg: SessionMessage) => this.broadcast(sessionId, msg);
     const runner = new PoolAwareRunner(sessionId, broadcast, this.sharedRunner);
-    return new Session({
+    return createSession({
       config,
       notifications: { info() {}, warn() {}, error() {}, async confirm() { return undefined; } },
       runner,

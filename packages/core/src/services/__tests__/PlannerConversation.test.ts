@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createTask, type LegacyPlanState } from '../../models/Task';
-import * as sessionStore from '../../utils/sessionStore';
 import type { SessionMessage } from '../SessionMessage';
 import type { ConversationTurn, IAiService } from '../AiService';
 import { ConversationBusyError, ConversationEditError, PlannerConversation, type PlannerConversationHost } from '../PlannerConversation';
-import { makeSession, testWorkspace } from './sessionTestKit';
+import type { SaveSession } from '../createSession';
+import { makeSession, testWorkspace, queue } from './sessionTestKit';
 
 function dialoguePlan(): LegacyPlanState {
   return {
@@ -337,42 +337,10 @@ function approvedPlan(): LegacyPlanState {
   };
 }
 
-function lastPersistedHistory(): LegacyPlanState['conversationHistory'] {
-  const calls = vi.mocked(sessionStore.saveSession).mock.calls;
+function lastPersistedHistory(save: ReturnType<typeof vi.fn<SaveSession>>): LegacyPlanState['conversationHistory'] {
+  const calls = save.mock.calls;
   return calls[calls.length - 1][0].conversationHistory;
 }
-
-describe('modifyPlan transcript write', () => {
-  it('records the request and the outcome, then persists and broadcasts them', async () => {
-    const broadcast = vi.fn<(msg: SessionMessage) => void>();
-    const tasks = [
-      createTask({ id: 't1', order: 1, title: 'Task 1', prompt: 'do it', assignedRunner: 'claude-code' }),
-      createTask({ id: 't2', order: 2, title: 'Task 2', prompt: 'docs', assignedRunner: 'claude-code' }),
-    ];
-    const session = makeSession({ broadcast, planner: { modify: vi.fn().mockResolvedValue({ tasks }) } });
-    session.loadPlan(approvedPlan(), 'build it', testWorkspace, { persist: false });
-
-    await session.modifyPlan('add a docs task');
-
-    const history = session.planState!.conversationHistory!;
-    expect(history).toHaveLength(4);
-    expect(history[2]).toMatchObject({ role: 'user', content: 'add a docs task' });
-    expect(history[3]).toMatchObject({ role: 'assistant', content: 'Plan updated — now 2 tasks.', kind: 'plan_generated' });
-    expect(lastPersistedHistory()).toHaveLength(4);
-    const planEvents = broadcast.mock.calls.map(([m]) => m).filter((m) => m.type === 'plan_generated');
-    expect(planEvents).toHaveLength(1);
-    expect(planEvents[0].type === 'plan_generated' && planEvents[0].plan.conversationHistory).toHaveLength(4);
-  });
-
-  it('leaves the transcript untouched when the planner fails', async () => {
-    const session = makeSession({ planner: { modify: vi.fn().mockRejectedValue(new Error('planner down')) } });
-    session.loadPlan(approvedPlan(), 'build it', testWorkspace, { persist: false });
-
-    await expect(session.modifyPlan('add a docs task')).rejects.toThrow('planner down');
-
-    expect(session.planState!.conversationHistory).toHaveLength(2);
-  });
-});
 
 describe('queued mid-run edits', () => {
   it('records the applied edit in the transcript as a labelled system entry', async () => {
@@ -383,11 +351,12 @@ describe('queued mid-run edits', () => {
         message: 'Plan modified: 1 pending task(s)',
       }),
     };
-    const session = makeSession({ planner, broadcast });
+    const saveSession = vi.fn<SaveSession>();
+    const session = makeSession({ planner, broadcast, saveSession });
     session.loadPlan(approvedPlan(), 'build it', testWorkspace, { persist: false });
-    await session.startExecution();
-    session.queueMessage('rename task 1');
-    session.queueMessage('and keep it short');
+    await session.executePlan();
+    queue(session, 'rename task 1');
+    queue(session, 'and keep it short');
 
     await session.processQueuedMessages();
 
@@ -398,7 +367,7 @@ describe('queued mid-run edits', () => {
     expect(entry.content).toMatch(/^Queued change applied between task batches/);
     expect(entry.content).toContain('rename task 1');
     expect(entry.content).toContain('and keep it short');
-    expect(lastPersistedHistory()).toHaveLength(3);
+    expect(lastPersistedHistory(saveSession)).toHaveLength(3);
     expect(broadcast.mock.calls.some(([m]) => m.type === 'plan_generated')).toBe(true);
   });
 });

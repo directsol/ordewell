@@ -1,7 +1,7 @@
 import { createAiService, type IAiService } from './AiService';
 import { applyTaskOps, canMergeTasks, canSplitTask } from './TaskOps';
 import { validateTaskEdit, type EditCatalog } from './TaskEditValidator';
-import { ConversationEditError, PlannerConversation, type ConversationCompaction, type ConversationOpening, type RewindTarget } from './PlannerConversation';
+import { ConversationEditError, PlannerConversation, type ConversationCompaction, type ConversationOpening, type PlannerConversationHost, type RewindTarget } from './PlannerConversation';
 import { forkPlanState, type ForkedDialogue } from './conversationFork';
 import { Planner } from './Planner';
 import { createTaskOrchestrator } from './TaskOrchestrator';
@@ -16,27 +16,23 @@ import { retargetTaskRunner, runnerAssignment, type RunnerCatalog } from './Task
 import { plannerModesFrom, plannerRuntimeToggles } from './plannerModes';
 import type { UserSettings } from './SettingsService';
 import { SkillsService } from './SkillsService';
-import { buildConflictResolutionPrompt, buildMergePrompt, buildSplitPrompt } from './PlanPrompts';
-import {
-  serializeTask,
-  serializeTaskStatus,
-  serializePlan,
-  executionSummary,
-  type SessionBroadcaster,
-  type SessionNotice,
-} from './SessionMessage';
+import { buildMergePrompt, buildSplitPrompt } from './PlanPrompts';
+import type { SessionBroadcaster, SessionNotice } from './SessionMessage';
+import { SessionEventRelay } from './SessionEventRelay';
+import { conflictResolverTask } from './Landing';
 import { saveSession } from '../utils/sessionStore';
 import { PlannerUsageLedger } from './PlannerUsage';
 import { mintSessionId } from '../utils/sessionId';
 import { savePrdMarkdown, extractPrdBlock } from '../utils/prdStore';
-import { flattenTasks, keepExecutionState, type DiscoveredModel, type LegacyPlanState, type PlanState, type ResearchLogEntry, type ResearchStep, type SubagentLogEntry, type Task, type TaskSnapshot, type RunnerId, type ResearchProgress } from '../models/Task';
+import { flattenTasks, keepExecutionState, type DiscoveredModel, type LegacyPlanState, type PlanState, type QueuedMessage, type Task, type TaskSnapshot, type RunnerId } from '../models/Task';
 import type { AiProvider, IConfig } from '../interfaces/IConfig';
 import type { IFileSystem } from '../interfaces/IFileSystem';
+import type { IWebFetcher } from '../interfaces/IWebFetcher';
 import type { INotification } from '../interfaces/INotification';
 import type { ITerminalRunner } from '../interfaces/ITerminalRunner';
 import type { TaskOutputSource } from '../interfaces/TaskOutputSource';
 import type { IsolationMergeResult, IsolationView, IWorktreeIsolation } from '../interfaces/IWorktreeIsolation';
-import { integrationBranchNameOf, migratePlanStateIsolation } from './isolationRecord';
+import { migratePlanStateIsolation } from './isolationRecord';
 import type { RunnerRegistry } from '../plugins/RunnerRegistry';
 import { runnerModesFrom, resolveDefaultMode, type RunnerModeInfo } from './ModeResolver';
 
@@ -64,7 +60,7 @@ export interface GeneratePlanOptions {
 }
 
 /** The slice of Planner the Session drives — the injection seam for tests. */
-export type SessionPlanner = Pick<Planner, 'generate' | 'modify' | 'modifyDuringExecution'>;
+export type SessionPlanner = Pick<Planner, 'generate' | 'modifyDuringExecution'>;
 
 /** Runtime prefs read live — may toggle between operations. */
 export interface SessionRuntimeSettings {
@@ -82,12 +78,6 @@ export interface SessionRuntimeSettings {
  */
 export function sessionRuntimeSettings(settings: UserSettings): SessionRuntimeSettings {
   return { ...plannerRuntimeToggles(settings), modelAllowlist: settings.modelAllowlist };
-}
-
-/** One subagent's activity seen during a turn: its log entry plus the steps it ran. */
-interface SubagentRun {
-  entry: SubagentLogEntry;
-  steps: ResearchStep[];
 }
 
 /**
@@ -142,13 +132,6 @@ export function resolveSkillInvocation(
   });
 }
 
-/**
- * Everything a delivery surface constructs to host a session. Structural config
- * (enabledRunners, orchestratorModel, providerModelLists) is snapshotted inside
- * `config` at construction and never re-read from the environment. Runtime
- * settings (tdd, verification) are read live via the `settings` callback so a toggle
- * between generate and execute takes effect.
- */
 /** Where a fork landed: the new session's id, and what adopting it needs. */
 export interface ConversationFork {
   sessionId: string;
@@ -161,6 +144,16 @@ export interface ConversationRewind extends ConversationFork {
   rewoundMessage: string;
 }
 
+/** Writes one plan to the saved-session store: {@link saveSession}'s shape, injected so tests never touch disk. */
+export type SaveSession = (plan: LegacyPlanState, goal: string, workspace: string, sessionId: string) => void;
+
+/**
+ * Everything a delivery surface constructs to host a session. Structural config
+ * (enabledRunners, orchestratorModel, providerModelLists) is snapshotted inside
+ * `config` at construction and never re-read from the environment. Runtime
+ * settings (tdd, verification) are read live via the `settings` callback so a toggle
+ * between generate and execute takes effect.
+ */
 export interface SessionDeps {
   config: IConfig;
   notifications: INotification;
@@ -208,134 +201,224 @@ export interface SessionDeps {
    * `config.worktreeIsolation`; tests inject `FakeWorktreeIsolation`.
    */
   isolation?: IWorktreeIsolation;
+  /** Persistence seam. Defaults to the saved-session store under the workspace. */
+  saveSession?: SaveSession;
 }
 
 /**
- * The per-session execution stack — deepened from a wiring bag into the
- * lifecycle owner. Owns plan generation, execution, mutation, persistence, and
- * the orchestrator observer wiring. The orchestrator's observer is subscribed
- * once for the session's lifetime (not per-operation), which kills the
- * double-subscribe class of bug. Persistence is an internal seam: every plan
- * mutation routes through `persist()`, so the obligation has a home instead of
- * being scattered across 11 call sites.
+ * The planner transport for the provider configured *right now* (ADR-0009).
  *
- * The broadcast seam carries {@link SessionMessage} — the 15 plan-lifecycle
- * events. Catalog/config messages (setModels, setRunnerList, …) stay on the
- * host; Session never emits them.
+ * Resolved on every read rather than once at construction, because a
+ * Session outlives the choice: VS Code hosts exactly one for the whole
+ * window, and the webview pills and `/planner` switch backends underneath it.
+ * The model id was already read live, so a service captured at construction
+ * meant a switched planner kept the old backend and got handed the new one's
+ * model — an OpenCode model id spawned as `claude --model opencode/…`, which
+ * the agent rejects as nonexistent.
+ *
+ * Switching releases the outgoing service: a harness planner holds an OS
+ * process, so dropping the reference without `reset()` leaks an agent.
+ */
+function liveAiService(config: IConfig, workspaceRoot: () => string): () => IAiService {
+  let live: IAiService | null = null;
+  let liveProvider: AiProvider | null = null;
+  return () => {
+    const provider = config.aiProvider;
+    if (live && liveProvider === provider) return live;
+    live?.reset();
+    live = createAiService(config, { workspaceRoot });
+    liveProvider = provider;
+    return live;
+  };
+}
+
+/**
+ * The composition root: builds every collaborator a Session drives and wires
+ * them to each other, so the Session only receives them. Hosts create a
+ * Session here; the optional {@link SessionDeps} are the seams tests fill.
+ */
+export function createSession(deps: SessionDeps): Session {
+  const pinnedAiService = deps.aiService;
+  const aiService = pinnedAiService ? () => pinnedAiService : liveAiService(deps.config, deps.workspaceRoot);
+  const store = new PlanStore();
+  const orchestrator = createTaskOrchestrator({
+    config: deps.config,
+    notifications: deps.notifications,
+    terminalRunner: deps.runner,
+    store,
+    output: deps.taskOutput,
+    isolation: deps.isolation,
+    registry: deps.registry,
+    workspaceRoot: deps.workspaceRoot,
+    tddEnabled: () => deps.settings().tddEnabled,
+  });
+  const usage = new PlannerUsageLedger();
+  const events = new SessionEventRelay({ broadcast: deps.broadcast, onNotice: deps.onNotice, store, orchestrator, usage });
+
+  // Made by the Session (it is the conversation's host); an approval prompt
+  // names the turn that raised it, so the chain below reads it once it exists.
+  let conversation: PlannerConversation | undefined;
+
+  // The approval chain: the filesystem asks the policy, the policy asks the
+  // registry, the registry announces on the same broadcast seam every other
+  // planner event uses, and any surface answers through `resolveApproval`.
+  // Nothing in core knows which UI is listening.
+  const approvals = new PendingApprovals({
+    onRequest: ({ id, request }) => deps.broadcast({
+      type: 'approval_request',
+      id,
+      kind: request.kind,
+      subject: request.subject,
+      scope: request.scope,
+      detail: request.detail,
+      turnId: conversation?.currentTurnId,
+    }),
+    onSettled: (id, granted) => deps.broadcast({ type: 'approval_settled', id, granted }),
+  });
+  const approvalPolicy = new ApprovalPolicy({
+    mode: deps.config.approvalMode,
+    preApproved: deps.config.approvalPreApproved,
+    ask: (req) => approvals.ask(req),
+    // The interactive path (`asked`) already broadcasts approval_request +
+    // approval_settled; only the silent sources need a signal, or a
+    // remembered/pre-approved/mode grant is invisible to every surface.
+    onDecision: (req, granted, source) => {
+      if (source === 'asked') return;
+      deps.broadcast({
+        type: 'approval_decided',
+        kind: req.kind,
+        subject: req.subject,
+        scope: req.scope,
+        detail: req.detail,
+        granted,
+        source,
+      });
+    },
+  });
+  deps.fsAdapter.setApproval?.(approvalPolicy);
+
+  return new Session({
+    config: deps.config,
+    registry: deps.registry,
+    workspace: deps.workspaceRoot(),
+    fsAdapter: deps.fsAdapter,
+    broadcast: deps.broadcast,
+    onNotice: deps.onNotice,
+    modelResolver: deps.modelResolver,
+    settings: deps.settings,
+    hostSessionId: deps.sessionId,
+    aiService,
+    planner: deps.planner ?? new Planner(deps.config, aiService),
+    store,
+    orchestrator,
+    events,
+    usage,
+    approvals,
+    approvalPolicy,
+    // `fetch`/`web_search` route through the same approval channel as paths and
+    // commands — one decision surface for everything that leaves the workspace.
+    fetcher: new HttpWebFetcher({ approval: approvalPolicy }),
+    skillsService: deps.skillsService ?? new SkillsService(deps.workspaceRoot()),
+    saveSession: deps.saveSession ?? saveSession,
+    conversation: (host) => (conversation = new PlannerConversation(host)),
+  });
+}
+
+/** What {@link createSession} hands a Session: every collaborator, already built and wired. */
+export interface SessionParts {
+  config: IConfig;
+  registry: RunnerRegistry;
+  workspace: string;
+  fsAdapter: IFileSystem;
+  broadcast: SessionBroadcaster;
+  onNotice?: (notice: SessionNotice) => void;
+  modelResolver: ModelResolver;
+  settings: () => SessionRuntimeSettings;
+  hostSessionId?: string;
+  aiService: () => IAiService;
+  planner: SessionPlanner;
+  store: PlanStore;
+  orchestrator: TaskOrchestrator;
+  events: SessionEventRelay;
+  usage: PlannerUsageLedger;
+  approvals: PendingApprovals;
+  approvalPolicy: ApprovalPolicy;
+  fetcher: IWebFetcher;
+  skillsService: Pick<SkillsService, 'findSkill' | 'listSkills'>;
+  saveSession: SaveSession;
+  /** The conversation's host is the Session itself, so only the Session can make it. */
+  conversation: (host: PlannerConversationHost) => PlannerConversation;
+}
+
+/**
+ * The per-session execution stack — the lifecycle owner. Owns plan
+ * generation, execution, mutation and persistence; built by
+ * {@link createSession}, which wires its collaborators. The orchestrator's
+ * observer is subscribed once for the session's lifetime (not per-operation),
+ * which kills the double-subscribe class of bug. Persistence is an internal
+ * seam: every plan mutation routes through `persist()`.
+ *
+ * What surfaces see is produced by the {@link SessionEventRelay}: the
+ * {@link SessionMessage} plan-lifecycle events. Catalog/config messages
+ * (setModels, setRunnerList, …) stay on the host; Session never emits them.
  */
 export class Session {
-  /** Injected by a test; when present it is the service, forever. */
-  private readonly pinnedAiService?: IAiService;
-  private liveAiService: IAiService | null = null;
-  private readonly usageLedger = new PlannerUsageLedger();
-  /**
-   * The in-flight turn's subagent activity, grouped one run per subagent so a
-   * replay nests each step under its own brief/result. Flushed into the plan's
-   * researchLog at persist — see {@link flushSubagentRuns}.
-   */
-  private pendingSubagents: SubagentRun[] = [];
-  private liveAiProvider: AiProvider | null = null;
-  private readonly workspaceRootFn: () => string;
-  private planner: SessionPlanner;
-  private orchestrator: TaskOrchestrator;
-  private store: PlanStore;
-  private config: IConfig;
-  private registry: RunnerRegistry;
+  private readonly aiService: () => IAiService;
+  private readonly usage: PlannerUsageLedger;
+  private readonly events: SessionEventRelay;
+  private readonly planner: SessionPlanner;
+  private readonly orchestrator: TaskOrchestrator;
+  private readonly store: PlanStore;
+  private readonly config: IConfig;
+  private readonly registry: RunnerRegistry;
   private plan: LegacyPlanState | null = null;
   private goal = '';
   private workspace: string;
-  private broadcast: SessionBroadcaster;
-  private onNotice?: (notice: SessionNotice) => void;
-  private modelResolver: ModelResolver;
-  private fsAdapter: IFileSystem;
-  private approvals: PendingApprovals;
-  private approvalPolicy: ApprovalPolicy;
-  private fetcher: HttpWebFetcher;
-  private settingsFn: () => SessionRuntimeSettings;
+  private readonly broadcast: SessionBroadcaster;
+  private readonly onNotice?: (notice: SessionNotice) => void;
+  private readonly modelResolver: ModelResolver;
+  private readonly fsAdapter: IFileSystem;
+  private readonly approvals: PendingApprovals;
+  private readonly approvalPolicy: ApprovalPolicy;
+  private readonly fetcher: IWebFetcher;
+  private readonly settingsFn: () => SessionRuntimeSettings;
+  private readonly save: SaveSession;
   /** Last discovered model catalog — lets sync plan commits clamp thinking efforts to real variants. */
   private modelsCache: Partial<Record<RunnerId, DiscoveredModel[]>> = {};
-  private unsubObserver: (() => void) | null = null;
-  private statusHeld = false;
-  private statusOwed = false;
+  private unsubObserver: (() => void) | null;
   private readonly hostSessionId?: string;
   private currentSessionId: string;
-  private readonly skillsService: SkillsService;
+  private readonly skillsService: Pick<SkillsService, 'findSkill' | 'listSkills'>;
   private readonly conversation: PlannerConversation;
 
-  constructor(deps: SessionDeps) {
-    this.config = deps.config;
-    this.registry = deps.registry;
-    this.pinnedAiService = deps.aiService;
-    this.workspaceRootFn = deps.workspaceRoot;
-    this.planner = deps.planner ?? new Planner(deps.config, () => this.aiService);
-    this.store = new PlanStore();
-    this.orchestrator = createTaskOrchestrator({
-      config: deps.config,
-      notifications: deps.notifications,
-      terminalRunner: deps.runner,
-      store: this.store,
-      output: deps.taskOutput,
-      isolation: deps.isolation,
-      registry: deps.registry,
-      workspaceRoot: deps.workspaceRoot,
-      tddEnabled: () => this.settingsFn().tddEnabled,
-    });
-    this.workspace = deps.workspaceRoot();
-    this.broadcast = deps.broadcast;
-    this.onNotice = deps.onNotice;
-    this.modelResolver = deps.modelResolver;
-    this.fsAdapter = deps.fsAdapter;
-    this.settingsFn = deps.settings;
-    this.hostSessionId = deps.sessionId;
-    this.currentSessionId = deps.sessionId ?? mintSessionId();
-    this.skillsService = deps.skillsService ?? new SkillsService(this.workspaceRootFn());
+  constructor(parts: SessionParts) {
+    this.config = parts.config;
+    this.registry = parts.registry;
+    this.workspace = parts.workspace;
+    this.fsAdapter = parts.fsAdapter;
+    this.broadcast = parts.broadcast;
+    this.onNotice = parts.onNotice;
+    this.modelResolver = parts.modelResolver;
+    this.settingsFn = parts.settings;
+    this.hostSessionId = parts.hostSessionId;
+    this.currentSessionId = parts.hostSessionId ?? mintSessionId();
+    this.aiService = parts.aiService;
+    this.planner = parts.planner;
+    this.store = parts.store;
+    this.orchestrator = parts.orchestrator;
+    this.events = parts.events;
+    this.usage = parts.usage;
+    this.approvals = parts.approvals;
+    this.approvalPolicy = parts.approvalPolicy;
+    this.fetcher = parts.fetcher;
+    this.skillsService = parts.skillsService;
+    this.save = parts.saveSession;
 
-    // The approval chain, wired once per session: the filesystem asks the
-    // policy, the policy asks the registry, the registry announces on the same
-    // broadcast seam every other planner event uses, and any surface answers
-    // through `resolveApproval`. Nothing in core knows which UI is listening.
-    this.approvals = new PendingApprovals({
-      onRequest: ({ id, request }) => this.broadcast({
-        type: 'approval_request',
-        id,
-        kind: request.kind,
-        subject: request.subject,
-        scope: request.scope,
-        detail: request.detail,
-        turnId: this.conversation.currentTurnId,
-      }),
-      onSettled: (id, granted) => this.broadcast({ type: 'approval_settled', id, granted }),
-    });
-    this.approvalPolicy = new ApprovalPolicy({
-      mode: this.config.approvalMode,
-      preApproved: this.config.approvalPreApproved,
-      ask: (req) => this.approvals.ask(req),
-      // The interactive path (`asked`) already broadcasts approval_request +
-      // approval_settled; only the silent sources need a signal, or a
-      // remembered/pre-approved/mode grant is invisible to every surface.
-      onDecision: (req, granted, source) => {
-        if (source === 'asked') return;
-        this.broadcast({
-          type: 'approval_decided',
-          kind: req.kind,
-          subject: req.subject,
-          scope: req.scope,
-          detail: req.detail,
-          granted,
-          source,
-        });
-      },
-    });
-    this.fsAdapter.setApproval?.(this.approvalPolicy);
-    // `fetch`/`web_search` route through the same approval channel as paths and
-    // commands — one decision surface for everything that leaves the workspace.
-    this.fetcher = new HttpWebFetcher({ approval: this.approvalPolicy });
-
-    this.conversation = new PlannerConversation({
+    this.conversation = parts.conversation({
       plan: () => this.plan,
       goal: () => this.goal,
-      aiService: () => this.aiService,
-      onProgress: (p) => this.translateProgress(p),
+      aiService: () => this.aiService(),
+      onProgress: (p) => this.events.progress(p),
       opening: (runners) => this.conversationOpening(runners),
       catalog: () => {
         const runners = this.plan?.runners ?? [];
@@ -353,43 +436,19 @@ export class Session {
       hasLiveWork: () => this.hasLiveWork,
       mutate: (op, notify) => this.mutatePlan(op, notify),
       broadcast: (msg) => this.broadcast(msg),
-      broadcastPlan: (turnId) => this.broadcastPlan(turnId),
+      broadcastPlan: (turnId) => this.events.planGenerated(this.plan, this.goal, turnId),
       validateOps: (ops) => applyTaskOps(this.store.planTasks, ops, this.plan!.runners, this.editCatalog()),
       adoptTasks: (tasks, how) => this.adoptPlannerTasks(tasks, how),
       capturePrd: (text) => this.capturePrd(text),
       queueEdit: (userMessage) => {
-        this.queueMessage(userMessage);
+        this.orchestrator.queueMessage(userMessage);
         this.plan!.queuedMessages = this.getQueuedMessages();
-        return this.queuedCount;
+        return this.orchestrator.queuedCount;
       },
       afterEdit: () => this.orchestrator.tick(),
     });
 
-    this.attachObserver();
-  }
-
-  /**
-   * The planner transport for the provider configured *right now* (ADR-0009).
-   *
-   * Resolved on every read rather than once in the constructor, because a
-   * Session outlives the choice: VS Code hosts exactly one for the whole
-   * window, and the webview pills and `/planner` switch backends underneath it.
-   * The model id was already read live, so a service captured at construction
-   * meant a switched planner kept the old backend and got handed the new one's
-   * model — an OpenCode model id spawned as `claude --model opencode/…`, which
-   * the agent rejects as nonexistent.
-   *
-   * Switching releases the outgoing service: a harness planner holds an OS
-   * process, so dropping the reference without `reset()` leaks an agent.
-   */
-  private get aiService(): IAiService {
-    if (this.pinnedAiService) return this.pinnedAiService;
-    const provider = this.config.aiProvider;
-    if (this.liveAiService && this.liveAiProvider === provider) return this.liveAiService;
-    this.liveAiService?.reset();
-    this.liveAiService = createAiService(this.config, { workspaceRoot: this.workspaceRootFn });
-    this.liveAiProvider = provider;
-    return this.liveAiService;
+    this.unsubObserver = this.orchestrator.subscribe(this.observer());
   }
 
   /**
@@ -417,176 +476,36 @@ export class Session {
   /** Tasks always read from PlanStore — the single source of truth. */
   get planTasks(): ReadonlyArray<Readonly<Task>> { return this.store.planTasks; }
 
-  private attachObserver(): void {
-    if (this.unsubObserver) this.unsubObserver();
-    this.unsubObserver = this.orchestrator.subscribe(this.buildObserver());
-  }
-
-  private buildObserver(): OrchestratorObserver {
+  /**
+   * The relay announces every orchestrator event; this adds the saves some of
+   * them owe, each made before the announcement so no surface sees state the
+   * disk lacks.
+   */
+  private observer(): OrchestratorObserver {
+    const relay = this.events.observer(() => this.plan);
     return {
-      onTaskChanged: () => this.broadcastStatus(),
-      onQueueReady: () => {
-        this.broadcast({ type: 'queue_ready' });
-      },
-      onReviewNeeded: () => {
-        const tasks = this.store.allTasks;
-        this.broadcast({ type: 'review_needed', tasks: tasks.map(serializeTask) });
-      },
-      onReviewApproved: () => {
-        this.broadcast({ type: 'review_approved' });
-      },
-      onCheckpoint: (data) => {
-        this.broadcast({ type: 'checkpoint', taskId: data.taskId, taskTitle: data.taskTitle, summary: data.summary });
-      },
-      onTick: () => this.broadcastStatus(),
+      ...relay,
+      // Saved the moment it settles: a shared run has no run record to save
+      // it mid-run, so a crash would otherwise lose every verdict since the
+      // last Session operation.
+      onTaskSettled: () => this.persist(),
       onIsolationChanged: () => {
         // The run record names branches and worktrees on disk, so it is saved
         // as it changes rather than at the end: a crash must still find them.
         this.persist();
-        this.broadcastStatus();
-      },
-      onIsolationBlocked: ({ reason, repos }) => {
-        const where = repos.length > 0 ? ` in ${repos.join(', ')}` : '';
-        this.broadcast({
-          type: 'isolation_blocked',
-          reason,
-          ...(repos.length > 0 ? { repos } : {}),
-          message: `Tracked files have uncommitted changes${where}, so tasks cannot run in isolated worktrees. Stash them, or run this plan without isolation.`,
-        });
-      },
-      onIsolationNotice: ({ level, message }) => {
-        this.onNotice?.({ type: 'notice', level, message });
-      },
-      onIsolationHandoff: (handoff) => {
-        this.broadcast({ type: 'isolation_handoff', ...handoff });
+        relay.onIsolationChanged();
       },
       onExecutionComplete: () => {
-        if (!this.plan) return;
-        const tasks = this.store.allTasks;
-        this.broadcast({ type: 'execution_complete', summary: executionSummary(tasks) });
+        relay.onExecutionComplete();
         this.persist();
       },
     };
   }
 
-  private broadcastStatus(): void {
-    if (!this.plan) return;
-    this.statusOwed = this.statusHeld;
-    if (this.statusHeld) return;
-    // Hosts that render from the plan object (VS Code) read statuses off it
-    // when a status_update arrives, so it has to be current by then.
-    this.syncPlanTasks();
-    const tasks = this.store.allTasks;
-    this.broadcast({
-      type: 'status_update',
-      tasks: tasks.map((t) => serializeTaskStatus(t, this.orchestrator.getIdleSince(t.id), this.orchestrator.getTaskIsolation(t.id))),
-    });
-  }
-
-  private translateProgress(progress: ResearchProgress): void {
-    const { turnId, subagentId, segmentId } = progress;
-    switch (progress.type) {
-      case 'liveness':
-        this.broadcast({ type: 'planner_liveness' });
-        return;
-      case 'thinking':
-        if (!progress.text) return;
-        this.broadcast({ type: 'planner_thinking_delta', turnId, segmentId, subagentId, text: progress.text });
-        return;
-      case 'tool_call':
-        if (progress.tool) this.broadcast({ type: 'research_step', tool: progress.tool, toolLabel: progress.toolLabel, args: progress.toolArgs || '', subagentId, toolCallId: progress.toolCallId, turnId });
-        return;
-      case 'plan_token':
-        if (progress.planToken) this.broadcast({ type: 'plan_token', token: progress.planToken, turnId, segmentId });
-        return;
-      case 'tool_result':
-        if (progress.step) {
-          // Child steps carry their subagent on the step itself; the initiating
-          // spawn step does not, so it stays a plain parent step.
-          if (progress.step.subagentId) this.subagentRun(progress.step.subagentId).steps.push(progress.step);
-          this.broadcast({ type: 'research_step_done', step: progress.step, subagentId, turnId });
-        }
-        return;
-      case 'text_delta':
-        if (!progress.text) return;
-        // Only the one-shot plan path streams prose outside a turn, and its only
-        // surface (`plan --no-chat`) draws steps, not reply text.
-        if (turnId && segmentId) this.broadcast({ type: 'planner_text_delta', turnId, segmentId, text: progress.text });
-        return;
-      case 'text_retracted':
-        // Outside a turn there is no streamed text a surface could take back.
-        if (turnId) this.broadcast({ type: 'planner_text_retracted', turnId, segmentId });
-        return;
-      case 'subagent_started':
-        if (subagentId) {
-          const run = this.subagentRun(subagentId);
-          run.entry.brief = progress.brief ?? run.entry.brief;
-          if (progress.model) run.entry.model = progress.model;
-          this.broadcast({ type: 'subagent_started', turnId, subagentId, brief: progress.brief ?? '', model: progress.model });
-        }
-        return;
-      case 'subagent_finished':
-        if (subagentId) {
-          const run = this.subagentRun(subagentId);
-          run.entry.outcome = progress.outcome ?? 'failed';
-          run.entry.digest = progress.digest ?? '';
-          if (progress.usage) run.entry.usage = progress.usage;
-          this.broadcast({
-            type: 'subagent_finished', turnId, subagentId,
-            outcome: progress.outcome ?? 'failed', digest: progress.digest ?? '', usage: progress.usage,
-          });
-        }
-        return;
-      case 'usage': {
-        if (!progress.record) return;
-        this.usageLedger.record(progress.record);
-        this.broadcast(this.usageLedger.message(turnId));
-        return;
-      }
-      case 'interrupted':
-        return;
-    }
-  }
-
-  /** The run for `subagentId`, created on first sighting so a step arriving
-   * before (or without) its started event still gets a home. */
-  private subagentRun(subagentId: string): SubagentRun {
-    let run = this.pendingSubagents.find((r) => r.entry.subagentId === subagentId);
-    if (!run) {
-      run = {
-        entry: { id: `sa-${subagentId}`, type: 'subagent', subagentId, brief: '', outcome: 'failed', digest: '', timestamp: new Date().toISOString() },
-        steps: [],
-      };
-      this.pendingSubagents.push(run);
-    }
-    return run;
-  }
-
-  /**
-   * Fold the turn's subagent runs into the plan's researchLog as one contiguous
-   * group per subagent — its entry then its steps, in the order they started —
-   * so a replay nests each step under its own subagent however the live stream
-   * interleaved. A harness planner already logs its child steps through the
-   * turn's researchLog; they are pulled out of that position and re-grouped
-   * rather than duplicated.
-   */
-  private flushSubagentRuns(): void {
-    if (!this.plan || this.pendingSubagents.length === 0) return;
-    const childStepIds = new Set(this.pendingSubagents.flatMap((r) => r.steps.map((s) => s.id)));
-    const additions: ResearchLogEntry[] = [];
-    for (const run of this.pendingSubagents) {
-      additions.push(run.entry, ...run.steps);
-    }
-    this.plan.researchLog = [
-      ...(this.plan.researchLog ?? []).filter((e) => !childStepIds.has(e.id)),
-      ...additions,
-    ];
-    this.pendingSubagents = [];
-  }
-
   /**
    * Refresh the plan's task list from the store. LegacyPlanState.tasks is only
-   * ever written here, and always as a detached copy: sharing the store's live
+   * ever written from the store (here and by the relay before it announces),
+   * and always as a detached copy: sharing the store's live
    * tree let a host that edits `plan.tasks` rewrite task state behind the
    * store's back.
    */
@@ -597,12 +516,12 @@ export class Session {
   /** Persists PlanStore state to disk. PlanStore is the single authority. */
   private persist(): void {
     if (!this.plan) return;
-    this.flushSubagentRuns();
+    this.events.flushSubagentRuns(this.plan);
     this.syncPlanTasks();
     this.plan.isolation = this.orchestrator.isolationRecord ?? undefined;
-    this.plan.plannerUsage = this.usageLedger.snapshot();
+    this.plan.plannerUsage = this.usage.snapshot();
     this.plan.lastUpdated = new Date().toISOString();
-    saveSession(this.plan, this.goal, this.workspace, this.currentSessionId);
+    this.save(this.plan, this.goal, this.workspace, this.currentSessionId);
     this.conversation.markPersisted();
   }
 
@@ -620,11 +539,11 @@ export class Session {
    */
   private beginFreshPlan(): void {
     if (this.isExecuting) this.stopExecution();
-    this.pendingSubagents = [];
+    this.events.dropSubagentRuns();
     this.conversation.reset();
     // Totals belong to the plan they were recorded under; a fresh plan starts
     // its ledger from zero so the previous session's line never lingers.
-    this.usageLedger.clear();
+    this.usage.clear();
     // A prompt raised by the turn we are abandoning has nobody left to serve;
     // denying it unblocks the old research loop instead of stranding it.
     this.approvals.clear();
@@ -730,7 +649,6 @@ export class Session {
   }
 
   get currentGoal(): string { return this.goal; }
-  get isPlanning(): boolean { return !this.orchestrator.isRunning; }
   /**
    * A task is running right now. Deliberately live work, not the scheduler's
    * armed flag: a run paused on a user task, a hold or a cancellation has
@@ -741,7 +659,6 @@ export class Session {
   /** See {@link TaskOrchestrator.hasLiveWork} — a spawned runner, not merely an armed scheduler. */
   get hasLiveWork(): boolean { return this.orchestrator.hasLiveWork; }
   get status(): 'approved' | 'running' | 'completed' { return this.orchestrator.status; }
-  get sessionConfig(): IConfig { return this.config; }
 
   /**
    * Deny every parked approval as soon as a planning turn is aborted, for the
@@ -765,15 +682,6 @@ export class Session {
     const onAbort = () => this.approvals.clear();
     signal.addEventListener('abort', onAbort);
     return () => signal.removeEventListener('abort', onAbort);
-  }
-
-  async startExecution(): Promise<void> {
-    if (!this.plan || !this.store.planTasks.length) throw new Error('No plan to execute');
-    this.store.clearLog();
-    this.plan.status = 'approved';
-    this.store.resetForRun();
-    this.orchestrator.loadPlan(this.store.planTasks, this.plan.runners);
-    await this.orchestrator.start();
   }
 
   async generatePlan(goal: string, runners: RunnerId[], options?: GeneratePlanOptions): Promise<LegacyPlanState> {
@@ -803,7 +711,7 @@ export class Session {
         autonomousDefault: this.config.autonomousMode,
         fs: this.fsAdapter,
         fetcher: this.fetcher,
-        onProgress: (p) => this.translateProgress(p),
+        onProgress: (p) => this.events.progress(p),
         signal: options?.signal,
         perRunnerAllowlist: settings.modelAllowlist,
         modes,
@@ -813,13 +721,13 @@ export class Session {
     }
 
     this.plan = plan;
-    this.withStatusHeld(() => {
+    this.events.holdStatus(() => {
       this.orchestrator.loadPlan(plan.tasks, plan.runners);
       this.store.resetForRun({ preserveCompleted: false });
     });
     this.persist();
-    this.releaseHeldStatus();
-    this.broadcastPlan();
+    this.events.releaseStatus(this.plan);
+    this.events.planGenerated(this.plan, this.goal);
     return plan;
   }
 
@@ -857,7 +765,7 @@ export class Session {
     if (!this.plan) throw new Error('No planning conversation to continue');
     // A turn that failed before persist leaves its runs unflushed; drop them so
     // the next turn's log cannot absorb a previous turn's uncommitted activity.
-    this.pendingSubagents = [];
+    this.events.dropSubagentRuns();
     const releaseAbort = this.denyApprovalsOnAbort(options?.signal);
     try {
       return await this.conversation.reply(this.resolveSkillInvocation(userMessage), {
@@ -897,7 +805,7 @@ export class Session {
   private saveFork(dialogue: ForkedDialogue): ConversationFork {
     const sessionId = mintSessionId();
     const plan = forkPlanState(this.plan!, this.store.planTasks, dialogue, new Date().toISOString());
-    saveSession(plan, this.goal, this.workspace, sessionId);
+    this.save(plan, this.goal, this.workspace, sessionId);
     return { sessionId, goal: this.goal, workspace: this.workspace };
   }
 
@@ -1034,8 +942,7 @@ export class Session {
     await this.orchestrator.approveReview();
 
     if (!this.orchestrator.isRunning && !this.orchestrator.awaitingIsolationChoice) {
-      const tasks = this.store.allTasks;
-      this.broadcast({ type: 'execution_complete', summary: executionSummary(tasks) });
+      this.events.executionComplete(this.plan);
       this.persist();
     }
   }
@@ -1077,11 +984,6 @@ export class Session {
     this.persist();
   }
 
-  async markAiTaskComplete(taskId: string): Promise<void> {
-    await this.orchestrator.markAiTaskComplete(taskId);
-    this.persist();
-  }
-
   async markTaskComplete(taskId: string): Promise<void> {
     await this.orchestrator.markTaskComplete(taskId);
     this.persist();
@@ -1089,11 +991,6 @@ export class Session {
 
   async markTaskIncomplete(taskId: string): Promise<void> {
     await this.orchestrator.markTaskIncomplete(taskId);
-    this.persist();
-  }
-
-  async tick(): Promise<void> {
-    await this.orchestrator.tick();
     this.persist();
   }
 
@@ -1188,24 +1085,16 @@ export class Session {
     this.orchestrator.rejectCheckpoint(taskId, reason);
   }
 
-  queueMessage(text: string): void {
-    this.orchestrator.queueMessage(text);
-  }
-
-  getQueuedMessages() { return this.orchestrator.getQueuedMessages(); }
+  getQueuedMessages(): QueuedMessage[] { return this.orchestrator.getQueuedMessages(); }
   /** Take back one unsent message; the plan's persisted queue follows so a reload cannot resurrect it. */
   removeQueuedMessage(id: string): boolean {
     const removed = this.orchestrator.removeQueuedMessage(id);
     if (removed && this.plan) this.plan.queuedMessages = this.getQueuedMessages();
     return removed;
   }
-  setQueuedMessages(msgs: ReturnType<TaskOrchestrator['getQueuedMessages']>): void {
+  setQueuedMessages(msgs: QueuedMessage[]): void {
     this.orchestrator.setQueuedMessages(msgs);
   }
-  processNextQueuedMessage() { return this.orchestrator.processNextQueuedMessage(); }
-  get queuedCount(): number { return this.orchestrator.queuedCount; }
-  getTask(taskId: string) { return this.store.get(taskId); }
-  get isReviewApproved(): boolean { return this.orchestrator.isReviewApproved; }
 
   /** Replay a run a dirty tree blocked, after stashing the tracked changes. */
   async continueWithStash(): Promise<void> {
@@ -1281,25 +1170,10 @@ export class Session {
   async resolveConflictAsTask(taskId: string): Promise<LegacyPlanState | null> {
     if (!this.plan) return null;
     const task = this.store.get(taskId);
-    const isolation = this.orchestrator.getTaskIsolation(taskId);
-    const run = this.orchestrator.isolationRecord?.run;
-    if (!task || !run || isolation?.state !== 'conflict') {
-      throw new PlanEditError('Only a task whose merge conflicted can be resolved as a task');
-    }
+    const draft = task ? conflictResolverTask(task, this.orchestrator.isolationRecord?.run ?? null) : null;
+    if (!draft) throw new PlanEditError('Only a task whose merge conflicted can be resolved as a task');
     return this.editPlan(() => {
-      const resolver = this.store.add({
-        title: `Resolve merge conflict: ${task.title}`,
-        description: `Merge ${isolation.branch} into ${integrationBranchNameOf(run)} by hand.`,
-        type: 'ai',
-        prompt: buildConflictResolutionPrompt(task, isolation, integrationBranchNameOf(run)),
-        assignedRunner: task.assignedRunner,
-        assignedModel: task.assignedModel,
-        thinkingEffort: task.thinkingEffort,
-        taskMode: task.taskMode,
-        autonomy: 'AFK',
-        sliceType: 'AFK',
-        dependencies: [],
-      });
+      const resolver = this.store.add(draft);
       this.orchestrator.linkConflictResolver(resolver.id, taskId);
       return true;
     });
@@ -1317,34 +1191,14 @@ export class Session {
    * before anything is persisted. PlanStore is the single authority for
    * task state; LegacyPlanState.tasks is populated only at persist time.
    */
-  private mutatePlan(op: () => boolean, notify: () => void = () => this.broadcastPlan()): LegacyPlanState | null {
+  private mutatePlan(op: () => boolean, notify: () => void = () => this.events.planGenerated(this.plan, this.goal)): LegacyPlanState | null {
     if (!this.plan) return null;
-    const changed = this.withStatusHeld(op);
+    const changed = this.events.holdStatus(op);
     if (changed) this.persist();
-    this.releaseHeldStatus();
+    this.events.releaseStatus(this.plan);
     if (!changed) return null;
     notify();
     return this.plan;
-  }
-
-  /**
-   * Run a plan adoption with observer status broadcasts held back. Store ops
-   * signal the observer as they go, which would put a status_update on the
-   * wire before the persist the adoption owes — surfaces must never see plan
-   * state the disk does not have yet. {@link releaseHeldStatus} sends it after.
-   */
-  private withStatusHeld<T>(op: () => T): T {
-    const outer = this.statusHeld;
-    this.statusHeld = true;
-    try {
-      return op();
-    } finally {
-      this.statusHeld = outer;
-    }
-  }
-
-  private releaseHeldStatus(): void {
-    if (this.statusOwed) this.broadcastStatus();
   }
 
   /**
@@ -1479,10 +1333,6 @@ export class Session {
     return this.updateTask(taskId, { dependencies });
   }
 
-  async completeTask(taskId: string): Promise<void> {
-    await this.markTaskComplete(taskId);
-  }
-
   /**
    * Delete one task. A running task is cancelled first: the plan can drop it
    * either way, but nothing can reach its runner afterwards — the tmux session
@@ -1520,18 +1370,6 @@ export class Session {
       if (catalog) this.admitRunner(runner, catalog.models);
       return true;
     });
-  }
-
-  async mergeTasks(taskIdA: string, taskIdB: string): Promise<LegacyPlanState | null> {
-    return this.editPlan(() => (this.store.merge(taskIdA, taskIdB), true));
-  }
-
-  async mergeMultipleTasks(taskIds: string[]): Promise<LegacyPlanState | null> {
-    return this.editPlan(() => (this.store.mergeMultiple(taskIds), true));
-  }
-
-  async splitTask(taskId: string, newTasks: Partial<Task>[]): Promise<LegacyPlanState | null> {
-    return this.editPlan(() => (this.store.split(taskId, newTasks), true));
   }
 
   /**
@@ -1587,7 +1425,7 @@ export class Session {
     this.workspace = workspace;
     // The saved ledger is the session's own history: adopt it before the
     // persist below writes the plan back, so a load does not zero the totals.
-    this.usageLedger.restore(plan.plannerUsage);
+    this.usage.restore(plan.plannerUsage);
     // Adopting the saved session's id keeps subsequent persists writing to the
     // same file instead of forking the session under a fresh identity.
     if (opts?.sessionId) this.currentSessionId = opts.sessionId;
@@ -1602,31 +1440,7 @@ export class Session {
     if (opts?.persist !== false) this.persist();
     // A reopened session shows its token line again without waiting for the
     // next turn: announce the totals the moment the plan is adopted.
-    if (this.usageLedger.hasUsage) this.broadcast(this.usageLedger.message());
-  }
-
-  async modifyPlan(userRequest: string): Promise<Task[]> {
-    if (!this.plan) throw new Error('No plan to modify');
-    const requestedAt = new Date().toISOString();
-    const { modelsByRunner, runnerModes, settings } = await this.plannerCatalog(this.plan.runners);
-    const result = await this.planner.modify({
-      existingPlan: this.plan,
-      userRequest,
-      modelsByRunner,
-      runnerModes,
-      autonomousDefault: this.config.autonomousMode,
-      fs: this.fsAdapter,
-      fetcher: this.fetcher,
-      perRunnerAllowlist: settings.modelAllowlist,
-    });
-    // The exchange lands only with its outcome, so a failed modification
-    // leaves nothing behind to roll back.
-    this.mutatePlan(() => {
-      this.orchestrator.loadPlan(result.tasks, this.plan!.runners);
-      this.conversation.recordModification(userRequest, requestedAt, result.tasks.length);
-      return true;
-    });
-    return result.tasks;
+    if (this.usage.hasUsage) this.broadcast(this.usage.message());
   }
 
   destroy(): void {
@@ -1643,18 +1457,6 @@ export class Session {
     this.unsubObserver = null;
   }
 
-  private broadcastPlan(turnId?: string): void {
-    if (!this.plan) return;
-    this.syncPlanTasks();
-    this.broadcast({
-      type: 'plan_generated',
-      plan: serializePlan(this.plan),
-      goal: this.goal,
-      runners: this.plan.runners,
-      ...(turnId ? { turnId } : {}),
-    });
-  }
-
-  get aiServiceInstance(): IAiService { return this.aiService; }
+  get aiServiceInstance(): IAiService { return this.aiService(); }
 }
 
