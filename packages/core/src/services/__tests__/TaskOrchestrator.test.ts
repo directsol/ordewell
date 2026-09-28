@@ -520,6 +520,21 @@ describe('TaskOrchestrator', () => {
       expect(paused!.verdict!.outcome).toBe('fail');
     });
 
+    it('does not promise a kept worktree when the paused task ran in the workspace root', async () => {
+      const { sessions, spawn } = sessionRunner();
+      const warn = vi.fn();
+      const orchestrator = makeOrchestrator({ terminalRunner: { spawn }, notifications: { warn } });
+
+      orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' })]);
+      await orchestrator.forceStartTask('t1');
+
+      sessions[0].emitOutput('Claude usage limit reached. Your limit will reset at 5pm.');
+      sessions[0].emitExit(1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
+
+      expect(warn).toHaveBeenCalledWith('Task "Test" stopped before its completion marker: claude-code hit its usage limit. Retry it once the limit resets.');
+    });
+
     it('pauses the run on a usage limit and resumes it when the task is retried', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn }, config: { maxParallelSessions: 1 } });

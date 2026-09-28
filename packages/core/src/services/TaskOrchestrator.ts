@@ -602,7 +602,7 @@ export class TaskOrchestrator {
       // the task pauses and the run holds until the user resumes it.
       this.store.markAwaitingUser(taskId);
       this.haltOnFailure();
-      this.tell('warn', `Task "${task.title}" stopped before its completion marker: ${attempt.runner} hit its usage limit. Retry it once the limit resets — its worktree is kept.`);
+      this.tell('warn', `Task "${task.title}" stopped before its completion marker: ${attempt.runner} hit its usage limit. Retry it once the limit resets${attempt.worktree ? ' — its worktree is kept' : ''}.`);
       if (attempt.worktree) await this.runs.release(taskId, { keep: true });
     } else {
       this.store.markFailed(taskId);
