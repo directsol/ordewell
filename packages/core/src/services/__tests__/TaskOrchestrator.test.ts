@@ -6,7 +6,7 @@ import { createTask } from '../../models/Task';
 import type { IConfig } from '../../interfaces/IConfig';
 import type { INotification } from '../../interfaces/INotification';
 import type { ITerminalRunner, ITerminalSession } from '../../interfaces/ITerminalRunner';
-import { fakeConfig, FakeTerminalSession } from '../../testing';
+import { fakeConfig, FakeTerminalSession, flushMicrotasks } from '../../testing';
 import { fakeNotification } from './sessionTestKit';
 import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
 import type { TaskOutputSource, TranscriptQuery, TranscriptReader } from '../../interfaces/TaskOutputSource';
@@ -447,8 +447,7 @@ describe('TaskOrchestrator', () => {
       sessions[0].emitOutput('Working on it...\n<<<ORDEWELL_DONE_mk-1>>>\nDone.');
       sessions[0].emitExit(-1);
 
-      // Wait for the async onAiTaskExit to complete
-      await new Promise(r => setTimeout(r, 10));
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
 
       const log = orchestrator.storeInstance.getExecutionLog();
       expect(log).toHaveLength(1);
@@ -473,8 +472,7 @@ describe('TaskOrchestrator', () => {
       sessions[0].emitOutput('Something went wrong.');
       sessions[0].emitExit(1);
 
-      // Wait for the async onAiTaskExit to complete
-      await new Promise(r => setTimeout(r, 10));
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('failed'));
 
       const log = orchestrator.storeInstance.getExecutionLog();
       expect(log).toHaveLength(1);
@@ -496,7 +494,7 @@ describe('TaskOrchestrator', () => {
 
       sessions[0].emitOutput('<<<ORDEWELL_DONE_mk-1>>>\nClaude usage limit reached. Your limit will reset at 5pm.');
       sessions[0].emitExit(1);
-      await new Promise(r => setTimeout(r, 10));
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed'));
 
       const finished = orchestrator.storeInstance.get('t1');
       expect(finished!.status).toBe('completed');
@@ -515,7 +513,7 @@ describe('TaskOrchestrator', () => {
 
       sessions[0].emitOutput('Claude usage limit reached. Your limit will reset at 5pm.');
       sessions[0].emitExit(1);
-      await new Promise(r => setTimeout(r, 10));
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
 
       const paused = orchestrator.storeInstance.get('t1');
       expect(paused!.status).toBe('awaiting_user');
@@ -559,9 +557,7 @@ describe('TaskOrchestrator', () => {
 
       sessions[0].emitOutput('compilation failed: unexpected token');
       sessions[0].emitExit(1);
-      await new Promise(r => setTimeout(r, 10));
-
-      expect(orchestrator.storeInstance.get('t1')!.status).toBe('failed');
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('failed'));
     });
   });
 
@@ -582,12 +578,13 @@ describe('TaskOrchestrator', () => {
       expect(orchestrator.storeInstance.get('t1')?.status).toBe('in_progress');
 
       sessions[0].emitOutput('<<<ORDEWELL_DONE_mk-1>>>');
-      await new Promise(r => setTimeout(r, 10));
+      await vi.waitFor(() => {
+        expect(orchestrator.storeInstance.get('t1')?.status).toBe('completed');
+        expect(orchestrator.isRunning).toBe(false);
+      });
 
-      expect(orchestrator.storeInstance.get('t1')?.status).toBe('completed');
       expect(orchestrator.storeInstance.get('t2')?.status).toBe('pending');
       expect(spawn).toHaveBeenCalledTimes(1);
-      expect(orchestrator.isRunning).toBe(false);
     });
   });
 
@@ -684,11 +681,9 @@ describe('TaskOrchestrator', () => {
       });
 
       orchestrator.approveReview();
-      // Let tick loop run
-      await new Promise(r => setTimeout(r, 10));
 
+      await vi.waitFor(() => expect(events).toContain('review_approved'));
       expect(orchestrator.isReviewApproved).toBe(true);
-      expect(events).toContain('review_approved');
     });
   });
 
@@ -792,9 +787,8 @@ describe('TaskOrchestrator', () => {
       orchestrator.queueMessage('hello from user');
 
       await orchestrator.approveReview();
-      await new Promise(r => setTimeout(r, 10));
 
-      expect(queueReadyCalled).toBe(true);
+      await vi.waitFor(() => expect(queueReadyCalled).toBe(true));
       expect(spawn).not.toHaveBeenCalled();
     });
 
@@ -919,18 +913,16 @@ describe('sequential dependency chain', () => {
       ]);
 
       await orchestrator.approveReview();
-      await new Promise(r => setTimeout(r, 20));
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
 
       // t1 should have been spawned
-      expect(spawn).toHaveBeenCalledTimes(1);
       expect(spawn.mock.calls[0][0].taskId).toBe('t1');
 
       sessions[0].emitOutput('Done.\n<<<ORDEWELL_DONE_mk-1>>>');
       sessions[0].emitExit(0);
-      await new Promise(r => setTimeout(r, 50));
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
 
       // t2 should now be spawned
-      expect(spawn).toHaveBeenCalledTimes(2);
       expect(spawn.mock.calls[1][0].taskId).toBe('t2');
 
       // t1 should be completed and still visible in the active plan
@@ -992,13 +984,12 @@ describe('resuming after a user-action pause', () => {
       });
 
       await orchestrator.approveReview();
-      await new Promise((r) => setTimeout(r, 10));
 
+      await vi.waitFor(() => expect(events).toContain('tick'));
       // Nothing ready (u1 is a user task) and not all complete — the run is
       // paused awaiting the human. execution_complete must NOT fire: every
       // surface treats it as terminal (the TUI closes its execution stream on
       // receipt), so a premature emit would render later fan-out invisible.
-      expect(events).toContain('tick');
       expect(events).not.toContain('complete');
       expect(orchestrator.isRunning).toBe(true);
 
@@ -1025,10 +1016,9 @@ describe('execution log tracking', () => {
       sessions[0].emitOutput('Done.\n<<<ORDEWELL_DONE_mk-1>>>');
       sessions[0].emitExit(0);
 
-      await new Promise(r => setTimeout(r, 50));
+      await vi.waitFor(() => expect(orchestrator.storeInstance.getExecutionLog()).toHaveLength(1));
 
       const log = orchestrator.storeInstance.getExecutionLog();
-      expect(log).toHaveLength(1);
       expect(log[0].id).toBe('t1');
       expect(log[0].finalized).toBe(true);
       expect(log[0].verdict?.outcome).toBe('pass');
@@ -1049,10 +1039,9 @@ describe('execution log tracking', () => {
       sessions[0].emitOutput('Error occurred');
       sessions[0].emitExit(1);
 
-      await new Promise(r => setTimeout(r, 50));
+      await vi.waitFor(() => expect(orchestrator.storeInstance.getExecutionLog()).toHaveLength(1));
 
       const log = orchestrator.storeInstance.getExecutionLog();
-      expect(log).toHaveLength(1);
       expect(log[0].id).toBe('t1');
       expect(log[0].verdict?.outcome).toBe('fail');
       expect(orchestrator.storeInstance.planTasks).toHaveLength(1);
@@ -1171,7 +1160,7 @@ describe('cancelTask', () => {
     expect(spawn.mock.calls[0][0].taskId).toBe('t1');
 
     await orchestrator.cancelTask('t1');
-    await new Promise(r => setTimeout(r, 20));
+    await flushMicrotasks();
 
     const t1 = orchestrator.storeInstance.get('t1');
     const t2 = orchestrator.storeInstance.get('t2');
@@ -1265,11 +1254,11 @@ describe('task attempts', () => {
     const spawn = vi.fn(() => new Promise<ITerminalSession>((resolve, reject) => { pending.push({ resolve, reject }); }));
     const settle = async (index: number, session: FakeTerminalSession) => {
       pending[index].resolve(session);
-      await new Promise((r) => setTimeout(r, 0));
+      await flushMicrotasks();
     };
     const fail = async (index: number, err: Error) => {
       pending[index].reject(err);
-      await new Promise((r) => setTimeout(r, 0));
+      await flushMicrotasks();
     };
     return { spawn, settle, fail, spawned: () => pending.length };
   }
@@ -1503,7 +1492,7 @@ describe('task attempts', () => {
     };
     const answer = async (index: number, text: string | null) => {
       pending[index](text);
-      await new Promise((r) => setTimeout(r, 0));
+      await flushMicrotasks();
     };
     return { transcripts, answer, reads: () => pending.length };
   }
@@ -1542,7 +1531,7 @@ describe('task attempts', () => {
     await orchestrator.approveReview();
 
     orchestrator.stop();
-    await new Promise((r) => setTimeout(r, 10));
+    await flushMicrotasks();
 
     expect(orchestrator.storeInstance.get('t1')!.verdict).toBeUndefined();
     expect(orchestrator.storeInstance.isFailed('t1')).toBe(false);
@@ -1561,7 +1550,7 @@ describe('task attempts', () => {
     orchestrator.loadPlan(plan());
     await orchestrator.forceStartTask('t1');
     sessions[0].emitExit(1);
-    await new Promise((r) => setTimeout(r, 10));
+    await flushMicrotasks();
 
     expect(orchestrator.storeInstance.get('t1')!.status).toBe('in_progress');
     expect(orchestrator.getAttempt('t1')).toMatchObject({ sessionId: 's2', phase: 'running' });
@@ -1602,7 +1591,7 @@ describe('TaskOrchestrator task output', () => {
     return { sessions, spawn };
   }
 
-  const settle = () => new Promise((r) => setTimeout(r, 10));
+  const settle = () => flushMicrotasks();
 
   it('summarizes an exit without a marker from the raw stream, not the stripped session buffer', async () => {
     const { sessions, spawn } = strippingRunner();

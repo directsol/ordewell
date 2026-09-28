@@ -16,6 +16,15 @@ import type {
 import type { Task } from './models/Task';
 import { handoffOf, integrationBranchFor, SELF_REPO } from './services/isolationRecord';
 
+/**
+ * Let an already-queued promise chain run to its next await before asserting,
+ * without a wall-clock sleep. For a chain whose length is not known, drain the
+ * microtask queue repeatedly. Only helps a chain that does not wait on a timer.
+ */
+export async function flushMicrotasks(rounds = 20): Promise<void> {
+  for (let i = 0; i < rounds; i += 1) await Promise.resolve();
+}
+
 export function fakeConfig(overrides: Partial<IConfig> = {}): IConfig {
   return {
     aiProvider: 'openrouter',

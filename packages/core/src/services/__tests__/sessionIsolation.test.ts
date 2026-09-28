@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { makeSession, FakeTerminalSession, taskOf, saves } from './sessionTestKit';
-import { FakeWorktreeIsolation } from '../../testing';
+import { FakeWorktreeIsolation, flushMicrotasks } from '../../testing';
 import * as sessionStore from '../../utils/sessionStore';
 import { createTask, type LegacyPlanState, type Task } from '../../models/Task';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
@@ -271,7 +271,7 @@ describe('Session with worktree isolation', () => {
 
     session.loadPlan(restored, 'goal', '/repo', { persist: false });
     await vi.waitFor(() => expect(isolation.calls).toEqual([{ op: 'pruneOrphans' }]));
-    await new Promise((r) => setTimeout(r, 0));
+    await flushMicrotasks();
 
     expect(saves(session)).not.toHaveBeenCalled();
   });

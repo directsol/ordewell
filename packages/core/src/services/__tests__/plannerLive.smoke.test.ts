@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'child_process';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { CliAgentAiService } from '../harness/CliAgentAiService';
 import { fakeConfig, fakeFileSystem } from '../../testing';
 import type { AiProvider } from '../../interfaces/IConfig';
@@ -73,11 +73,11 @@ describe.runIf(agents.length > 0)('harness planner process lifecycle — live', 
         expect(spawned.length, `${agent} spawned no process to leak`).toBeGreaterThan(0);
 
         svc.reset();
-        for (let i = 0; i < 40 && descendants().some((pid) => spawned.includes(pid)); i++) {
-          await new Promise((r) => setTimeout(r, 250));
-        }
-        const survivors = descendants().filter((pid) => spawned.includes(pid));
-        expect(survivors, `${agent} processes outlived reset(): ${survivors.join(', ')}`).toEqual([]);
+        let survivors: number[] = [];
+        await vi.waitFor(() => {
+          survivors = descendants().filter((pid) => spawned.includes(pid));
+          expect(survivors, `${agent} processes outlived reset(): ${survivors.join(', ')}`).toEqual([]);
+        }, { timeout: 10_000, interval: 250 });
       } finally {
         svc.reset();
       }

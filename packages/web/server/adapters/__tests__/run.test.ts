@@ -137,7 +137,9 @@ describe('run — an aborted planning turn kills the child', () => {
       timeout: 60_000,
       signal: controller.signal,
     });
-    setTimeout(() => controller.abort(), 50);
+    // run() spawns the child synchronously; aborting now must kill it rather
+    // than let it serve out its own 60-second timeout.
+    controller.abort();
     const r = await running;
 
     expect(Date.now() - started).toBeLessThan(TIMEOUT);

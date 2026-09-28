@@ -136,7 +136,7 @@ describe('createApp', () => {
     });
 
     app.start();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
     expect(app.getState().exiting).toBe(false);
   });
 });

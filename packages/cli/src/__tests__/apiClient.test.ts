@@ -147,8 +147,7 @@ describe('ApiClient', () => {
     const events: unknown[] = [];
     const stream = client.streamPlanning('session-x', (e) => events.push(e));
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(events).toEqual([{ type: 'research_step', tool: 'read_file', args: '{}' }]);
+    await vi.waitFor(() => expect(events).toEqual([{ type: 'research_step', tool: 'read_file', args: '{}' }]));
     stream.close();
   });
 
@@ -162,7 +161,7 @@ describe('ApiClient', () => {
 
     const stream = new ApiClient(port).streamPlanning('session-x', () => {});
     await stream.ready;
-    expect(subscribed || (await new Promise((r) => setTimeout(() => r(subscribed), 50)))).toBe(true);
+    await vi.waitFor(() => expect(subscribed).toBe(true));
     stream.close();
 
     const refused = new ApiClient(1).streamPlanning('session-x', () => {});

@@ -5,7 +5,7 @@ import { createTask, type Task } from '../../models/Task';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
 import type { IConfig } from '../../interfaces/IConfig';
 import type { IsolationAvailability, IsolationMergeResult, RepairEvidence } from '../../interfaces/IWorktreeIsolation';
-import { fakeConfig, FakeTerminalSession, FakeWorktreeIsolation } from '../../testing';
+import { fakeConfig, FakeTerminalSession, FakeWorktreeIsolation, flushMicrotasks } from '../../testing';
 import { fakeNotification } from './sessionTestKit';
 import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
 import type { TranscriptQuery } from '../../interfaces/TaskOutputSource';
@@ -100,7 +100,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
     pass(t1);
     await vi.waitFor(() => expect(isolation.taskIdsFor('integrate')).toEqual(['t1']));
-    await new Promise((r) => setTimeout(r, 10));
+    await flushMicrotasks();
     expect(spawn).toHaveBeenCalledTimes(1);
 
     openMerge();
@@ -119,7 +119,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
     pass(t1);
     await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
-    await new Promise((r) => setTimeout(r, 10));
+    await flushMicrotasks();
 
     expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'conflict', branch: 'ordewell/run1/1-t1' });
     expect(isolation.taskIdsFor('release')).toEqual([]);
@@ -238,7 +238,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
     await vi.waitFor(() => expect(isolation.taskIdsFor('integrate')).toEqual(['t1']));
 
     const cancelled = orchestrator.cancelTask('t1');
-    await new Promise((r) => setTimeout(r, 10));
+    await flushMicrotasks();
     expect(isolation.taskIdsFor('release')).toEqual([]);
     openMerge();
     await cancelled;
@@ -516,7 +516,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
       pass(t1);
       await vi.waitFor(() => expect(isolation.taskIdsFor('integrate')).toEqual(['t1']));
-      await new Promise((r) => setTimeout(r, 10));
+      await flushMicrotasks();
       expect(spawn).toHaveBeenCalledTimes(1);
 
       openMerge();
@@ -975,7 +975,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
       passLatest(t1);
       await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
-      await new Promise((r) => setTimeout(r, 10));
+      await flushMicrotasks();
 
       expect(spawn).toHaveBeenCalledTimes(3);
       expect(isolation.taskIdsFor('reopen')).toEqual(['t1', 't1']);
@@ -994,7 +994,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
       pass(t1);
       await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
-      await new Promise((r) => setTimeout(r, 10));
+      await flushMicrotasks();
 
       expect(spawn).toHaveBeenCalledTimes(1);
       expect(isolation.taskIdsFor('reopen')).toEqual([]);
@@ -1100,7 +1100,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
       passLatest(t1);
       await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
-      await new Promise((r) => setTimeout(r, 10));
+      await flushMicrotasks();
 
       expect(isolation.taskIdsFor('integrate')).toEqual(['t1']);
       expect(spawn).toHaveBeenCalledTimes(2);
@@ -1256,7 +1256,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
       pass(resolver);
       await vi.waitFor(() => expect(orchestrator.storeInstance.get(resolver.id)!.status).toBe('completed'));
-      await new Promise((r) => setTimeout(r, 10));
+      await flushMicrotasks();
 
       expect(orchestrator.storeInstance.get('t1')!.status).toBe('in_progress');
       expect(isolation.taskIdsFor('integrate')).toEqual(['t1', resolver.id]);

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import http from 'http';
 import fs from 'fs';
 import os from 'os';
@@ -120,13 +120,12 @@ describe('the CLI authenticating to the daemon', () => {
       const client = new ApiClient(server.port);
       const events: unknown[] = [];
       const stream = client.streamPlanning('s1', (e) => events.push(e));
-      await new Promise((r) => setTimeout(r, 150));
+      await vi.waitFor(() => expect(events).toHaveLength(1));
       stream.close();
 
       const request = server.lastRequest();
       expect(request?.headers['sec-websocket-protocol']).toContain(`${DAEMON_TOKEN_SUBPROTOCOL_PREFIX}${token}`);
       expect(request?.url).not.toContain(token);
-      expect(events).toHaveLength(1);
     });
 
     it('carries the token on the execution stream too', async () => {
