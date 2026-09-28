@@ -331,7 +331,7 @@ describe('the extension host wires one state, one deps bag and one lifecycle', (
     expect(h.session.spies.loadPlan).toHaveBeenCalledWith(
       expect.objectContaining({ status: 'approved' }),
       'build a parser',
-      '',
+      h.services.fsAdapter.getWorkspaceRoot(),
     );
 
     h.chat.messages.fire({ type: 'sendSystemCommand', command: 'cancel', taskId: 't1' });
