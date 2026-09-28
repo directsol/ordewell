@@ -768,6 +768,148 @@ const CMD_DIALECT: CorpusEntry[] = [
   { command: 'cat %USERPROFILE%\\.ssh\\id_rsa', tier: 'ask', scope: 'cat', dialect: 'cmd' },
 ];
 
+// ---------------------------------------------------------------------------
+// Runners. A runner that feeds its command arguments nobody can see is
+// unwrapped but never runs unprompted, and its scope names the command it runs;
+// one that hands its command to a shell, or changes what it runs as, is refused.
+// ---------------------------------------------------------------------------
+
+const RUNNERS: CorpusEntry[] = [
+  { command: 'xargs -a list rm', tier: 'refuse' },
+  { command: 'xargs rm < list', tier: 'refuse' },
+  { command: 'xargs -0 -a list rm -f', tier: 'refuse' },
+  { command: 'nice xargs rm < list', tier: 'refuse' },
+  { command: 'xargs nice rm < list', tier: 'refuse' },
+  { command: 'xargs git push < list', tier: 'refuse' },
+  // The input decides the command: an interpreter handed unseen arguments, a
+  // wrapper with no command of its own, a second xargs, a substituted name.
+  { command: 'xargs sh < list', tier: 'refuse' },
+  { command: 'xargs python < list', tier: 'refuse' },
+  { command: 'xargs env < list', tier: 'refuse' },
+  { command: 'xargs timeout 5 < list', tier: 'refuse' },
+  { command: 'xargs xargs grep x < list', tier: 'refuse' },
+  { command: 'xargs -I c cat x < list', tier: 'refuse' },
+  // An appended argument could be the flag that runs a program or writes a file.
+  { command: 'xargs rg TODO < list', tier: 'refuse' },
+  { command: 'xargs sort < list', tier: 'refuse' },
+  { command: 'xargs uniq < list', tier: 'refuse' },
+  { command: 'xargs find < list', tier: 'refuse' },
+  { command: 'xargs sed -n 1p < list', tier: 'refuse' },
+  { command: 'xargs npm test < list', tier: 'refuse' },
+  // Flags xargs does not declare are refused, as on a wrapper.
+  { command: 'xargs --process-slot-var=SLOT grep x < list', tier: 'refuse' },
+  { command: 'xargs -p grep x < list', tier: 'refuse' },
+  { command: 'xargs grep --hypothetical-flag x < list', tier: 'refuse' },
+  // The safe forms prompt, scoped to the command they run.
+  { command: 'xargs grep foo < list', tier: 'ask', scope: 'xargs grep' },
+  { command: 'xargs -a list grep -n TODO', tier: 'ask', scope: 'xargs grep' },
+  { command: 'xargs -0 -a list wc -l', tier: 'ask', scope: 'xargs wc' },
+  { command: 'xargs -n 1 -P 4 head -5 < list', tier: 'ask', scope: 'xargs head' },
+  { command: 'xargs -I{} cat {} < list', tier: 'ask', scope: 'xargs cat' },
+  { command: 'xargs -d "\\n" ls -la < list', tier: 'ask', scope: 'xargs ls' },
+  { command: 'nice xargs grep foo < list', tier: 'ask', scope: 'xargs grep' },
+  { command: 'xargs -- grep foo < list', tier: 'ask', scope: 'xargs grep' },
+  // With no command, xargs runs `echo`.
+  { command: 'xargs < list', tier: 'ask', scope: 'xargs echo' },
+  { command: 'xargs -a list', tier: 'ask', scope: 'xargs echo' },
+  // Runners refused outright.
+  { command: 'parallel rm ::: a b', tier: 'refuse' },
+  { command: 'parallel echo ::: a b', tier: 'refuse' },
+  { command: 'watch ls', tier: 'refuse' },
+  { command: 'watch -x ls', tier: 'refuse' },
+  { command: 'script -c "rm -rf x"', tier: 'refuse' },
+  { command: 'script -q /dev/null rm -rf x', tier: 'refuse' },
+  { command: 'flock /tmp/lock rm -rf x', tier: 'refuse' },
+  { command: 'flock -c "rm -rf x" /tmp/lock', tier: 'refuse' },
+  { command: 'flock .lock ls', tier: 'refuse' },
+  { command: 'chroot / rm -rf x', tier: 'refuse' },
+  { command: 'unshare -r rm -rf x', tier: 'refuse' },
+  { command: 'nsenter -t 1 -m ls', tier: 'refuse' },
+  { command: 'setpriv --reuid=0 ls', tier: 'refuse' },
+  { command: 'runuser -u root -- rm -rf x', tier: 'refuse' },
+  { command: 'strace -o trace.txt ls', tier: 'refuse' },
+  { command: 'ltrace ls', tier: 'refuse' },
+  { command: 'taskset -c 0 rm -rf x', tier: 'refuse' },
+  { command: 'sg wheel "rm -rf x"', tier: 'refuse' },
+  { command: 'nice strace rm -rf x', tier: 'refuse' },
+];
+
+// ---------------------------------------------------------------------------
+// Filter programs. sed and awk can run a command or write a file from inside
+// their program, with no flag involved.
+// ---------------------------------------------------------------------------
+
+const FILTER_PROGRAMS: CorpusEntry[] = [
+  { command: "awk 'BEGIN{system(\"rm -rf x\")}'", tier: 'refuse' },
+  { command: "awk '{ system(\"rm \" $1) }' list", tier: 'refuse' },
+  { command: "awk '{print | \"sh\"}' cmds.txt", tier: 'refuse' },
+  { command: "awk '{print \"rm \" $1 | \"sh\"}' list", tier: 'refuse' },
+  { command: "awk 'BEGIN{\"date\" | getline d; print d}'", tier: 'refuse' },
+  { command: "awk 'BEGIN{cmd=\"sh\"; print \"rm x\" | cmd}'", tier: 'refuse' },
+  { command: "gawk '{print |& \"cat\"}' f", tier: 'refuse' },
+  { command: "mawk '{print > \"out.txt\"}' f", tier: 'refuse' },
+  { command: "nawk '{print $0 >> $1 \".txt\"}' f", tier: 'refuse' },
+  { command: "awk '{printf(\"%s\\n\", $1) > \"out\"}' f", tier: 'refuse' },
+  { command: "gawk '@load \"readfile\"; BEGIN{}'", tier: 'refuse' },
+  { command: 'awk -f prog.awk file.txt', tier: 'refuse' },
+  { command: 'gawk --file=prog.awk file.txt', tier: 'refuse' },
+  { command: "awk -e 'BEGIN{system(\"x\")}'", tier: 'refuse' },
+  { command: "gawk --source='BEGIN{system(\"x\")}'", tier: 'refuse' },
+  { command: "gawk -o out.awk '{print}' f", tier: 'refuse' },
+  { command: "awk \"{print $X}\" file.txt", tier: 'refuse' },
+  { command: "busybox awk 'BEGIN{system(\"rm -rf x\")}'", tier: 'refuse' },
+  { command: "awk -F: '/error|warn/ {print $1, $3}' log.txt", tier: 'ask', scope: 'awk' },
+  { command: "awk '$3 > 100 {print $1}' data.txt", tier: 'ask', scope: 'awk' },
+  { command: "awk 'NR==1' file.txt", tier: 'ask', scope: 'awk' },
+  { command: "awk '{ s += $2 } END { print s }' data.txt", tier: 'ask', scope: 'awk' },
+  { command: "awk '{ a[$1]++ } END { for (k in a) print k, a[k] }' f", tier: 'ask', scope: 'awk' },
+  { command: "awk -v OFS=, '{print (a > b), $1/2}' f", tier: 'ask', scope: 'awk' },
+  { command: "gawk 'length > 80' src.ts", tier: 'ask', scope: 'gawk' },
+  { command: "sed -e '1e rm x' file", tier: 'refuse' },
+  { command: "sed '1e rm x' file", tier: 'refuse' },
+  { command: "sed 's/x/y/e' file", tier: 'refuse' },
+  { command: "sed 's/.*/rm &/e' list", tier: 'refuse' },
+  { command: "sed 'w out.txt' file", tier: 'refuse' },
+  { command: "sed '/x/W out.txt' file", tier: 'refuse' },
+  { command: "sed 's/a/b/w out.txt' file", tier: 'refuse' },
+  { command: "sed -n 's/a/b/gpw out.txt' file", tier: 'refuse' },
+  { command: "gsed --expression='1e rm x' file", tier: 'refuse' },
+  { command: "sed 1p file -e '1e rm x'", tier: 'refuse' },
+  { command: 'sed -f script.sed file', tier: 'refuse' },
+  { command: 'gsed --file=script.sed file', tier: 'refuse' },
+  { command: "sed -ni 's/a/b/p' file", tier: 'refuse' },
+  { command: "sed --in-place=.bak 's/a/b/' file", tier: 'refuse' },
+  { command: "gsed -i 's/a/b/' file", tier: 'refuse' },
+  { command: "sed 's/[/]/x/' file", tier: 'refuse' },
+  { command: 'sed "s/$OLD/new/" file', tier: 'refuse' },
+  { command: "busybox sed 's/x/y/e' file", tier: 'refuse' },
+  { command: "sed -n '1,40p' src/index.ts", tier: 'ask', scope: 'sed' },
+  { command: "sed -ne 's/^version: //p' config.yml", tier: 'ask', scope: 'sed' },
+  { command: "sed -n '/start/,/end/p' notes.md", tier: 'ask', scope: 'sed' },
+  { command: "sed -E 's/(foo|bar)/baz/g' file", tier: 'ask', scope: 'sed' },
+  { command: "sed ':a;N;$!ba;s/\\n/ /g' file", tier: 'ask', scope: 'sed' },
+  { command: "sed 's/[[:space:]]*$//' file", tier: 'ask', scope: 'sed' },
+  { command: "sed '/^#/d; /^$/d' file", tier: 'ask', scope: 'sed' },
+  { command: "sed -n '/x/{p;q}' file", tier: 'ask', scope: 'sed' },
+  { command: "sed -n '$=' file", tier: 'ask', scope: 'sed' },
+];
+
+// ---------------------------------------------------------------------------
+// Input redirects. The word after `<` is a file the shell opens, not an
+// argument: read as one, a leading `< cat` named the wrong command.
+// ---------------------------------------------------------------------------
+
+const INPUT_REDIRECTS: CorpusEntry[] = [
+  { command: '< cat rm x', tier: 'refuse' },
+  { command: '<ls mv a b', tier: 'refuse' },
+  { command: 'nice < cat rm x', tier: 'refuse' },
+  { command: 'xargs < cat rm x', tier: 'refuse' },
+  { command: 'wc -l < package.json', tier: 'auto' },
+  { command: 'grep TODO <notes.md', tier: 'auto' },
+  { command: 'cat <<< hello', tier: 'auto' },
+  { command: 'cat 0< README.md', tier: 'auto' },
+];
+
 export const CORPUS: CorpusEntry[] = [
   ...LISTING_AND_METADATA,
   ...READING,
@@ -785,6 +927,9 @@ export const CORPUS: CorpusEntry[] = [
   ...WRAPPERS,
   ...DANGEROUS_FLAGS,
   ...FLAGS_THE_PLANNER_EMITS,
+  ...RUNNERS,
+  ...FILTER_PROGRAMS,
+  ...INPUT_REDIRECTS,
   ...CMD_DIALECT,
 ];
 

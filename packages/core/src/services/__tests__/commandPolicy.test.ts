@@ -819,6 +819,116 @@ describe('the remote-listing subcommand prompts, scoped to where it reaches', ()
   });
 });
 
+/**
+ * A runner was classified by its own name, so `xargs rm < list` was an
+ * approvable `xargs` scoped to `xargs` — and one approval of an innocent
+ * `xargs grep` was remembered for it. `xargs` is now unwrapped like a wrapper,
+ * but it also appends arguments nobody sees, so it never runs unprompted and
+ * its grant names the command it runs.
+ */
+describe('a command runner is classified by the command it runs', () => {
+  it('scopes an xargs grant to the command it runs, never to xargs alone', () => {
+    expect(classifyCommand('xargs grep foo < list')).toEqual({ tier: 'ask', scope: 'xargs grep' });
+    expect(classifyCommand('xargs -a list wc -l')).toEqual({ tier: 'ask', scope: 'xargs wc' });
+    expect(classifyCommand('xargs -a list cat').scope).not.toBe(classifyCommand('xargs -a list grep x').scope);
+  });
+
+  it('prompts for a command under xargs even when it runs unprompted on its own', () => {
+    expect(classifyCommand('grep foo list').tier).toBe('auto');
+    expect(classifyCommand('xargs grep foo < list').tier).toBe('ask');
+  });
+
+  it('scopes xargs with no command as the echo it runs', () => {
+    expect(classifyCommand('xargs < list')).toEqual({ tier: 'ask', scope: 'xargs echo' });
+  });
+
+  it('keeps wrappers out of the scope and the runner in it', () => {
+    expect(classifyCommand('nice xargs grep foo < list').scope).toBe('xargs grep');
+    expect(classifyCommand('xargs nice grep foo < list').scope).toBe('xargs grep');
+    expect(classifyCommand('git status && xargs grep x < list').scope).toBe('xargs grep');
+  });
+
+  it('refuses a refused command under xargs, naming the command and the runner', () => {
+    const { tier, reason } = classifyCommand('xargs -a list rm');
+    expect(tier).toBe('refuse');
+    expect(reason).toContain('"rm"');
+    expect(reason).toContain('"xargs"');
+    expect(classifyCommand('xargs rm < list').tier).toBe('refuse');
+  });
+
+  // The input can supply a flag, an operand or the whole command line, so a
+  // command whose arguments can run a program or write a file is refused even
+  // when what is visible is harmless.
+  it.each(['xargs sh < list', 'xargs env < list', 'xargs rg TODO < list', 'xargs uniq < list',
+    'xargs xargs grep x < list'])('refuses %s, whose appended arguments decide what it does', (cmd) => {
+    expect(classifyCommand(cmd).tier).toBe('refuse');
+  });
+
+  it('refuses an xargs replace-string that lands in the command name', () => {
+    expect(classifyCommand('xargs -I c cat x < list').tier).toBe('refuse');
+    expect(classifyCommand('xargs -I{} cat {} < list').tier).toBe('ask');
+  });
+
+  it('keeps piping into xargs refused', () => {
+    expect(classifyCommand('git ls-files | xargs grep TODO').tier).toBe('refuse');
+    expect(classifyCommand('git ls-files | nice xargs grep TODO').tier).toBe('refuse');
+  });
+
+  it.each(['parallel echo ::: a', 'watch ls', 'script -c ls', 'flock /tmp/lock ls', 'chroot / ls',
+    'unshare -r ls', 'nsenter -t 1 ls', 'setpriv ls', 'runuser -u x ls', 'strace ls', 'ltrace ls'])(
+    'refuses the runner %s rather than prompting for it', (cmd) => {
+      expect(classifyCommand(cmd).tier).toBe('refuse');
+    },
+  );
+});
+
+describe('sed and awk programs are read for commands they run and files they write', () => {
+  it.each([
+    "awk 'BEGIN{system(\"rm -rf x\")}'",
+    "awk '{print | \"sh\"}' f",
+    "awk '\"date\" | getline d' f",
+    "awk '{print > \"out\"}' f",
+    'awk -f prog.awk f',
+    "sed -e '1e rm x' f",
+    "sed 's/x/y/e' f",
+    "sed 'w out' f",
+    "sed 's/x/y/w out' f",
+    'sed -f script.sed f',
+  ])('refuses %s', (cmd) => {
+    expect(classifyCommand(cmd).tier).toBe('refuse');
+  });
+
+  // GNU sed takes an option after a file name, so the script can arrive last.
+  it('reads a sed script that follows the file name', () => {
+    expect(classifyCommand("sed 1p f -e '1e rm x'").tier).toBe('refuse');
+  });
+
+  // A `|` in a regex literal is alternation, and a `>` outside a print statement compares.
+  it('leaves read-only programs on the prompt tier', () => {
+    expect(classifyCommand("awk '/error|warn/ {print $1}' f")).toEqual({ tier: 'ask', scope: 'awk' });
+    expect(classifyCommand("awk '$3 > 100 {print (a > b)}' f")).toEqual({ tier: 'ask', scope: 'awk' });
+    expect(classifyCommand("sed -E 's/(a|b)/c/g' f")).toEqual({ tier: 'ask', scope: 'sed' });
+  });
+
+  it('refuses a program the shell rewrites before the filter sees it', () => {
+    expect(classifyCommand('sed "s/$OLD/new/" f').tier).toBe('refuse');
+  });
+});
+
+describe('an input redirect names a file the shell opens, not an argument', () => {
+  // The word after `<` was pushed as an argument, and it can come first.
+  it('classifies the command after a leading input redirect', () => {
+    const { tier, reason } = classifyCommand('< cat rm x');
+    expect(tier).toBe('refuse');
+    expect(reason).toContain('"rm"');
+  });
+
+  it('still hands the redirected file to path confinement', () => {
+    expect(pathLikeArgs('cat < /etc/passwd')).toEqual(['/etc/passwd']);
+    expect(pathLikeArgs('< ~/.ssh/id_rsa cat')).toEqual(['~/.ssh/id_rsa']);
+  });
+});
+
 describe('pathLikeArgs — path arguments an auto-tier binary could still read outside the workspace', () => {
   it('picks out absolute-path arguments', () => {
     expect(pathLikeArgs('cat /etc/passwd')).toEqual(['/etc/passwd']);

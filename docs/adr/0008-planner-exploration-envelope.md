@@ -124,3 +124,57 @@ classifier cannot read is refused, and an argument it cannot see into prompts.
   stage's pipe, so piping into an interpreter was only asked about.
 - **A value glued onto a short flag is confined.** `grep -f/etc/passwd` skipped
   the path check that `grep -f /etc/passwd` gets.
+
+## Amendment (2026-09-28) — command runners, and programs inside filters
+
+The refusal tier rests on one premise: a destructive verb never reaches `ask`,
+because `ask` is remembered at `scope` granularity and one approval would
+cover every later use. Wrappers (`env`, `nice`, `timeout`, …) were already
+unwrapped for that reason. Commands that *run* another command were not, and
+nor were the filters that carry a program, so the premise had four holes, each
+classified as `ask` with a binary-wide scope:
+
+- `xargs rm < list`, `xargs -a list rm` — `xargs` was refused only when piped
+  or given `-c`/`-e`.
+- `parallel`, `watch`, `flock`, `script`, `chroot`, `unshare`, `strace` and
+  their kind were unknown binaries, so the command they run was an unexamined
+  argument.
+- `awk 'BEGIN{system("rm -rf x")}'`, `print | "sh"`, `"cmd" | getline`,
+  `print > file`.
+- `sed '1e rm x'`, `sed 's/x/y/e'`, and the `w`/`W` commands and `w` flag that
+  write a file.
+
+Closed as follows, under the file's existing rule: when unsure, refuse.
+
+- **A runner whose command is a plain argv is unwrapped; one that hands it to a
+  shell is refused.** `xargs` is the one runner unwrapped: its flags are walked
+  like a wrapper's (an unknown flag refuses) and the command it runs is
+  classified by the same machinery. `parallel` (a shell-evaluated template),
+  `watch` (joins its arguments for `sh -c`), `script`, `sg`, `flock` (creates
+  its lock file when missing — the write `touch` is refused for — and runs a
+  string under `-c`), `chroot`, `unshare`, `nsenter`, `setpriv`, `runuser`,
+  `pkexec`, the tracers and debuggers, and the scheduling and sandbox runners
+  (`taskset`, `systemd-run`, `bwrap`, …) are refused.
+- **A runner is never `auto`, and its scope includes the inner command.**
+  `xargs grep foo < list` prompts as `xargs grep`, so an approval never covers
+  `xargs cat`, let alone `xargs rm`.
+- **What `xargs` may run is an allowlist.** `xargs` appends arguments it reads
+  at run time, after everything the classifier sees, so the inner command is
+  only as safe as the worst argument it could be handed: `xargs sh < list`
+  runs `sh -c …` if the list says so, `xargs env < list` runs whatever the list
+  names, `xargs rg foo < list` takes `--pre`. Only read-only binaries with no
+  argument that runs a program or writes a file (`grep`, `cat`, `head`, `wc`,
+  `ls`, …) may run under it. Piping into `xargs` stays refused.
+- **sed and awk programs are read.** A small parser for each finds the
+  commands above, and refuses a program it cannot read — including one loaded
+  from a file (`-f`), one the shell rewrites first, and a construct GNU and BSD
+  sed, or gawk and the one-true-awk, would end in different places. Plain
+  printing, substitution and field work stay on the prompt tier.
+- **The word after `<` is a file, not an argument.** It was lexed as an
+  argument, and it can come first, so `< cat rm x` classified as an auto-tier
+  `cat` while the shell ran `rm x`. Input redirect targets are now kept apart
+  from the arguments and still handed to path confinement.
+
+The residual is the one `ask` always had: an approved `xargs grep` reads
+whatever files its input lists, outside the workspace included, because the
+arguments are not visible to confinement. That is why it prompts.

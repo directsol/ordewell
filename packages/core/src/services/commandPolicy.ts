@@ -26,7 +26,10 @@
  *
  * A segment is classified by the command that will actually execute, not by the
  * name at the front of it: wrappers are unwrapped first, recursively, so
- * `timeout 10 env nice rm -rf x` is an `rm`. See {@link WRAPPER_FAMILY}.
+ * `timeout 10 env nice rm -rf x` is an `rm`. See {@link WRAPPER_FAMILY}. A
+ * runner that feeds its command arguments nobody can see is unwrapped the same
+ * way but never runs unprompted ({@link XARGS_TARGETS}), and one that hands its
+ * command to a shell is refused ({@link REFUSED_RUNNERS}).
  *
  * A permitted binary is permitted with the flags it is known to be read-only
  * with, not with any flag at all: several of them will run a helper program or
@@ -40,6 +43,7 @@
  */
 
 import type { ShellDialect } from './researchShell';
+import { AWK_FAMILY, SED_FAMILY, awkRefusal, sedRefusal } from './filterPrograms';
 
 /**
  * `env` is deliberately absent. Given a command it is a wrapper, classified by
@@ -506,9 +510,12 @@ const REFUSED_SUBCOMMANDS: Record<string, string[]> = {
 const SHELL_KEYWORDS = ['{', '}', 'if', 'then', 'elif', 'else', 'fi', 'for', 'while', 'until',
   'do', 'done', 'case', 'esac', 'select', 'function', 'time', 'export'];
 
-/** Binaries that execute whatever they are handed — refused when given inline code or fed from a pipe. */
+/**
+ * Binaries that execute whatever they are handed — refused when given inline code or fed from a pipe.
+ * `xargs` is not here: it is unwrapped to the command it runs, see {@link XARGS_TARGETS}.
+ */
 const INTERPRETERS = ['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'pwsh', 'powershell',
-  'python', 'python2', 'python3', 'node', 'deno', 'bun', 'ruby', 'perl', 'php', 'eval', 'exec', 'xargs',
+  'python', 'python2', 'python3', 'node', 'deno', 'bun', 'ruby', 'perl', 'php', 'eval', 'exec',
   // Windows interpreters. `cmd /c "…"` is the platform's spelling of `sh -c`.
   'cmd', 'wscript', 'cscript', 'mshta', 'rundll32', 'regsvr32'];
 
@@ -635,6 +642,85 @@ const WRAPPER_FAMILY: Record<string, WrapperSpec> = {
 };
 
 /**
+ * `xargs`'s own flags, walked like a wrapper's. `-e`, `-i` and `-l` take an
+ * optional value glued on, so every spelling of them consumes one token. Absent
+ * on purpose: `--process-slot-var` sets an environment variable in the command
+ * it runs, and `-p`/`-o` hand it the terminal.
+ */
+const XARGS_SPEC: WrapperSpec = {
+  valueFlags: ['-a', '--arg-file', '-d', '--delimiter', '-E', '-I', '-L', '-n', '--max-args',
+    '-P', '--max-procs', '-s', '--max-chars'],
+  booleanFlags: ['-0', '--null', '-r', '--no-run-if-empty', '-t', '--verbose', '-x', '--exit',
+    '--show-limits', '--eof', '--replace', '--max-lines', ...HELP_FLAGS],
+  booleanPattern: /^-[eil]/,
+};
+
+/**
+ * What `xargs` may run.
+ *
+ * `xargs` is a wrapper with one difference that decides everything: it appends
+ * arguments it reads at run time, after everything this classifier can see. So
+ * the command it runs is only as safe as the worst argument it could be handed.
+ * `xargs sh < list` runs `sh -c …` if the list says so, `xargs env < list` runs
+ * whatever command the list names, `xargs rg foo < list` takes `--pre`, and
+ * `xargs uniq < list` writes its second operand.
+ *
+ * These take no argument that runs a program, writes a file or picks an
+ * operation — whatever `xargs` appends is only more to read. Everything else
+ * under `xargs` is refused, and what is allowed never runs unprompted: the
+ * arguments are still unseen, so neither the flag allowlist nor path
+ * confinement has anything to check. The grant's scope names the command,
+ * `xargs grep`, so approving one never covers another.
+ */
+const XARGS_TARGETS = ['cat', 'head', 'tail', 'wc', 'grep', 'ls', 'stat', 'du', 'basename', 'dirname',
+  'realpath', 'echo', 'printf', 'cut', 'nl'];
+
+/**
+ * Runners that are refused rather than unwrapped, each for what it does beyond
+ * running the command: it hands the command to a shell as a string, or changes
+ * what the command runs as, or where, or writes while it runs.
+ *
+ * Unwrapping is only sound for a runner whose command is a plain argv this
+ * classifier lexed. A shell-evaluated template is not, and the rest either
+ * change the conditions a command runs under in ways the tiers do not model or
+ * can be pointed at a file to write — so each of these, left unlisted, sat on
+ * the prompt tier with the command it runs as an unexamined argument, and one
+ * approval of the runner covered every later command under it.
+ */
+const REFUSED_RUNNERS: Record<string, string> = {
+  parallel: 'evaluates its command template in a shell',
+  watch: 'joins its arguments into a command line for a shell and reruns it',
+  script: 'runs its command through a shell and records the session to a file',
+  // A lock file that does not exist yet is created — the same write `touch` is
+  // refused for — and `-c` runs a string.
+  flock: 'creates its lock file when it is missing and runs a command string under -c',
+  sg: 'runs its command through a shell under another group',
+  newgrp: 'starts a shell under another group',
+  chroot: 'runs a command under another root directory',
+  unshare: 'runs a command in new namespaces',
+  nsenter: 'runs a command inside another process\'s namespaces',
+  setpriv: 'runs a command with changed privileges',
+  runuser: 'runs a command as another user',
+  pkexec: 'runs a command as another user',
+  strace: 'runs a command under a tracer that can write its trace to a file',
+  ltrace: 'runs a command under a tracer that can write its trace to a file',
+  gdb: 'runs a command under a debugger that can execute arbitrary commands',
+  valgrind: 'runs a command under an instrumenter that can write its log to a file',
+  taskset: 'runs a command it is handed as arguments',
+  chrt: 'runs a command it is handed as arguments',
+  numactl: 'runs a command it is handed as arguments',
+  prlimit: 'runs a command it is handed as arguments',
+  cgexec: 'runs a command it is handed as arguments',
+  'systemd-run': 'runs a command as a system service',
+  fakeroot: 'runs a command it is handed as arguments',
+  firejail: 'runs a command it is handed as arguments',
+  bwrap: 'runs a command it is handed as arguments',
+  unbuffer: 'runs a command it is handed as arguments',
+  caffeinate: 'runs a command it is handed as arguments',
+  'sandbox-exec': 'runs a command it is handed as arguments',
+};
+
+/**
  * What the interpreter that will run this command treats as syntax.
  *
  * `BaseFileSystem.execBashImpl` runs the command through `shell: true`, which
@@ -749,6 +835,11 @@ interface Segment {
   expandable: boolean;
   /** The binary token as written, when the shell computes it — see {@link isComputedWord}. */
   computedBinary?: string;
+  /**
+   * Files read through `<`, kept apart from `args` because the shell never
+   * passes them to the command. For path confinement only.
+   */
+  inputs: string[];
 }
 
 /** An output redirect whose target is not provably a no-op (`/dev/null`, an fd duplication). */
@@ -821,11 +912,14 @@ function lex(command: string, nested: string[], dialect: Dialect): Lexed {
   let piped = false;
   let quote = '';
 
-  // Set while lexing the text after a write-redirect operator, so that text is
-  // captured as the redirect's target instead of pushed onto the segment as an
-  // ordinary argument.
-  let redirectTargetMode = false;
+  // Set while lexing the word after a redirect operator, so that word is
+  // captured as the redirect's operand instead of pushed onto the segment as an
+  // ordinary argument. An input redirect's word used to be pushed: it can come
+  // first, so `< cat rm x` lexed as a `cat` while the shell ran `rm x`. `data`
+  // is a here-document delimiter or here-string, which names no file.
+  let redirectTarget: 'write' | 'read' | 'data' | undefined;
   let redirectOperator = '';
+  let inputs: string[] = [];
 
   // Brace expansion (`{a,b}`, `{1..3}`) in the current word, unquoted: bash
   // turns it into other words before anything runs.
@@ -835,14 +929,15 @@ function lex(command: string, nested: string[], dialect: Dialect): Lexed {
   const endToken = (hardBoundary = true) => {
     braceOpen = false;
     braceList = false;
-    if (redirectTargetMode) {
+    if (redirectTarget) {
       // Whitespace right after the operator (`2> /dev/null`) is not the end of
       // the target — keep waiting rather than concluding there is none.
       if (!started && !hardBoundary) return;
-      if (!unsafeRedirect && !isDevNullTarget(current)) {
+      if (redirectTarget === 'write' && !unsafeRedirect && !isDevNullTarget(current)) {
         unsafeRedirect = { operator: redirectOperator, target: current };
       }
-      redirectTargetMode = false;
+      if (redirectTarget === 'read' && started) inputs.push(current);
+      redirectTarget = undefined;
       current = '';
       started = false;
       return;
@@ -853,8 +948,9 @@ function lex(command: string, nested: string[], dialect: Dialect): Lexed {
   };
   const endSegment = (nextPiped: boolean) => {
     endToken();
-    if (tokens.length > 0) segments.push({ ...toSegment(tokens, piped, dialect), expandable });
+    if (tokens.length > 0) segments.push({ ...toSegment(tokens, piped, dialect), expandable, inputs });
     tokens = [];
+    inputs = [];
     expandable = false;
     piped = nextPiped;
   };
@@ -928,20 +1024,23 @@ function lex(command: string, nested: string[], dialect: Dialect): Lexed {
         endToken();
       }
 
-      const doubled = command[i + 1] === c;
-      const opLen = doubled ? 2 : 1;
+      // `<<<` is a here-string; `>>>` is not an operator, and its third `>`
+      // opens a second redirect.
+      const run = c === '<' && command.startsWith('<<<', i) ? 3 : command[i + 1] === c ? 2 : 1;
 
-      if (c === '>') {
-        // `2>&1` / `>&2`: duplicates a stream, writes no file — safe.
-        const dup = /^&([0-9]+)(?![0-9])/.exec(command.slice(i + opLen));
-        if (dup) {
-          i += opLen + dup[0].length;
-          continue;
-        }
-        redirectTargetMode = true;
-        redirectOperator = fd + c.repeat(opLen);
+      // `2>&1` / `>&2` / `<&3`: duplicates a stream, opens no file — safe.
+      const dup = /^&([0-9]+|-)(?![0-9])/.exec(command.slice(i + run));
+      if (dup) {
+        i += run + dup[0].length;
+        continue;
       }
-      i += opLen;
+      if (c === '>') {
+        redirectTarget = 'write';
+        redirectOperator = fd + c.repeat(run);
+      } else {
+        redirectTarget = run === 1 ? 'read' : 'data';
+      }
+      i += run;
       continue;
     }
 
@@ -950,7 +1049,7 @@ function lex(command: string, nested: string[], dialect: Dialect): Lexed {
     if (c === '&' && command[i + 1] === '>') {
       endToken();
       const doubled = command[i + 2] === '>';
-      redirectTargetMode = true;
+      redirectTarget = 'write';
       redirectOperator = doubled ? '&>>' : '&>';
       i += doubled ? 3 : 2;
       continue;
@@ -1030,6 +1129,7 @@ function toSegment(tokens: string[], piped: boolean, dialect: Dialect): Segment 
     assignments,
     piped,
     expandable: false,
+    inputs: [],
     ...(rest.length > 0 && isComputedWord(rest[0], dialect) ? { computedBinary: rest[0] } : {}),
   };
 }
@@ -1105,10 +1205,55 @@ function scanWrapperArgs(binary: string, spec: WrapperSpec, args: string[]): Wra
 /** A segment reduced to the command that will actually execute. */
 interface Unwrapped {
   seg: Segment;
-  /** Wrapper names peeled off, outermost first. Empty when nothing was wrapped. */
+  /** Wrapper and runner names peeled off, outermost first. Empty when nothing was wrapped. */
   wrappers: string[];
+  /**
+   * The runner among them that appends arguments this classifier never sees.
+   * Its presence caps the tier at `ask` and puts its name in the scope.
+   */
+  runner?: string;
   /** Set when the wrapper's own arguments are what makes the segment refusable. */
   reason?: string;
+}
+
+/**
+ * The string `xargs -I`/`-i`/`--replace` substitutes input into, if one was set.
+ * `-i` and `--replace` alone mean `{}`.
+ */
+function xargsReplaceString(flags: string[]): string | undefined {
+  let replace: string | undefined;
+  for (let i = 0; i < flags.length; i++) {
+    const token = flags[i];
+    if (token === '-I') replace = flags[++i];
+    else if (token.startsWith('-I')) replace = token.slice(2);
+    else if (token === '-i' || token === '--replace') replace = '{}';
+    else if (token.startsWith('--replace=')) replace = token.slice('--replace='.length);
+    else if (/^-i./.test(token)) replace = token.slice(2);
+  }
+  return replace;
+}
+
+/**
+ * Peel `xargs` to the command it will run.
+ *
+ * Piping into it stays refused, as it was when `xargs` was listed among the
+ * interpreters: the arguments are another command's output, produced in the
+ * same line this classifier is judging.
+ */
+function unwrapXargs(seg: Segment, dialect: Dialect): { seg: Segment } | { reason: string } {
+  if (seg.piped) {
+    return { reason: 'Piping into "xargs" turns another command\'s output into arguments this classifier cannot see. Run the producing command on its own and read its output.' };
+  }
+  const scan = scanWrapperArgs('xargs', XARGS_SPEC, seg.args);
+  if (scan.kind === 'refuse') return { reason: scan.reason };
+  const command = scan.kind === 'command' ? scan.tokens : [];
+  const replace = xargsReplaceString(seg.args.slice(0, seg.args.length - command.length));
+  // With no command of its own, xargs runs `echo`.
+  const tokens = command.length > 0 ? command : ['echo'];
+  if (replace && tokens[0].includes(replace)) {
+    return { reason: `"xargs" substitutes its input into "${tokens[0]}", so the input decides which program runs. Name the program directly.` };
+  }
+  return { seg: { ...toSegment(tokens, false, dialect), expandable: seg.expandable } };
 }
 
 /**
@@ -1130,10 +1275,25 @@ function unwrap(seg: Segment, dialect: Dialect): Unwrapped {
   // that carries an assignment, which is the shape ticket 06's refusal reads.
   const assignments = [...seg.assignments];
   let current: Segment = seg;
+  let runner: string | undefined;
 
-  while (WRAPPER_FAMILY[current.binary]) {
-    const scan = scanWrapperArgs(current.binary, WRAPPER_FAMILY[current.binary], current.args);
-    if (scan.kind === 'refuse') return { seg: { ...current, assignments }, wrappers, reason: scan.reason };
+  for (;;) {
+    // Once only: `xargs xargs < list` hands the inner one its command from the
+    // input, so a second `xargs` is left for XARGS_TARGETS to refuse.
+    if (current.binary === 'xargs' && runner === undefined) {
+      const peeled = unwrapXargs(current, dialect);
+      if ('reason' in peeled) return { seg: { ...current, assignments }, wrappers, reason: peeled.reason };
+      wrappers.push('xargs');
+      runner = 'xargs';
+      assignments.push(...peeled.seg.assignments);
+      current = { ...peeled.seg, assignments: [] };
+      continue;
+    }
+
+    const spec = WRAPPER_FAMILY[current.binary];
+    if (!spec) break;
+    const scan = scanWrapperArgs(current.binary, spec, current.args);
+    if (scan.kind === 'refuse') return { seg: { ...current, assignments }, wrappers, runner, reason: scan.reason };
     // No residual command: the wrapper is the whole invocation (`env` on its
     // own prints the environment), so it is classified under its own name.
     if (scan.kind === 'no-exec' || scan.tokens.length === 0) break;
@@ -1145,7 +1305,7 @@ function unwrap(seg: Segment, dialect: Dialect): Unwrapped {
     current = { ...inner, assignments: [], expandable: current.expandable };
   }
 
-  return { seg: { ...current, assignments }, wrappers };
+  return { seg: { ...current, assignments }, wrappers, runner };
 }
 
 /** Lex a command line and every substitution body nested inside it. */
@@ -1204,7 +1364,7 @@ function looksLikePath(arg: string): boolean {
  */
 export function pathLikeArgs(command: string, opts: CommandPolicyOptions = {}): string[] {
   const dialect = dialectFor(opts.dialect);
-  return lexAll(command, dialect).segments.flatMap((seg) => seg.args.flatMap((a) => {
+  return lexAll(command, dialect).segments.flatMap((seg) => [...seg.args, ...seg.inputs].flatMap((a) => {
     // `--flag=value` is excluded by the leading-dash filter but its value can
     // still name an external path, so split it and check the value.
     if (a.startsWith('--') && a.includes('=')) {
@@ -1422,6 +1582,10 @@ function refusalFor(seg: Segment): string | undefined {
   if (REFUSED_COMMANDS.includes(seg.binary)) {
     return `"${seg.binary}" modifies state. You are a read-only planner — describe the change as a task instead, and the runner executing the plan will make it.`;
   }
+  const runs = REFUSED_RUNNERS[seg.binary];
+  if (runs) {
+    return `"${seg.binary}" ${runs}, which this classifier cannot inspect. Run the inner command directly, or describe it as a task.`;
+  }
   // `eval`/`exec` exist only to run a string as a command — the whole point of
   // this classifier is to inspect those strings, so they are never promptable.
   if (seg.binary === 'eval' || seg.binary === 'exec') {
@@ -1483,15 +1647,19 @@ function refusalFor(seg: Segment): string | undefined {
       return `find with "${flag}" runs an inner command this classifier cannot inspect. Use the read-only research tools on find's output, or describe the change as a task.`;
     }
   }
-  // `sed -i`/`awk -i inplace` rewrite files in place — mutation, not research.
-  const sedInPlace = seg.binary === 'sed'
-    ? seg.args.find((a) => a === '-i' || a === '--in-place' || /^-i./.test(a))
-    : undefined;
-  if (sedInPlace) {
-    return `"sed ${sedInPlace}" edits files in place. You are a read-only planner — describe the change as a task instead.`;
-  }
-  if (seg.binary === 'awk' && seg.args.some((a) => a === 'inplace')) {
-    return `"awk -i inplace" edits files in place. You are a read-only planner — describe the change as a task instead.`;
+  // sed and awk carry a program that can run a command or write a file with no
+  // flag involved (see filterPrograms.ts), so the program itself is read. One
+  // the shell rewrites first cannot be: a `$` that survives lexing may be an
+  // expansion, and which token holds it is not tracked.
+  if (SED_FAMILY.includes(seg.binary) || AWK_FAMILY.includes(seg.binary)) {
+    if (AWK_FAMILY.includes(seg.binary) && seg.args.some((a) => a === 'inplace')) {
+      return `"${seg.binary} -i inplace" edits files in place. You are a read-only planner — describe the change as a task instead.`;
+    }
+    const program = SED_FAMILY.includes(seg.binary) ? sedRefusal(seg.binary, seg.args) : awkRefusal(seg.binary, seg.args);
+    if (program) return program;
+    if (seg.expandable) {
+      return `The shell rewrites part of this "${seg.binary}" command before "${seg.binary}" sees it, so its program cannot be inspected. Put the program in single quotes, name files literally, and re-run.`;
+    }
   }
   if (INTERPRETERS.includes(seg.binary)) {
     if (seg.piped) {
@@ -1598,17 +1766,29 @@ export function classifyCommand(command: string, opts: CommandPolicyOptions = {}
   // so `env`, `nice`, `timeout` and friends decide nothing about the answer.
   const unwrapped = segments.map((seg) => unwrap(seg, dialect));
 
-  for (const { seg, wrappers, reason: wrapperReason } of unwrapped) {
+  for (const { seg, wrappers, runner, reason: wrapperReason } of unwrapped) {
     if (wrapperReason) return { tier: 'refuse', scope: '', reason: wrapperReason };
     const reason = refusalFor(seg);
     if (reason) return { tier: 'refuse', scope: '', reason: withWrapperNote(reason, wrappers) };
+    if (runner && !XARGS_TARGETS.includes(seg.binary)) {
+      return {
+        tier: 'refuse',
+        scope: '',
+        reason: `"${runner}" appends arguments to "${seg.binary}" that it reads at run time and this classifier never sees, and an argument can make "${seg.binary}" run a program or write a file. Run it on named files directly, or describe it as a task.`,
+      };
+    }
   }
 
-  const nonAuto = unwrapped.map((u) => u.seg).filter((s) => !isAuto(s));
+  // A runner is never auto: the arguments it appends are the ones the flag
+  // allowlist and path confinement would have had to check.
+  const nonAuto = unwrapped.filter((u) => u.runner !== undefined || !isAuto(u.seg));
   if (nonAuto.length === 0) return { tier: 'auto', scope: '' };
 
   // A grant covers only the parts that actually needed one, so
-  // `az group list | head` is remembered as `az group`, not the whole line.
-  const scope = [...new Set(nonAuto.map(scopeFor))].sort().join(' + ');
+  // `az group list | head` is remembered as `az group`, not the whole line —
+  // and under a runner it names the command run, so approving `xargs grep`
+  // never covers `xargs cat`.
+  const scope = [...new Set(nonAuto.map((u) => (u.runner ? `${u.runner} ${scopeFor(u.seg)}` : scopeFor(u.seg))))]
+    .sort().join(' + ');
   return { tier: 'ask', scope };
 }
