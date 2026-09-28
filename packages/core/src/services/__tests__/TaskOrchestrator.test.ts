@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { TaskOrchestrator } from '../TaskOrchestrator';
+import { createTaskOrchestrator } from '../TaskOrchestrator';
+import type { TaskOrchestrator } from '../TaskOrchestrator';
 import { composeAugmentedPrompt } from '../promptAugment';
 import { createTask } from '../../models/Task';
 import type { IConfig } from '../../interfaces/IConfig';
@@ -9,6 +10,7 @@ import { fakeConfig, FakeTerminalSession } from '../../testing';
 import { fakeNotification } from './sessionTestKit';
 import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
 import type { TaskOutputSource, TranscriptQuery, TranscriptReader } from '../../interfaces/TaskOutputSource';
+import type { WorkspaceEnv } from '../workspaceEnv';
 import { stripAnsi } from '../../utils/shell';
 import { RunnerRegistry } from '../../plugins/RunnerRegistry';
 
@@ -49,12 +51,25 @@ function makeOrchestrator(overrides: {
   notifications?: Partial<INotification>;
   terminalRunner?: Partial<ITerminalRunner>;
   output?: TaskOutputSource;
+  registry?: RunnerRegistry;
+  workspaceRoot?: () => string;
+  workspaceEnv?: (cwd: string) => Promise<WorkspaceEnv>;
+  tddEnabled?: () => boolean;
 } = {}) {
   const config = fakeConfig(overrides.config);
   const notifications = { ...fakeNotification(), ...overrides.notifications };
   const terminalRunner = { ...fakeTerminalRunner(), ...overrides.terminalRunner } as ITerminalRunner;
   const output = overrides.output ?? new BufferedTaskOutputSource({ transcripts: fakeTranscripts() });
-  return new TaskOrchestrator(config, notifications, terminalRunner, undefined, output);
+  return createTaskOrchestrator({
+    config,
+    notifications,
+    terminalRunner,
+    output,
+    registry: overrides.registry,
+    workspaceRoot: overrides.workspaceRoot ?? (() => '/repo'),
+    workspaceEnv: overrides.workspaceEnv,
+    tddEnabled: overrides.tddEnabled,
+  });
 }
 
 describe('TaskOrchestrator', () => {
@@ -388,7 +403,6 @@ describe('TaskOrchestrator', () => {
     it('starts an AI task with the augmented prompt (not the raw prompt)', async () => {
       const { spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
       const tasks = [
         createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first' }),
         createTask({ id: 't2', order: 2, title: 'Second', prompt: 'do second' }),
@@ -424,7 +438,6 @@ describe('TaskOrchestrator', () => {
     it('detects the completion marker in output and logs the task', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
 
       const task = createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' });
 
@@ -451,7 +464,6 @@ describe('TaskOrchestrator', () => {
     it('marks task as failed when session exits without marker seen and non-zero exit code', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
 
       const task = createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' });
 
@@ -476,7 +488,6 @@ describe('TaskOrchestrator', () => {
     it('completes a task whose marker was seen even when a usage limit then kills the runner', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
 
       const task = createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' });
 
@@ -496,7 +507,6 @@ describe('TaskOrchestrator', () => {
     it('pauses a runner that stopped on a usage limit before its marker, instead of failing the task', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
 
       const task = createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' });
 
@@ -515,7 +525,6 @@ describe('TaskOrchestrator', () => {
     it('pauses the run on a usage limit and resumes it when the task is retried', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn }, config: { maxParallelSessions: 1 } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
 
       orchestrator.loadPlan([
         createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first', completionMarker: 'mk-1' }),
@@ -542,7 +551,6 @@ describe('TaskOrchestrator', () => {
     it('leaves a task without a marker failed when its exit names no limit', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
 
       const task = createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' });
 
@@ -561,7 +569,6 @@ describe('TaskOrchestrator', () => {
     it('runs only the selected task, stays busy until its marker, and does not schedule following work', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
       orchestrator.loadPlan([
         createTask({ id: 't1', order: 1, title: 'Selected', prompt: 'do selected', completionMarker: 'mk-1' }),
         createTask({ id: 't2', order: 2, title: 'Following', prompt: 'do following' }),
@@ -776,7 +783,6 @@ describe('TaskOrchestrator', () => {
     it('pauses when queue has messages and no active sessions', async () => {
       const { spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
 
       orchestrator.loadPlan([createTask({ id: 'u1', order: 1, title: 'Manual', type: 'user' })]);
 
@@ -805,7 +811,6 @@ describe('TaskOrchestrator', () => {
     it('prevents starting new tasks when queue has messages and active sessions exist', async () => {
       const { spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
       orchestrator.loadPlan(gatedPlan());
       await orchestrator.approveReview();
       await orchestrator.forceStartTask('t1');
@@ -819,7 +824,6 @@ describe('TaskOrchestrator', () => {
     it('proceeds normally when queue is empty', async () => {
       const { spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
       orchestrator.loadPlan(gatedPlan());
       await orchestrator.approveReview();
       await orchestrator.forceStartTask('t1');
@@ -908,7 +912,6 @@ describe('sequential dependency chain', () => {
     it('spawns dependent task after its dependency completes and is archived', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
 
       orchestrator.loadPlan([
         createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first', completionMarker: 'mk-1' }),
@@ -944,7 +947,6 @@ describe('resuming after a user-action pause', () => {
     it('keeps running=true when the only remaining work needs user action, so completing it resumes the dependent AI task', async () => {
       const { spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
 
       orchestrator.loadPlan([
         createTask({ id: 't1', order: 1, title: 'Confirm setup', type: 'user' }),
@@ -1014,7 +1016,6 @@ describe('execution log tracking', () => {
     it('appends completed task to execution log while keeping it in the active plan', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
 
       const task = createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' });
       orchestrator.loadPlan([task]);
@@ -1039,7 +1040,6 @@ describe('execution log tracking', () => {
     it('logs failed task to execution log', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
 
       const task = createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' });
       orchestrator.loadPlan([task]);
@@ -1068,7 +1068,6 @@ describe('checkpoints', () => {
     it('emits onCheckpoint event when verifier detects a checkpoint', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
       orchestrator.loadPlan(hitlPlan());
       const events: { taskId: string; taskTitle: string; summary: string }[] = [];
       orchestrator.subscribe({ onCheckpoint: (data) => events.push(data) });
@@ -1082,7 +1081,6 @@ describe('checkpoints', () => {
     it('sets task status to awaiting_user on checkpoint', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
       orchestrator.loadPlan(hitlPlan());
 
       await orchestrator.forceStartTask('t1');
@@ -1094,7 +1092,6 @@ describe('checkpoints', () => {
     it('approveCheckpoint resumes task status to in_progress', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
       orchestrator.loadPlan(hitlPlan());
 
       await orchestrator.forceStartTask('t1');
@@ -1109,7 +1106,6 @@ describe('checkpoints', () => {
     it('rejectCheckpoint resumes task status to in_progress', async () => {
       const { sessions, spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
       orchestrator.loadPlan(hitlPlan());
 
       await orchestrator.forceStartTask('t1');
@@ -1121,16 +1117,14 @@ describe('checkpoints', () => {
       expect(sessions[0].written.length).toBeGreaterThan(0);
     });
 
-    it('setTddEnabled wires tdd config to verifier', async () => {
+    it('tddEnabled wires tdd config to verifier', async () => {
       const tasks = [
         createTask({ id: 'a', order: 1, title: 'A', prompt: 'do work' }),
         createTask({ id: 'b', order: 2, title: 'B', prompt: 'pb' }),
         createTask({ id: 'c', order: 3, title: 'C', prompt: 'pc' }),
       ];
       const { spawn } = sessionRunner();
-      const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
-      orchestrator.setTddEnabled(true);
+      const orchestrator = makeOrchestrator({ terminalRunner: { spawn }, tddEnabled: () => true });
       orchestrator.loadPlan(tasks);
 
       await orchestrator.forceStartTask('a');
@@ -1147,7 +1141,6 @@ describe('checkpoints', () => {
       ];
       const { spawn } = sessionRunner();
       const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-      orchestrator.setWorkspaceRoot(() => '/repo');
       orchestrator.loadPlan(tasks);
 
       await orchestrator.forceStartTask('a');
@@ -1166,7 +1159,6 @@ describe('cancelTask', () => {
     const { sessions, spawn } = sessionRunner();
     const stop = vi.fn(() => sessions[0].emitExit(-1));
     const orchestrator = makeOrchestrator({ terminalRunner: { spawn, stop } });
-    orchestrator.setWorkspaceRoot(() => '/repo');
 
     orchestrator.loadPlan([
       createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first' }),
@@ -1195,7 +1187,6 @@ describe('cancelTask', () => {
   it('has no live work after the last running task of an armed run is cancelled', async () => {
     const { spawn } = sessionRunner();
     const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-    orchestrator.setWorkspaceRoot(() => '/repo');
     orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'Only', prompt: 'do it' })]);
 
     await orchestrator.approveReview();
@@ -1213,7 +1204,6 @@ describe('task attempts', () => {
   it('records the runner, working directory and start time of a running attempt', async () => {
     const { sessions, spawn } = sessionRunner();
     const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-    orchestrator.setWorkspaceRoot(() => '/repo');
     orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first' })]);
 
     await orchestrator.forceStartTask('t1');
@@ -1402,10 +1392,13 @@ describe('task attempts', () => {
   it("starts each agent with its workspace's own variables, and says once when direnv has blocked them", async () => {
     const { spawn } = sessionRunner();
     const warn = vi.fn();
-    const orchestrator = makeOrchestrator({ terminalRunner: { spawn }, notifications: { warn } });
-    orchestrator.setWorkspaceEnvResolver(async () => ({
-      env: { CLAUDE_CONFIG_DIR: '/home/me/.claude-work' }, blockedEnvrc: '/repo/.envrc', refused: [], trackedEnvFile: null,
-    }));
+    const orchestrator = makeOrchestrator({
+      terminalRunner: { spawn },
+      notifications: { warn },
+      workspaceEnv: async () => ({
+        env: { CLAUDE_CONFIG_DIR: '/home/me/.claude-work' }, blockedEnvrc: '/repo/.envrc', refused: [], trackedEnvFile: null,
+      }),
+    });
     orchestrator.loadPlan([
       createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first' }),
       createTask({ id: 't2', order: 2, title: 'Second', prompt: 'do second' }),
@@ -1422,8 +1415,7 @@ describe('task attempts', () => {
   it('tells the user when a task sits at a prompt its agent will not get past alone', async () => {
     const { sessions, spawn } = sessionRunner();
     const warn = vi.fn();
-    const orchestrator = makeOrchestrator({ terminalRunner: { spawn }, notifications: { warn } });
-    orchestrator.setRegistry(new RunnerRegistry());
+    const orchestrator = makeOrchestrator({ terminalRunner: { spawn }, notifications: { warn }, registry: new RunnerRegistry() });
     orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first', assignedRunner: 'claude-code' })]);
     await orchestrator.approveReview();
 
@@ -1522,7 +1514,6 @@ describe('task attempts', () => {
     const { sessions, spawn } = sessionRunner();
     const { transcripts, answer, reads } = heldTranscripts();
     const orchestrator = makeOrchestrator({ terminalRunner: { spawn }, output: new BufferedTaskOutputSource({ transcripts }) });
-    orchestrator.setWorkspaceRoot(() => '/repo');
     orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first', completionMarker: 'mk-1' })]);
     await orchestrator.approveReview();
     sessions[0].emitExit(1);
@@ -1616,7 +1607,6 @@ describe('TaskOrchestrator task output', () => {
   it('summarizes an exit without a marker from the raw stream, not the stripped session buffer', async () => {
     const { sessions, spawn } = strippingRunner();
     const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-    orchestrator.setWorkspaceRoot(() => '/repo');
     orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'T', prompt: 'do', completionMarker: 'mk-1' })]);
     await orchestrator.forceStartTask('t1');
 
@@ -1637,7 +1627,6 @@ describe('TaskOrchestrator task output', () => {
       terminalRunner: { spawn },
       output: new BufferedTaskOutputSource({ transcripts }),
     });
-    orchestrator.setWorkspaceRoot(() => '/repo');
     orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'T', prompt: 'do', completionMarker: 'mk-1' })]);
     await orchestrator.forceStartTask('t1');
 
@@ -1651,7 +1640,6 @@ describe('TaskOrchestrator task output', () => {
   it('exposes a running task\'s recent output, rendered clean', async () => {
     const { sessions, spawn } = strippingRunner();
     const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
-    orchestrator.setWorkspaceRoot(() => '/repo');
     orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'T', prompt: 'do', completionMarker: 'mk-1' })]);
     await orchestrator.forceStartTask('t1');
 

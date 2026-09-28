@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { TaskOrchestrator } from '../TaskOrchestrator';
+import { createTaskOrchestrator } from '../TaskOrchestrator';
+import type { TaskOrchestrator } from '../TaskOrchestrator';
 import { createTask, type Task } from '../../models/Task';
 import type { ITerminalRunner } from '../../interfaces/ITerminalRunner';
 import type { IConfig } from '../../interfaces/IConfig';
@@ -25,8 +26,14 @@ function setup(opts: { isolation?: FakeWorktreeIsolation; workspace?: string; co
   const { sessions, spawn, runner } = sessionRunner();
   const notifications = fakeNotification();
   const output = new BufferedTaskOutputSource({ transcripts: { finalAssistantText: async () => null } });
-  const orchestrator = new TaskOrchestrator(fakeConfig(opts.config), notifications, runner, undefined, output, isolation);
-  orchestrator.setWorkspaceRoot(() => opts.workspace ?? '/repo');
+  const orchestrator = createTaskOrchestrator({
+    config: fakeConfig(opts.config),
+    notifications,
+    terminalRunner: runner,
+    output,
+    isolation,
+    workspaceRoot: () => opts.workspace ?? '/repo',
+  });
   const spawnedCwd = (taskId: string) => spawn.mock.calls.find(([o]) => o.taskId === taskId)?.[0].cwd;
   const sessionFor = (taskId: string) => sessions.find((s) => s.taskId === taskId);
   const pass = (task: Task) => sessionFor(task.id)!.emitOutput(`<<<ORDEWELL_DONE_${task.completionMarker}>>>`);
@@ -1395,7 +1402,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
     });
     const isolation = new FakeWorktreeIsolation();
     const { sessions, runner } = sessionRunner();
-    const orchestrator = new TaskOrchestrator(fakeConfig(), fakeNotification(), runner, undefined, output, isolation);
+    const orchestrator = createTaskOrchestrator({ config: fakeConfig(), notifications: fakeNotification(), terminalRunner: runner, output, isolation });
     const t1 = task('t1', 1);
     orchestrator.loadPlan([t1]);
     await orchestrator.approveReview();
