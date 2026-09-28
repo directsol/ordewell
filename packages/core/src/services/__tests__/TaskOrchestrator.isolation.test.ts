@@ -103,7 +103,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
     expect(vi.mocked(notifications.warn).mock.calls.flat().join('\n')).toMatch(/conflict/i);
   });
 
-  it('fails a passed task whose integration git refused, keeps its worktree, and halts the run', async () => {
+  it('pauses a passed task whose integration git refused instead of contradicting its marker with a red X', async () => {
     const { orchestrator, isolation, pass, spawn, notifications } = setup();
     isolation.outcomes.set('t1', 'failed');
     const t1 = task('t1', 1);
@@ -112,12 +112,13 @@ describe('TaskOrchestrator with worktree isolation', () => {
     expect(spawn).toHaveBeenCalledTimes(2);
 
     pass(t1);
-    await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('failed'));
+    await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
 
+    expect(orchestrator.storeInstance.get('t1')!.verdict!.outcome).toBe('pass');
     expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'kept' });
     expect(isolation.taskIdsFor('release')).toEqual([]);
     expect(vi.mocked(notifications.error).mock.calls.flat().join('\n')).toMatch(/integrat/i);
-    expect(orchestrator.status).toBe('approved');
+    expect(orchestrator.status).toBe('running');
   });
 
   it('keeps a failed task\'s worktree for inspection', async () => {
@@ -447,8 +448,9 @@ describe('TaskOrchestrator with worktree isolation', () => {
       await orchestrator.approveReview();
 
       pass(t1);
-      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('failed'));
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
 
+      expect(orchestrator.storeInstance.get('t1')!.verdict!.outcome).toBe('pass');
       expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'kept', conflictRepo: 'api' });
       expect(vi.mocked(notifications.error).mock.calls.map((c) => String(c[0]))).toContain(
         'Task "Task t1" passed, but git could not integrate its work in api, so none of it landed. Its worktrees are kept for inspection.',
@@ -783,6 +785,24 @@ describe('TaskOrchestrator with worktree isolation', () => {
     expect(isolation.calls).toContainEqual({ op: 'discard', integration: 'delete' });
     expect(spawn.mock.calls[1][0].cwd).toBe('/fake-worktrees/run2/1-t1');
     expect(spawnedCwd('t1')).toBe('/fake-worktrees/run1/1-t1');
+  });
+
+  it('restarts into the plan\'s own run while it still holds a kept attempt, instead of discarding its work', async () => {
+    const { orchestrator, isolation, sessionFor } = setup();
+    orchestrator.loadPlan([task('t1', 1), task('t2', 2, { dependencies: ['t1'] })]);
+    await orchestrator.approveReview();
+    sessionFor('t1')!.emitExit(1);
+    await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('failed'));
+    expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'kept' });
+
+    orchestrator.stop();
+    await orchestrator.start();
+
+    // Only the first run was ever minted; minting another would have discarded
+    // the kept attempt's branch.
+    expect(isolation.calls.filter((c) => c.op === 'startRun')).toHaveLength(1);
+    expect(isolation.calls.map((c) => c.op)).not.toContain('discard');
+    expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'kept' });
   });
 
   describe('Mark complete', () => {
@@ -1305,6 +1325,23 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
       expect(spawnedCwd('t2')).toBe('/fake-worktrees/run1/2-t2');
       expect(isolation.calls.filter((c) => c.op === 'discard')).toEqual([{ op: 'discard', integration: 'delete-merged' }]);
+    });
+
+    it('tells the user when pruning found unlanded work in an active worktree', async () => {
+      const { orchestrator, isolation, notifications } = setup();
+      isolation.keptOnPrune = [{ taskId: 't1', order: 1, title: 'Task t1' }];
+      const run = {
+        id: 'old', workspaceRoot: '/repo', shared: [], sharedRepos: [],
+        repos: [{ path: '.', root: '/repo', baseRef: 'abc', integrationBranch: 'ordewell/old/integration' }],
+        tasks: { t1: { taskId: 't1', order: 1, title: 'Task t1', branch: 'ordewell/old/1-t1', workspace: '/wt/1', status: 'active' as const, repos: { '.': { worktree: '/wt/1', linked: [] } } } },
+      };
+      orchestrator.loadPlan([task('t1', 1)]);
+
+      await orchestrator.adoptIsolation({ run, resolvers: {} });
+
+      const warned = vi.mocked(notifications.warn).mock.calls.map((c) => String(c[0])).join('\n');
+      expect(warned).toMatch(/unlanded work/i);
+      expect(warned).toContain('Task t1');
     });
   });
 

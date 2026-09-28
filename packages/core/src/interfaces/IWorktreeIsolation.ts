@@ -74,6 +74,12 @@ export interface IsolationTaskRecord {
   repos: Record<string, IsolationTaskRepo>;
   /** The repo whose merge stopped the task from landing, while `status` is `conflict` or `failed`. */
   conflictRepo?: string;
+  /**
+   * What a `failed` landing stopped on, in words a surface can repeat — a
+   * missing worktree is the common one. Cleared by the next landing attempt,
+   * so a stale reason cannot outlive the failure it explains.
+   */
+  landingError?: string;
   /** Repo-relative paths, in `conflictRepo`, that conflicted; set only while `status` is `conflict` or `repairing`. */
   conflictFiles?: string[];
   /**
@@ -279,6 +285,15 @@ export interface PreparedTask {
   copied: string[];
 }
 
+/**
+ * What a crash-recovery prune found and left alone: task records that were
+ * `active` yet still held unlanded work, so the prune kept them as `kept`
+ * rather than deleting work no one else has.
+ */
+export interface IsolationPruneResult {
+  kept: Array<{ taskId: string; order: number; title: string }>;
+}
+
 export interface IWorktreeIsolation {
   /**
    * A repo group with at least one repo to isolate, a clean tracked tree in
@@ -360,9 +375,13 @@ export interface IWorktreeIsolation {
   /**
    * Drop what a crash left behind: a landing it interrupted is rolled back in
    * every repo, a repair it interrupted leaves its task `conflict`, then stale
-   * active worktrees and directories no record owns go.
+   * active worktrees and directories no record owns go. An `active` record
+   * that still holds unlanded work — commits its branch alone carries, or
+   * edits in its worktree — is not a crash orphan: it may belong to a runner
+   * another host is still driving, so it is kept as `kept` and named in the
+   * result.
    */
-  pruneOrphans(run: IsolationRun): Promise<void>;
+  pruneOrphans(run: IsolationRun): Promise<IsolationPruneResult>;
 
   /** Unified diff of each repo's integration branch against its base ref. */
   reviewDiff(run: IsolationRun): Promise<string>;

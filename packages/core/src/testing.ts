@@ -6,6 +6,7 @@ import type {
   IsolationHandoff,
   IsolationMergeResult,
   IsolationOutcome,
+  IsolationPruneResult,
   IsolationRun,
   IntegrationDisposal,
   PreparedTask,
@@ -137,6 +138,8 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
   /** Set to make `discard` / `sweep` throw after logging the call. */
   discardError: Error | null = null;
   sweepError: Error | null = null;
+  /** What `pruneOrphans` reports as kept back from the sweep. */
+  keptOnPrune: IsolationPruneResult['kept'] = [];
   /** Per task id; a task not listed integrates as `merged`. */
   outcomes = new Map<string, IsolationOutcome>();
   /** Per task id, what `verifyRepair` finds; a task not listed passes. */
@@ -261,7 +264,10 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
     return handoffOf(run);
   }
 
-  async pruneOrphans(): Promise<void> { this.log({ op: 'pruneOrphans' }); }
+  async pruneOrphans(): Promise<IsolationPruneResult> {
+    this.log({ op: 'pruneOrphans' });
+    return { kept: [...this.keptOnPrune] };
+  }
   async reviewDiff(): Promise<string> { this.log({ op: 'reviewDiff' }); return ''; }
   async mergeIntoCheckedOut(): Promise<IsolationMergeResult> { this.log({ op: 'mergeIntoCheckedOut' }); return this.mergeResult; }
   async discard(_run: IsolationRun, opts: { integration: IntegrationDisposal }): Promise<void> {
