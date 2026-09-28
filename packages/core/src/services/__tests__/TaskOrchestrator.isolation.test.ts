@@ -49,6 +49,23 @@ describe('TaskOrchestrator with worktree isolation', () => {
     expect(spawnedCwd('t1')).toBe('/fake-worktrees/run1/1-t1');
   });
 
+  it('an observer whose onTaskChanged throws does not release the task\'s worktree', async () => {
+    const { orchestrator, isolation } = setup();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    orchestrator.subscribe({ onTaskChanged: () => { throw new Error('boom'); } });
+    orchestrator.loadPlan([task('t1', 1)]);
+
+    await orchestrator.approveReview();
+
+    await vi.waitFor(() => expect(orchestrator.getAttempt('t1')?.phase).toBe('running'));
+    expect(orchestrator.storeInstance.get('t1')!.status).toBe('in_progress');
+    expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'active' });
+    expect(isolation.taskIdsFor('release')).toEqual([]);
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+
   it('completes a passed task only once its worktree has merged into the integration branch', async () => {
     const { orchestrator, isolation, pass } = setup();
     const t1 = task('t1', 1);

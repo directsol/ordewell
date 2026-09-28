@@ -1358,6 +1358,47 @@ describe('task attempts', () => {
     expect(orchestrator.getAttempt('t1')).toMatchObject({ attempt: 2, sessionId: 's2', phase: 'running' });
   });
 
+  it('an observer whose onTaskChanged throws does not hold the task back or block a second ready task from starting', async () => {
+    const { sessions, spawn } = sessionRunner();
+    const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    orchestrator.subscribe({ onTaskChanged: () => { throw new Error('boom'); } });
+    orchestrator.loadPlan([
+      createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first' }),
+      createTask({ id: 't2', order: 2, title: 'Second', prompt: 'do second' }),
+    ]);
+
+    await orchestrator.approveReview();
+    await vi.waitFor(() => expect(sessions.length).toBe(2));
+
+    expect(orchestrator.getAttempt('t1')?.phase).toBe('running');
+    expect(orchestrator.storeInstance.get('t1')!.status).toBe('in_progress');
+    expect(orchestrator.getAttempt('t2')?.phase).toBe('running');
+    expect(orchestrator.storeInstance.get('t2')!.status).toBe('in_progress');
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+
+  it('a spawn that fails after its session was attached stops that session and holds the task, without throwing out of tick', async () => {
+    const { sessions, spawn, stop } = sessionRunner();
+    const throwingOutput: TaskOutputSource = {
+      attach: () => { throw new Error('attach blew up'); },
+      detach: () => {},
+      reset: () => {},
+      finalText: async () => '',
+      liveTail: () => null,
+    };
+    const orchestrator = makeOrchestrator({ terminalRunner: { spawn, stop }, output: throwingOutput });
+    orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first' })]);
+
+    await orchestrator.approveReview();
+
+    await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('pending'));
+    expect(stop).toHaveBeenCalledWith(sessions[0].id);
+    expectNoAttemptState(orchestrator);
+  });
+
   it("starts each agent with its workspace's own variables, and says once when direnv has blocked them", async () => {
     const { spawn } = sessionRunner();
     const warn = vi.fn();
