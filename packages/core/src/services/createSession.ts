@@ -4,8 +4,8 @@ import { validateTaskEdit, type EditCatalog } from './TaskEditValidator';
 import { ConversationEditError, PlannerConversation, type ConversationCompaction, type ConversationOpening, type RewindTarget } from './PlannerConversation';
 import { forkPlanState, type ForkedDialogue } from './conversationFork';
 import { Planner } from './Planner';
-import { TaskOrchestrator } from './TaskOrchestrator';
-import type { OrchestratorObserver } from './TaskOrchestrator';
+import { createTaskOrchestrator } from './TaskOrchestrator';
+import type { OrchestratorObserver, TaskOrchestrator } from './TaskOrchestrator';
 import { PlanStore } from './PlanStore';
 import { ApprovalPolicy } from './ApprovalPolicy';
 import { PendingApprovals, type PendingApproval } from './PendingApprovals';
@@ -269,10 +269,17 @@ export class Session {
     this.workspaceRootFn = deps.workspaceRoot;
     this.planner = deps.planner ?? new Planner(deps.config, () => this.aiService);
     this.store = new PlanStore();
-    this.orchestrator = new TaskOrchestrator(deps.config, deps.notifications, deps.runner, this.store, deps.taskOutput, deps.isolation);
-    this.orchestrator.setRegistry(deps.registry);
-    this.orchestrator.setWorkspaceRoot(deps.workspaceRoot);
-    this.orchestrator.setTddEnabled(() => this.settingsFn().tddEnabled);
+    this.orchestrator = createTaskOrchestrator({
+      config: deps.config,
+      notifications: deps.notifications,
+      terminalRunner: deps.runner,
+      store: this.store,
+      output: deps.taskOutput,
+      isolation: deps.isolation,
+      registry: deps.registry,
+      workspaceRoot: deps.workspaceRoot,
+      tddEnabled: () => this.settingsFn().tddEnabled,
+    });
     this.workspace = deps.workspaceRoot();
     this.broadcast = deps.broadcast;
     this.onNotice = deps.onNotice;

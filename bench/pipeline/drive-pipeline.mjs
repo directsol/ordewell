@@ -137,9 +137,13 @@ async function main() {
   // Set up orchestrator with real config/notifications/runner
   const config = makeConfig(RUNNER_ID);
   const notifications = makeNotifications();
-  const orchestrator = new core.TaskOrchestrator(config, notifications, runner);
-  orchestrator.setRegistry(registry);
-  orchestrator.setWorkspaceRoot(() => workspace);
+  const orchestrator = core.createTaskOrchestrator({
+    config,
+    notifications,
+    terminalRunner: runner,
+    registry,
+    workspaceRoot: () => workspace,
+  });
 
   // Track events
   let executionComplete = false;

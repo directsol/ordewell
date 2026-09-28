@@ -101,6 +101,49 @@ export interface TaskAttemptSnapshot {
 }
 
 /**
+ * The wiring a {@link TaskOrchestrator} runs on, every collaborator resolved.
+ * {@link createTaskOrchestrator} is the only production caller; tests build one
+ * through that factory too. The constructor makes nothing itself, so there is
+ * exactly one place defaults live.
+ */
+export interface TaskOrchestratorDeps {
+  config: IConfig;
+  notifications: INotification;
+  terminalRunner: ITerminalRunner;
+  store: PlanStore;
+  output: TaskOutputSource;
+  /** The plan's isolation run and the open run's lifecycle (ADR-0013). */
+  runs: IsolationRunController;
+  /** A passed attempt's work onto the integration branch, and any conflict repair. */
+  landing: Landing;
+  registry: RunnerRegistry | null;
+  /** The workspace root, read at call time — VS Code can change it. */
+  workspaceRoot: () => string;
+  /** The workspace's own variables for a task's cwd (ADR-0016). */
+  workspaceEnv: (cwd: string) => Promise<WorkspaceEnv>;
+  /** Read live at each spawn, so a toggle takes effect on the next task. */
+  tddEnabled: () => boolean;
+}
+
+/**
+ * What a caller supplies to {@link createTaskOrchestrator}; every optional one
+ * gets its default there. This is what a host or test chooses, not the resolved
+ * wiring the orchestrator itself runs on.
+ */
+export interface TaskOrchestratorOptions {
+  config: IConfig;
+  notifications: INotification;
+  terminalRunner: ITerminalRunner;
+  store?: PlanStore;
+  output?: TaskOutputSource;
+  isolation?: IWorktreeIsolation;
+  registry?: RunnerRegistry | null;
+  workspaceRoot?: () => string;
+  workspaceEnv?: (cwd: string) => Promise<WorkspaceEnv>;
+  tddEnabled?: () => boolean;
+}
+
+/**
  * The pure scheduler. Owns execution state (`running`, `planStatus`,
  * `reviewApproved`, the live task attempts, `messageQueue`) and the verifier.
  * All task-shaped state — the plan tree, the flat index, the completed set
@@ -111,7 +154,11 @@ export interface TaskAttemptSnapshot {
  * failure and does not unblock dependent work.
  */
 export class TaskOrchestrator {
+  private config: IConfig;
+  private notifications: INotification;
+  private terminalRunner: ITerminalRunner;
   private store: PlanStore;
+  private output: TaskOutputSource;
   private attempts = new Map<string, TaskAttempt>();
   private verifier = new VerdictEngine();
   private running = false;
@@ -134,7 +181,7 @@ export class TaskOrchestrator {
    */
   private haltedByFailure = false;
   /** The workspace's own variables for a task's cwd (ADR-0016); swapped out in tests. */
-  private workspaceEnv: (cwd: string) => Promise<WorkspaceEnv> = (cwd) => resolveWorkspaceEnv(cwd);
+  private workspaceEnv: (cwd: string) => Promise<WorkspaceEnv>;
   /** What the workspace env has already warned about, so a run says it once, not per task. */
   private envWarnings = new Set<string>();
   /**
@@ -145,41 +192,29 @@ export class TaskOrchestrator {
    */
   private onHold = new Set<string>();
 
-  private isolation: IWorktreeIsolation;
   /** The plan's isolation run and the open run's lifecycle (ADR-0013); see {@link IsolationRunController}. */
   private runs: IsolationRunController;
   /** A passed attempt's work onto the integration branch, and the conflict repair a landing may need. */
   private landing: Landing;
 
-  private registry: RunnerRegistry | null = null;
-  private workspaceRootFn: () => string = () => process.cwd();
+  private registry: RunnerRegistry | null;
+  private workspaceRootFn: () => string;
   private observers: OrchestratorObserver[] = [];
-  private tddEnabled: () => boolean = () => false;
+  private tddEnabled: () => boolean;
 
-  constructor(
-    private config: IConfig,
-    private notifications: INotification,
-    private terminalRunner: ITerminalRunner,
-    store?: PlanStore,
-    private output: TaskOutputSource = new BufferedTaskOutputSource(),
-    isolation?: IWorktreeIsolation,
-  ) {
-    this.store = store ?? new PlanStore();
-    this.isolation = isolation ?? createWorktreeIsolation({ config });
-    this.runs = new IsolationRunController({
-      isolation: this.isolation,
-      config,
-      notifications,
-      workspaceRoot: () => this.workspaceRootFn(),
-      listener: {
-        changed: () => this.emit('onIsolationChanged'),
-        blocked: (repos) => this.emit('onIsolationBlocked', { reason: 'dirty', repos }),
-        handoff: (handoff) => this.emit('onIsolationHandoff', handoff),
-        notice: (level, message) => this.emit('onIsolationNotice', { level, message }),
-        releasing: (taskIds) => { for (const taskId of taskIds) this.lingering.close(taskId); },
-      },
-    });
-    this.landing = new Landing({ runs: this.runs, config, tasks: this.store });
+  constructor(deps: TaskOrchestratorDeps) {
+    this.config = deps.config;
+    this.notifications = deps.notifications;
+    this.terminalRunner = deps.terminalRunner;
+    this.store = deps.store;
+    this.output = deps.output;
+    this.runs = deps.runs;
+    this.landing = deps.landing;
+    this.registry = deps.registry;
+    this.workspaceRootFn = deps.workspaceRoot;
+    this.workspaceEnv = deps.workspaceEnv;
+    this.tddEnabled = deps.tddEnabled;
+
     this.store.onMutate = () => this.emit('onTaskChanged');
     this.verifier.onVerdict((taskId, verdict) => this.onVerdict(taskId, verdict));
     this.verifier.onCheckpoint((taskId, summary) => {
@@ -193,6 +228,50 @@ export class TaskOrchestrator {
     this.verifier.onIdleChange(() => this.emit('onTaskChanged'));
   }
 
+  /**
+   * The composition root: resolves every optional collaborator and wires the
+   * isolation listener that the constructor cannot, because it needs the
+   * instance's own (private) emit and lingering seams. Nothing else in the
+   * codebase constructs an orchestrator, so this is the one place defaults
+   * live — a host or test supplies what it cares about and gets the rest.
+   */
+  static compose(options: TaskOrchestratorOptions): TaskOrchestrator {
+    const store = options.store ?? new PlanStore();
+    const output = options.output ?? new BufferedTaskOutputSource();
+    const isolation = options.isolation ?? createWorktreeIsolation({ config: options.config });
+    const workspaceRoot = options.workspaceRoot ?? (() => process.cwd());
+    // The listener callbacks fire only after construction, so the reference
+    // below is settled by the time any of them runs.
+    const runs = new IsolationRunController({
+      isolation,
+      config: options.config,
+      notifications: options.notifications,
+      workspaceRoot,
+      listener: {
+        changed: () => orchestrator.emit('onIsolationChanged'),
+        blocked: (repos) => orchestrator.emit('onIsolationBlocked', { reason: 'dirty', repos }),
+        handoff: (handoff) => orchestrator.emit('onIsolationHandoff', handoff),
+        notice: (level, message) => orchestrator.emit('onIsolationNotice', { level, message }),
+        releasing: (taskIds) => { for (const taskId of taskIds) orchestrator.lingering.close(taskId); },
+      },
+    });
+    const landing = new Landing({ runs, config: options.config, tasks: store });
+    const orchestrator = new TaskOrchestrator({
+      config: options.config,
+      notifications: options.notifications,
+      terminalRunner: options.terminalRunner,
+      store,
+      output,
+      runs,
+      landing,
+      registry: options.registry ?? null,
+      workspaceRoot,
+      workspaceEnv: options.workspaceEnv ?? ((cwd) => resolveWorkspaceEnv(cwd)),
+      tddEnabled: options.tddEnabled ?? (() => false),
+    });
+    return orchestrator;
+  }
+
   /** Advisory silence timestamp for a task's live runner, or null if not idle. */
   getIdleSince(taskId: string): string | null {
     return this.verifier.getIdleSince(taskId);
@@ -204,14 +283,6 @@ export class TaskOrchestrator {
   }
 
   get storeInstance(): PlanStore { return this.store; }
-
-  setWorkspaceRoot(fn: () => string): void {
-    this.workspaceRootFn = fn;
-  }
-
-  setWorkspaceEnvResolver(resolve: (cwd: string) => Promise<WorkspaceEnv>): void {
-    this.workspaceEnv = resolve;
-  }
 
   /**
    * The variables a task's agent gets from its workspace. What cannot be
@@ -235,20 +306,6 @@ export class TaskOrchestrator {
       warn(`refused:${resolved.refused.join(',')}`, `Ignored ${resolved.refused.join(', ')} from the workspace environment: Ordewell never passes these to agents.`);
     }
     return resolved.env;
-  }
-
-  setRegistry(registry: RunnerRegistry): void {
-    this.registry = registry;
-  }
-
-  /**
-   * A getter rather than a value where the caller has one: every task gets its
-   * prompt composed at spawn time, but only a full-plan run passes through a
-   * point where a snapshot could be refreshed — so "Run task", force-start and
-   * retry would compose against whatever the last run happened to set.
-   */
-  setTddEnabled(enabled: boolean | (() => boolean)): void {
-    this.tddEnabled = typeof enabled === 'function' ? enabled : () => enabled;
   }
 
   /*
@@ -1093,4 +1150,13 @@ export class TaskOrchestrator {
     if (reason === 'load') this.output.reset();
     return ended;
   }
+}
+
+/**
+ * Build a {@link TaskOrchestrator}, filling in every collaborator a caller did
+ * not inject. The one entry point for hosts, bench harnesses and tests alike;
+ * {@link TaskOrchestrator} itself constructs nothing.
+ */
+export function createTaskOrchestrator(options: TaskOrchestratorOptions): TaskOrchestrator {
+  return TaskOrchestrator.compose(options);
 }
