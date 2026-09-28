@@ -369,16 +369,14 @@ describe('processQueuedMessages', () => {
     queue(session, 'an edit');
     sessions[0].emitOutput('Done.\n<<<ORDEWELL_DONE_mk-1>>>');
     sessions[0].emitExit(0);
-    await new Promise((r) => setTimeout(r, 30));
 
-    expect(events.map((e) => e.type)).toContain('queue_ready');
+    await vi.waitFor(() => expect(events.map((e) => e.type)).toContain('queue_ready'));
     expect(runner.spawn).toHaveBeenCalledTimes(1); // t2 not spawned yet
 
     await session.processQueuedMessages();
-    await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(runner.spawn).toHaveBeenCalledTimes(2));
 
     expect(session.getQueuedMessages().length).toBe(0);
-    expect(runner.spawn).toHaveBeenCalledTimes(2);
     expect((runner.spawn as unknown as ReturnType<typeof vi.fn>).mock.calls[1][0].taskId).toBe('t2');
   });
 });
@@ -477,9 +475,8 @@ describe('Session phase transitions', () => {
     await expect(session.executePlan()).rejects.toThrow('Session already executing');
 
     terminal.emitOutput('<<<ORDEWELL_DONE_mk-1>>>');
-    await new Promise(r => setTimeout(r, 10));
+    await vi.waitFor(() => expect(session.isExecuting).toBe(false));
 
-    expect(session.isExecuting).toBe(false);
     expect(taskOf(session, 't1')?.status).toBe('completed');
     expect(taskOf(session, 't2')?.status).toBe('pending');
     expect(runner.spawn).toHaveBeenCalledOnce();
@@ -503,10 +500,9 @@ describe('Session phase transitions', () => {
     await session.runTask('t1');
 
     terminal.emitOutput('<<<ORDEWELL_DONE_mk-1>>>');
-    await new Promise(r => setTimeout(r, 10));
+    await vi.waitFor(() => expect(taskOf(session, 't1')?.outputSummary?.logTail).toBe('answer from the transcript'));
 
     expect(queries).toEqual([expect.objectContaining({ runner: 'claude-code', marker: 'mk-1' })]);
-    expect(taskOf(session, 't1')?.outputSummary?.logTail).toBe('answer from the transcript');
   });
 
   describe('every spawn path composes the same augmented prompt', () => {

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import http from 'http';
+import { once } from 'events';
 import { ApiClient } from '../../apiClient';
 
 const savedSessions: unknown[] = [];
@@ -282,6 +283,8 @@ describe('stdinReader', () => {
     const { stdinReader } = await import('../plan');
     const reader = stdinReader(stream as never);
     stream.end(lines);
+    // All buffered lines have been handed to the reader once the stream ends.
+    await once(stream, 'end');
     return reader;
   }
 
@@ -289,10 +292,8 @@ describe('stdinReader', () => {
     // Regression: a piped stdin drains and closes during the planner round-trip,
     // so answers must survive not having a live question waiting for them.
     const reader = await readerOver('one\ntwo\nthree\n');
-    await new Promise((r) => setTimeout(r, 10));
 
     expect(await reader.ask('> ')).toBe('one');
-    await new Promise((r) => setTimeout(r, 10));
     expect(await reader.ask('> ')).toBe('two');
     expect(await reader.ask('> ')).toBe('three');
     expect(await reader.ask('> ')).toBeNull();

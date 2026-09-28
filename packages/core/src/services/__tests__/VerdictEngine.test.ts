@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { VerdictEngine } from '../VerdictEngine';
 import { composeAugmentedPrompt } from '../promptAugment';
 import { createTask, type Task } from '../../models/Task';
+import { flushMicrotasks } from '../../testing';
 
 const buildTask = (extra: Partial<Task> = {}): Task =>
   createTask({ id: 't1', title: 'do thing', taskMode: 'build', completionMarker: 'mk-1', ...extra });
@@ -49,9 +50,8 @@ describe('VerdictEngine', () => {
 
       engine.watch(buildTask(), session);
       session.exit(0);
-      await new Promise(r => setTimeout(r, 10));
+      await vi.waitFor(() => expect(verdicts).toHaveLength(1));
 
-      expect(verdicts).toHaveLength(1);
       expect(verdicts[0].outcome).toBe('fail');
       expect(verdicts[0].taskId).toBe('t1');
     });
@@ -64,9 +64,8 @@ describe('VerdictEngine', () => {
 
       engine.watch(buildTask(), session);
       session.exit(1);
-      await new Promise(r => setTimeout(r, 10));
+      await vi.waitFor(() => expect(verdicts[0]?.outcome).toBe('fail'));
 
-      expect(verdicts[0].outcome).toBe('fail');
       expect(verdicts[0].reason).toMatch(/code 1/);
     });
 
@@ -78,9 +77,7 @@ describe('VerdictEngine', () => {
 
       engine.watch(buildTask(), session);
       session.exit(null as unknown as number);
-      await new Promise(r => setTimeout(r, 10));
-
-      expect(verdicts[0].outcome).toBe('fail');
+      await vi.waitFor(() => expect(verdicts[0]?.outcome).toBe('fail'));
     });
 
     it('detects the completion marker mid-stream and passes regardless of exit code', async () => {
@@ -93,9 +90,8 @@ describe('VerdictEngine', () => {
       session.emit('working...\n<<<ORDEWELL_DONE_mk-1>>>\ndone');
 
       session.exit(137);
-      await new Promise(r => setTimeout(r, 10));
+      await vi.waitFor(() => expect(verdicts[0]?.outcome).toBe('pass'));
 
-      expect(verdicts[0].outcome).toBe('pass');
       expect(verdicts[0].reason).toMatch(/completion marker/);
     });
 
@@ -412,7 +408,7 @@ describe('VerdictEngine', () => {
 
       engine.markComplete(buildTask());           // manual override — no-op (already delivered)
       session.exit(1);                             // stale exit — ignored (generation bumped)
-      await new Promise(r => setTimeout(r, 10));
+      await flushMicrotasks();
 
       expect(verdicts).toHaveLength(1);            // one from onOutput, none from stale exit
       expect(verdicts[0]).toBe('pass');
@@ -431,7 +427,7 @@ describe('VerdictEngine', () => {
       session.emit('<<<ORDEWELL_DONE_mk-1>>>');   // marker seen — verdict delivered from onOutput
       engine.clear(task);                          // bumps gen (no-op, already delivered)
       session.exit(1);                              // stale exit — ignored
-      await new Promise(r => setTimeout(r, 10));
+      await flushMicrotasks();
 
       expect(verdicts).toHaveLength(1);            // one from onOutput, none from stale exit
       expect(verdicts[0]).toBe('pass');
@@ -453,9 +449,8 @@ describe('VerdictEngine', () => {
       engine.watch(task, session2);
       session2.emit('<<<ORDEWELL_DONE_mk-1>>>');
       session2.exit(0);
-      await new Promise(r => setTimeout(r, 10));
+      await vi.waitFor(() => expect(verdicts).toHaveLength(1));
 
-      expect(verdicts).toHaveLength(1);
       expect(verdicts[0]).toBe('pass');
     });
   });
@@ -561,7 +556,7 @@ describe('VerdictEngine', () => {
       engine.reset();                              // clears all generations
 
       sessionA.exit(1);                             // stale exit — ignored (gen cleared)
-      await new Promise(r => setTimeout(r, 10));
+      await flushMicrotasks();
 
       expect(verdicts).toHaveLength(1);            // one from onOutput, none from stale exit
       expect(verdicts[0]).toBe('pass');
@@ -582,7 +577,7 @@ describe('VerdictEngine', () => {
       engine.watch(buildTask(), after);
       before.emit('<<<ORDEWELL_DONE_mk-1>>>');
       before.exit(1);
-      await new Promise(r => setTimeout(r, 10));
+      await flushMicrotasks();
 
       expect(verdicts).toEqual([]);
       after.emit('<<<ORDEWELL_DONE_mk-1>>>');
