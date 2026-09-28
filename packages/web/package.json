@@ -33,6 +33,7 @@
     "dev": "tsup server/main.ts --format cjs --clean --external hono --external @hono/node-server --external ws --external @ordewell/core --tsconfig tsconfig.json --watch",
     "serve": "node dist/server/main.js",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

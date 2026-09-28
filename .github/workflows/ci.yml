@@ -60,11 +60,70 @@ jobs:
       - name: Build (vscode, cli & web)
         run: npm run build -w packages/vscode -w packages/cli -w packages/web --if-present
 
+      # The extension integration test drives a real VS Code instance. Cache the
+      # ~320 MB download so only the first run on a new VS Code version pays for
+      # it; `test:integration` builds its own bundle (tsup.integration.config.ts).
+      - name: Cache the VS Code download
+        uses: actions/cache@v4
+        with:
+          path: packages/vscode/.vscode-test
+          key: vscode-test-${{ runner.os }}-${{ hashFiles('packages/vscode/package.json') }}
+
+      - name: Install xvfb if the image lacks it
+        run: |
+          if ! command -v xvfb-run >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y xvfb
+          fi
+
+      - name: VS Code integration test (synthetic runner — no API key)
+        env:
+          ORDEWELL_TEST_WORKSPACE: ${{ runner.temp }}/ordewell-integration-workspace
+        run: |
+          mkdir -p "$ORDEWELL_TEST_WORKSPACE"
+          xvfb-run -a npm run test:integration -w ordewell
+
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm test
+      # Coverage is report-only — no thresholds, so this asserts exactly what
+      # `npm test` did and never fails on a percentage.
+      - name: Test with coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:coverage 2>&1 | tee coverage.log
+
+      - name: Append coverage summaries to the job summary
+        if: always()
+        shell: bash
+        run: |
+          node --input-type=module - <<'NODE' >> "$GITHUB_STEP_SUMMARY"
+          import { existsSync, readFileSync } from 'node:fs';
+          if (!existsSync('coverage.log')) process.exit(0);
+          const log = readFileSync('coverage.log', 'utf8');
+          const chunks = log.split(/^> (\S+)@\S+ test:coverage\s*$/m);
+          const out = [];
+          for (let i = 1; i < chunks.length; i += 2) {
+            const name = chunks[i];
+            const body = chunks[i + 1] ?? '';
+            const marker = body.indexOf('Coverage summary');
+            if (marker < 0) continue;
+            const rest = body.slice(body.lastIndexOf('\n', marker) + 1);
+            const end = rest.search(/\n={20,}/);
+            const summary = (end < 0 ? rest : rest.slice(0, end)).trimEnd();
+            out.push(`### Coverage — \`${name}\``, '', '```', summary, '```', '');
+          }
+          process.stdout.write(out.join('\n'));
+          NODE
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: packages/*/coverage/
+          if-no-files-found: warn
 
       - name: Lint
         run: npm run lint

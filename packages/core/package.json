@@ -85,6 +85,7 @@
     "prepublishOnly": "npm run build",
     "watch": "tsup src/index.ts --watch --sourcemap",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"
   },

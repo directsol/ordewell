@@ -19,6 +19,7 @@ npm run build          # core first — cli, vscode and web depend on its dist/
 npm run lint
 npm run typecheck
 npm test
+npm run test:coverage   # same tests, writes per-package coverage/ reports
 ```
 
 Build order is not optional: `core` emits the types the other three packages
