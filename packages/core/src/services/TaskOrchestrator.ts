@@ -23,6 +23,9 @@ import { IsolationRunController } from './IsolationRunController';
 import { completesTask, Landing, type LandingMessage, type LandingOutcome, type RepairAttempt, type UnlandedOutcome } from './Landing';
 import type { IsolatedExecution } from './plannerModes';
 import { watchBlockingPrompts } from './blockingPrompts';
+import { classifyRunnerStop, keepsTerminalReadable, stopsRunner, LingeringRunners, type AttemptEnd } from './runnerExit';
+import { MessageQueue } from './MessageQueue';
+import { selectReadyTasks } from './readiness';
 import { resolveWorkspaceEnv, type WorkspaceEnv } from './workspaceEnv';
 
 /**
@@ -53,18 +56,6 @@ export interface OrchestratorObserver {
    */
   onIsolationNotice?(data: { level: 'info' | 'warn' | 'error'; message: string }): void;
 }
-
-/**
- * What a runner says when its account, not the task, ran out. A marker-less
- * stop that names a limit is retryable once the limit resets, so it pauses the
- * task instead of failing it. Deliberately narrow: a false positive would leave
- * a genuinely broken task waiting on the user forever, and the words below are
- * the ones the runners print for this and nothing else.
- */
-const USAGE_LIMIT_RE = /\b(?:usage|session|weekly|daily|monthly) limit\b|\brate limit (?:exceeded|reached)\b|\brate[- ]limited\b|\blimit (?:will )?reset\b|\bquota (?:exceeded|reached)\b|\btoo many requests\b/i;
-
-/** How much of a stopped runner's tail is read for the limit signature: the error is the last thing it prints. */
-const USAGE_LIMIT_TAIL = 4096;
 
 /**
  * One run of one task, from the moment the scheduler claims it until its
@@ -109,8 +100,6 @@ export interface TaskAttemptSnapshot {
   startedAt: string;
 }
 
-type AttemptEnd = 'verdict' | 'cancel' | 'release' | 'complete' | 'retry' | 'spawn-failed' | 'stop' | 'load';
-
 /**
  * The pure scheduler. Owns execution state (`running`, `planStatus`,
  * `reviewApproved`, the live task attempts, `messageQueue`) and the verifier.
@@ -127,8 +116,7 @@ export class TaskOrchestrator {
   private verifier = new VerdictEngine();
   private running = false;
   private planStatus: 'approved' | 'running' | 'completed' = 'approved';
-  private messageQueue: QueuedMessage[] = [];
-  private queueSeq = 0;
+  private messageQueue = new MessageQueue();
   private reviewApproved = false;
   /*
    * Retry counts, spawn counts and holds describe a task across attempts, so
@@ -137,15 +125,8 @@ export class TaskOrchestrator {
    */
   private retryCounts = new Map<string, number>();
   private spawnCounts = new Map<string, number>();
-  /**
-   * The terminal a verdict left open, by task. It stays so the user can read
-   * the agent's output or keep talking to it — but only while its worktree
-   * does: once that is removed the agent sits in a deleted directory, and a
-   * newer attempt in the same worktree would share it with a second agent.
-   * Without this, every task of every run left one agent process running
-   * until the daemon stopped.
-   */
-  private lingering = new Map<string, string>();
+  /** The terminal a verdict left open, by task; see {@link LingeringRunners}. */
+  private lingering = new LingeringRunners((sessionId) => this.terminalRunner.stop(sessionId));
   /**
    * A full-plan run a failure paused. Retrying the failed task is the explicit
    * resume the pause waits for — without this a retry only reset the task to
@@ -195,7 +176,7 @@ export class TaskOrchestrator {
         blocked: (repos) => this.emit('onIsolationBlocked', { reason: 'dirty', repos }),
         handoff: (handoff) => this.emit('onIsolationHandoff', handoff),
         notice: (level, message) => this.emit('onIsolationNotice', { level, message }),
-        releasing: (taskIds) => { for (const taskId of taskIds) this.closeLingering(taskId); },
+        releasing: (taskIds) => { for (const taskId of taskIds) this.lingering.close(taskId); },
       },
     });
     this.landing = new Landing({ runs: this.runs, config, tasks: this.store });
@@ -400,53 +381,37 @@ export class TaskOrchestrator {
     });
   }
 
-  private closeLingering(taskId: string): void {
-    const sessionId = this.lingering.get(taskId);
-    if (sessionId === undefined) return;
-    this.lingering.delete(taskId);
-    this.terminalRunner.stop(sessionId);
-  }
-
   /** What the plan persists of isolated execution; null when no run ever isolated. */
   get isolationRecord(): PlanIsolation | null {
     return this.runs.planIsolation;
   }
 
   queueMessage(text: string): void {
-    this.messageQueue.push({
-      // A sequence, not just the clock: two sends inside one millisecond must
-      // stay distinguishable, since a surface removes one by id.
-      id: `q-${Date.now()}-${++this.queueSeq}`,
-      text,
-      timestamp: new Date().toISOString(),
-    });
+    this.messageQueue.enqueue(text);
     this.emit('onTaskChanged');
   }
 
   getQueuedMessages(): QueuedMessage[] {
-    return [...this.messageQueue];
+    return this.messageQueue.all();
   }
 
   /** Take one unsent message back out of the queue; false when it was never there (or already drained). */
   removeQueuedMessage(id: string): boolean {
-    const index = this.messageQueue.findIndex((m) => m.id === id);
-    if (index < 0) return false;
-    this.messageQueue.splice(index, 1);
-    this.emit('onTaskChanged');
-    return true;
+    const removed = this.messageQueue.remove(id);
+    if (removed) this.emit('onTaskChanged');
+    return removed;
   }
 
   setQueuedMessages(messages: QueuedMessage[]): void {
-    this.messageQueue = [...messages];
+    this.messageQueue.replace(messages);
   }
 
   clearQueuedMessages(): void {
-    this.messageQueue = [];
+    this.messageQueue.clear();
   }
 
   processNextQueuedMessage(): QueuedMessage | null {
-    if (this.messageQueue.length === 0) return null;
-    return this.messageQueue.shift() ?? null;
+    return this.messageQueue.next();
   }
 
   loadPlan(tasks: readonly Task[], planRunners: RunnerId[] = ['claude-code']): void {
@@ -565,7 +530,7 @@ export class TaskOrchestrator {
     console.error(`[TaskOrchestrator] Output summary:\n${summary || '(empty — no output captured)'}`);
     if (landing) {
       await this.applyLanding(task, landing, () => this.notifications.info(`Task "${task.title}" completed.`));
-    } else if (this.stoppedOnUsageLimit(attempt)) {
+    } else if (classifyRunnerStop(attempt.session?.getOutput() ?? '') === 'usage-limit') {
       // No marker, but what stopped the runner was its account rather than the
       // work. Failing would paint a red X on a task the user can simply retry,
       // and spawning more tasks would only spend the same exhausted limit, so
@@ -588,12 +553,6 @@ export class TaskOrchestrator {
 
     this.logAndArchive(task, verdict);
     await this.afterVerdict();
-  }
-
-  /** Whether a stopped runner's own tail says its account, not the task, ran out. */
-  private stoppedOnUsageLimit(attempt: TaskAttempt): boolean {
-    const tail = attempt.session?.getOutput().slice(-USAGE_LIMIT_TAIL) ?? '';
-    return USAGE_LIMIT_RE.test(tail);
   }
 
   private async afterVerdict(): Promise<void> {
@@ -688,52 +647,20 @@ export class TaskOrchestrator {
   getReadyTasks(): Task[] {
     if (!this.running) return [];
     const maxParallel = this.config.maxParallelSessions;
-    const currentActive = this.attempts.size;
-    if (currentActive >= maxParallel) return [];
-    const availableSlots = maxParallel - currentActive;
-
-    const candidates = this.store.allTasks.filter((t) => {
-      if (t.status !== 'pending' && t.status !== 'approved') return false;
-      if (t.type === 'user') return false;
-      if (!t.prompt) return false;
-      if (this.onHold.has(t.id)) return false;
-      if (this.isBlocked(t)) return false;
-      if (!t.dependencies.every((depId) => this.dependencyMet(depId))) return false;
-      return true;
+    const active = this.attempts.size;
+    const { ready, candidateCount, excluded } = selectReadyTasks({
+      store: this.store,
+      onHold: this.onHold,
+      runs: this.runs,
+      active,
+      maxParallel,
     });
 
-    const excluded = this.store.allTasks.filter(t => t.type === 'ai' && t.prompt && !candidates.includes(t));
-    if (excluded.length > 0) {
-      for (const t of excluded) {
-        const reasons: string[] = [];
-        if (t.status !== 'pending' && t.status !== 'approved') reasons.push(`status=${t.status}`);
-        if (this.onHold.has(t.id)) reasons.push('on-hold');
-        if (this.isBlocked(t)) reasons.push('blocked');
-        if (!t.dependencies.every((depId) => this.dependencyMet(depId))) reasons.push('deps');
-        console.log(`[TaskOrchestrator] excluded: #${t.order} "${t.title}" — ${reasons.join(', ')}`);
-      }
+    for (const { task, reasons } of excluded) {
+      console.log(`[TaskOrchestrator] excluded: #${task.order} "${task.title}" — ${reasons.join(', ')}`);
     }
-
-    console.log(`[TaskOrchestrator] getReadyTasks: ${candidates.length} candidates, ${availableSlots} slots, maxParallel=${maxParallel}`);
-    return candidates.sort((a, b) => a.order - b.order).slice(0, availableSlots);
-  }
-
-  /**
-   * In an isolated run a dependency is met once its work is on the integration
-   * branch, not merely once it passed: the dependent's worktree is cut from
-   * that branch, so starting earlier would hand it a tree without the work it
-   * depends on.
-   */
-  private dependencyMet(depId: string): boolean {
-    if (!this.store.isCompleted(depId)) return false;
-    const record = this.runs.openRecord(depId);
-    return !record || record.status === 'merged';
-  }
-
-  isBlocked(task: Task): boolean {
-    if (task.status === 'blocked') return true;
-    if (task.dependencies.length > 0) return task.dependencies.some((depId) => this.store.isFailed(depId));
-    return false;
+    console.log(`[TaskOrchestrator] getReadyTasks: ${candidateCount} candidates, ${Math.max(0, maxParallel - active)} slots, maxParallel=${maxParallel}`);
+    return ready;
   }
 
   /**
@@ -1032,7 +959,7 @@ export class TaskOrchestrator {
         // A merge to resolve is not new behaviour to drive test-first.
         tddEnabled: !attempt.repair && this.tddEnabled(),
       });
-      this.closeLingering(task.id);
+      this.lingering.close(task.id);
       const env = await this.envForTask(cwd);
       const session = await this.terminalRunner.spawn({
         taskId: task.id,
@@ -1150,8 +1077,8 @@ export class TaskOrchestrator {
     const attempt = this.attempts.get(taskId);
     this.attempts.delete(taskId);
     if (attempt) this.output.detach(taskId);
-    if (reason === 'verdict' && attempt?.session) this.lingering.set(taskId, attempt.session.id);
-    if (reason === 'cancel' || reason === 'release' || reason === 'complete' || reason === 'retry' || reason === 'spawn-failed') {
+    if (attempt?.session && keepsTerminalReadable(reason)) this.lingering.remember(taskId, attempt.session.id);
+    if (stopsRunner(reason)) {
       const task = this.store.get(taskId);
       if (task) this.verifier.clear(task);
       if (attempt?.session) this.terminalRunner.stop(attempt.session.id);
