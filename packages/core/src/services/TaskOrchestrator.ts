@@ -68,6 +68,18 @@ type RunDecision =
 
 const SHARED_ROOT_TAIL = 'tasks run in the workspace root without worktree isolation.';
 
+/**
+ * What a runner says when its account, not the task, ran out. A marker-less
+ * stop that names a limit is retryable once the limit resets, so it pauses the
+ * task instead of failing it. Deliberately narrow: a false positive would leave
+ * a genuinely broken task waiting on the user forever, and the words below are
+ * the ones the runners print for this and nothing else.
+ */
+const USAGE_LIMIT_RE = /\b(?:usage|session|weekly|daily|monthly) limit\b|\brate limit (?:exceeded|reached)\b|\brate[- ]limited\b|\blimit (?:will )?reset\b|\bquota (?:exceeded|reached)\b|\btoo many requests\b/i;
+
+/** How much of a stopped runner's tail is read for the limit signature: the error is the last thing it prints. */
+const USAGE_LIMIT_TAIL = 4096;
+
 /** Why a run fell back to the shared workspace root, as the one line the user is told. */
 function sharedRootNotice(reason: SharedRootReason, repos: string[]): string {
   switch (reason) {
@@ -412,7 +424,12 @@ export class TaskOrchestrator {
     this.resolvers = { ...(state?.resolvers ?? {}) };
     if (!this.isolationRun) return;
     try {
-      await this.isolation.pruneOrphans(this.isolationRun);
+      const { kept } = await this.isolation.pruneOrphans(this.isolationRun);
+      // Never silently: work kept back from the sweep has to be named, or the
+      // user has a worktree they do not know about and a task that looks done.
+      for (const task of kept) {
+        this.tell('warn', `Task "${task.title}" was still holding unlanded work when this plan was re-opened, so its worktree and branch were kept. Retry it to land the work, or review it by hand.`);
+      }
     } catch (err) {
       this.tell('warn', `Could not prune leftover worktrees: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -655,6 +672,15 @@ export class TaskOrchestrator {
     console.error(`[TaskOrchestrator] Output summary:\n${summary || '(empty — no output captured)'}`);
     if (verdict.outcome === 'pass') {
       await this.landPassed(task, landing);
+    } else if (this.stoppedOnUsageLimit(attempt)) {
+      // No marker, but what stopped the runner was its account rather than the
+      // work. Failing would paint a red X on a task the user can simply retry,
+      // and spawning more tasks would only spend the same exhausted limit, so
+      // the task pauses and the run holds until the user resumes it.
+      this.store.markAwaitingUser(taskId);
+      this.haltOnFailure();
+      this.tell('warn', `Task "${task.title}" stopped before its completion marker: ${attempt.runner} hit its usage limit. Retry it once the limit resets — its worktree is kept.`);
+      if (attempt.worktree) await this.releaseWorktree(taskId, { keep: true });
     } else {
       this.store.markFailed(taskId);
       // Missing completion evidence is a hard boundary: do not launch more
@@ -669,6 +695,12 @@ export class TaskOrchestrator {
 
     this.logAndArchive(task, verdict);
     await this.afterVerdict();
+  }
+
+  /** Whether a stopped runner's own tail says its account, not the task, ran out. */
+  private stoppedOnUsageLimit(attempt: TaskAttempt): boolean {
+    const tail = attempt.session?.getOutput().slice(-USAGE_LIMIT_TAIL) ?? '';
+    return USAGE_LIMIT_RE.test(tail);
   }
 
   private async afterVerdict(): Promise<void> {
@@ -818,11 +850,14 @@ export class TaskOrchestrator {
       const whyNot = this.noRepairReason(task);
       if (whyNot) this.tell('info', whyNot);
     } else {
-      this.store.markFailed(task.id);
-      this.haltOnFailure();
+      // The verdict passed; only the landing did not. A red X would say the
+      // task failed verification and contradict the marker evidence, so it
+      // waits on the user like a conflict does, with its work kept.
+      const why = record?.landingError ? ` (${record.landingError})` : '';
+      this.store.markAwaitingUser(task.id);
       this.notifications.error(inRepo
-        ? `Task "${task.title}" passed, but git could not integrate its work in ${inRepo}, so none of it landed. Its worktrees are kept for inspection.`
-        : `Task "${task.title}" passed, but git could not integrate its work. Its worktree is kept for inspection.`);
+        ? `Task "${task.title}" passed, but git could not integrate its work in ${inRepo}${why}, so none of it landed. Its worktrees are kept for inspection.`
+        : `Task "${task.title}" passed, but git could not integrate its work${why}. Its worktree is kept for inspection.`);
     }
   }
 
@@ -1406,20 +1441,22 @@ export class TaskOrchestrator {
   }
 
   /**
-   * The plan's run carries on while anything has landed on its integration
-   * branch: a resumed plan's dependents must start from a tip that holds their
-   * predecessors' work, and a fresh branch from the checked-out commit does not.
+   * The plan's run carries on while it still has any record: anything landed
+   * means a resumed plan's dependents must start from a tip that holds their
+   * predecessors' work, and anything held — a kept attempt, a conflict, a
+   * repair — is work the user may still want, which a fresh run's mint would
+   * delete. Only a run with no records at all is superseded.
    */
   private continuableRun(root: string): IsolationRun | null {
     const run = this.isolationRun;
-    return run && run.workspaceRoot === root && Object.values(run.tasks).some((r) => r.status === 'merged') ? run : null;
+    return run && run.workspaceRoot === root && Object.values(run.tasks).some((r) => r.status !== 'active') ? run : null;
   }
 
   /**
-   * A run with nothing landed holds only superseded attempts, so it goes whole.
-   * One that cannot be continued for another reason — it ran from a different
-   * workspace path — keeps its integration branch in each repo that has not
-   * merged it: only the user gives landed work up.
+   * A run with no records at all holds only superseded attempts, so it goes
+   * whole. One that cannot be continued for another reason — it ran from a
+   * different workspace path — keeps its integration branch in each repo that
+   * has not merged it: only the user gives landed work up.
    */
   private async mintRun(root: string): Promise<void> {
     const previous = this.isolationRun;

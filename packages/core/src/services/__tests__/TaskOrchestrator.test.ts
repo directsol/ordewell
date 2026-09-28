@@ -472,6 +472,89 @@ describe('TaskOrchestrator', () => {
       expect(failedTask).toBeDefined();
       expect(failedTask!.status).toBe('failed');
     });
+
+    it('completes a task whose marker was seen even when a usage limit then kills the runner', async () => {
+      const { sessions, spawn } = sessionRunner();
+      const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
+      orchestrator.setWorkspaceRoot(() => '/repo');
+
+      const task = createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' });
+
+      orchestrator.loadPlan([task]);
+      await orchestrator.forceStartTask('t1');
+
+      sessions[0].emitOutput('<<<ORDEWELL_DONE_mk-1>>>\nClaude usage limit reached. Your limit will reset at 5pm.');
+      sessions[0].emitExit(1);
+      await new Promise(r => setTimeout(r, 10));
+
+      const finished = orchestrator.storeInstance.get('t1');
+      expect(finished!.status).toBe('completed');
+      expect(finished!.verdict!.outcome).toBe('pass');
+      expect(finished!.verdict!.reason).toMatch(/completion marker/);
+    });
+
+    it('pauses a runner that stopped on a usage limit before its marker, instead of failing the task', async () => {
+      const { sessions, spawn } = sessionRunner();
+      const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
+      orchestrator.setWorkspaceRoot(() => '/repo');
+
+      const task = createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' });
+
+      orchestrator.loadPlan([task]);
+      await orchestrator.forceStartTask('t1');
+
+      sessions[0].emitOutput('Claude usage limit reached. Your limit will reset at 5pm.');
+      sessions[0].emitExit(1);
+      await new Promise(r => setTimeout(r, 10));
+
+      const paused = orchestrator.storeInstance.get('t1');
+      expect(paused!.status).toBe('awaiting_user');
+      expect(paused!.verdict!.outcome).toBe('fail');
+    });
+
+    it('pauses the run on a usage limit and resumes it when the task is retried', async () => {
+      const { sessions, spawn } = sessionRunner();
+      const orchestrator = makeOrchestrator({ terminalRunner: { spawn }, config: { maxParallelSessions: 1 } });
+      orchestrator.setWorkspaceRoot(() => '/repo');
+
+      orchestrator.loadPlan([
+        createTask({ id: 't1', order: 1, title: 'First', prompt: 'do first', completionMarker: 'mk-1' }),
+        createTask({ id: 't2', order: 2, title: 'Second', prompt: 'do second', completionMarker: 'mk-2' }),
+      ]);
+      await orchestrator.approveReview();
+
+      sessions[0].emitOutput('You have hit your usage limit. The limit will reset at 5pm.');
+      sessions[0].emitExit(1);
+      await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
+
+      // No second task is launched into the exhausted limit.
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(orchestrator.status).toBe('approved');
+
+      await orchestrator.retryTask('t1');
+      expect(spawn).toHaveBeenCalledTimes(2);
+
+      sessions[1].emitOutput('<<<ORDEWELL_DONE_mk-1>>>');
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(3));
+      expect(spawn.mock.calls[2][0].taskId).toBe('t2');
+    });
+
+    it('leaves a task without a marker failed when its exit names no limit', async () => {
+      const { sessions, spawn } = sessionRunner();
+      const orchestrator = makeOrchestrator({ terminalRunner: { spawn } });
+      orchestrator.setWorkspaceRoot(() => '/repo');
+
+      const task = createTask({ id: 't1', order: 1, title: 'Test', prompt: 'do it', completionMarker: 'mk-1' });
+
+      orchestrator.loadPlan([task]);
+      await orchestrator.forceStartTask('t1');
+
+      sessions[0].emitOutput('compilation failed: unexpected token');
+      sessions[0].emitExit(1);
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(orchestrator.storeInstance.get('t1')!.status).toBe('failed');
+    });
   });
 
   describe('runTask', () => {

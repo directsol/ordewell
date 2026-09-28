@@ -12,6 +12,7 @@ import type {
   IsolationMergeBlockReason,
   IsolationMergeResult,
   IsolationOutcome,
+  IsolationPruneResult,
   IsolationRepo,
   IsolationRun,
   IsolationTaskRecord,
@@ -574,21 +575,66 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     });
   }
 
-  pruneOrphans(run: IsolationRun): Promise<void> {
+  pruneOrphans(run: IsolationRun): Promise<IsolationPruneResult> {
     return this.admin(run.workspaceRoot, async () => {
       // A half-finished merge from a crash is easier to drop than to repair;
       // the branch refs are the only state that matters. What a landing had
       // merged goes back too, since the run was saved as not having it.
       await this.removeIntegrationWorktrees(run);
       await this.settleLanding(run);
+      const kept: IsolationPruneResult['kept'] = [];
       for (const record of Object.values(run.tasks)) {
-        if (record.status === 'active') await this.removeTask(run, record, { dropRecord: true });
-        else if (record.status === 'merged') await this.removeTask(run, record, { dropRecord: false });
+        if (record.status === 'active') {
+          // Adopting a plan is not proof its runner died: another host may
+          // have adopted the same record mid-run. Deleting an active worktree
+          // that still holds work would take the runner's commits and edits
+          // with it, so it is kept exactly as an interrupted attempt's is.
+          if (await this.holdsUnlandedWork(run, record)) {
+            record.status = 'kept';
+            kept.push({ taskId: record.taskId, order: record.order, title: record.title });
+          } else {
+            await this.removeTask(run, record, { dropRecord: true });
+          }
+        } else if (record.status === 'merged') await this.removeTask(run, record, { dropRecord: false });
         // The work a repair was given is committed on the branch; only the attempt died.
         else if (record.status === 'repairing') settleStatus(record, 'conflict');
       }
       await this.removeUnowned(run);
       for (const repo of run.repos) await this.tryGit(repo.root, ['worktree', 'prune']);
+      return { kept };
+    });
+  }
+
+  /**
+   * Whether an attempt record still holds work nobody else has: commits its
+   * branch carries that the integration branch does not, or edits in its
+   * worktree. Only an attempt that left neither behind is safe to prune.
+   */
+  private async holdsUnlandedWork(run: IsolationRun, record: IsolationTaskRecord): Promise<boolean> {
+    for (const repo of run.repos) {
+      const entry = record.repos[repo.path];
+      if (!entry) continue;
+      if (await this.brings(repo, record.branch)) return true;
+      if (await this.worktreeHasChanges(entry, await this.prefixOf(repo))) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Changes in a worktree, ignoring the artifacts Ordewell bootstrapped there
+   * so a prepared-but-untouched attempt still reads as empty. `prefix` is where
+   * the workspace sits in the repo, which is what the recorded link names are
+   * relative to. A worktree git cannot read is treated as holding work: it is
+   * out of sync, and deleting it is the one action that cannot be undone.
+   */
+  private async worktreeHasChanges(entry: IsolationTaskRepo, prefix: string): Promise<boolean> {
+    if (!fs.existsSync(entry.worktree)) return false;
+    const status = await this.tryGit(entry.worktree, ['status', '--porcelain', '-z']);
+    if (!status.ok) return true;
+    const linked = new Set(entry.linked);
+    return statusPaths(status.stdout).some((p) => {
+      const rel = (prefix && p.startsWith(prefix) ? p.slice(prefix.length) : p).replace(/\/+$/, '');
+      return !linked.has(rel) && !linked.has(rel.split('/')[0]);
     });
   }
 
@@ -789,10 +835,17 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     for (const repo of run.repos) {
       const entry = record.repos[repo.path];
       if (!entry) continue;
+      // Named before git is asked: a worktree removed under a running attempt
+      // fails every git call with the same opaque error, and the user needs to
+      // know the directory is gone, not that a command exited non-zero.
+      if (!fs.existsSync(entry.worktree)) {
+        return this.stopLanding(record, 'failed', repo, undefined, `its worktree is gone (${entry.worktree})`);
+      }
       try {
         await this.commitWorktree(repo, record, entry);
-      } catch {
-        return this.stopLanding(record, 'failed', repo);
+      } catch (err) {
+        const detail = firstLine(err instanceof Error ? err.message : String(err));
+        return this.stopLanding(record, 'failed', repo, undefined, `git could not commit its work (${detail})`);
       }
       // A resolver may have landed this branch already; what it changed stays recorded.
       if (await this.brings(repo, record.branch)) {
@@ -825,14 +878,17 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     settleStatus(record, 'merged');
     delete record.conflictRepo;
     delete record.conflictFiles;
+    delete record.landingError;
     // The work is on the integration branches already; a stuck cleanup must
     // not turn that into a failure. `pruneOrphans` sweeps up whatever it leaves.
     await this.admin(run.workspaceRoot, () => this.removeTask(run, record, { dropRecord: false })).catch(() => undefined);
     return 'merged';
   }
 
-  private stopLanding(record: IsolationTaskRecord, outcome: Exclude<IsolationOutcome, 'merged'>, repo?: IsolationRepo, files?: string[]): IsolationOutcome {
+  private stopLanding(record: IsolationTaskRecord, outcome: Exclude<IsolationOutcome, 'merged'>, repo?: IsolationRepo, files?: string[], error?: string): IsolationOutcome {
     settleStatus(record, outcome);
+    if (error) record.landingError = error;
+    else delete record.landingError;
     if (repo) record.conflictRepo = repo.path;
     else delete record.conflictRepo;
     if (files && files.length > 0) record.conflictFiles = files;

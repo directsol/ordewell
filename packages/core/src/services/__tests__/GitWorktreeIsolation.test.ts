@@ -425,6 +425,20 @@ describe.skipIf(!hasGit)('WorktreeIsolation integration queue', () => {
     const run = await iso.startRun(root);
     expect(await iso.integrate(task(1, 'Ghost'), run)).toBe('failed');
   });
+
+  it('names a missing worktree when a task that did its work can no longer be integrated', async () => {
+    const root = repo();
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const t = task(1, 'Vanished');
+    const { cwd } = await iso.prepare(t, run);
+    writeFileSync(join(cwd, 'work.txt'), 'the runner wrote this\n');
+    rmSync(cwd, { recursive: true, force: true });
+
+    expect(await iso.integrate(t, run)).toBe('failed');
+    expect(run.tasks['task-1'].landingError).toMatch(/worktree/i);
+    expect(run.tasks['task-1'].landingError).toContain(cwd);
+  });
 });
 
 describe.skipIf(!hasGit)('WorktreeIsolation conflicts', () => {
@@ -934,7 +948,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation.pruneOrphans', () => {
     const strayDir = join(root, '.ordewell', 'worktrees', run.id, '9-stray');
     git(root, 'worktree', 'add', '-q', '-b', `ordewell/${run.id}/9-stray`, strayDir, run.repos[0].integrationBranch);
 
-    await iso.pruneOrphans(run);
+    const result = await iso.pruneOrphans(run);
 
     const listed = worktreePaths(root);
     expect(listed).not.toContain(crashed.cwd);
@@ -944,6 +958,61 @@ describe.skipIf(!hasGit)('WorktreeIsolation.pruneOrphans', () => {
     expect(branches(root).sort()).toEqual([run.repos[0].integrationBranch, kept.branch, conflicted.branch].sort());
     expect(run.tasks['task-1']).toBeUndefined();
     expect(Object.keys(run.tasks).sort()).toEqual(['task-2', 'task-3']);
+    expect(result.kept).toEqual([]);
+  });
+
+  // A second host may adopt the same plan while this one's runner is still
+  // working. Pruning an `active` record as an orphan took the runner's commits
+  // with it; an attempt that still holds unlanded work is kept instead.
+  it('keeps an active worktree whose branch holds commits the integration branch does not', async () => {
+    const root = repo();
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const { cwd, branch } = await iso.prepare(task(1, 'Committed work'), run);
+    writeFileSync(join(cwd, 'work.txt'), 'precious\n');
+    git(cwd, 'add', 'work.txt');
+    git(cwd, 'commit', '-q', '-m', 'the runner committed');
+    const tip = git(root, 'rev-parse', branch);
+
+    const result = await iso.pruneOrphans(run);
+
+    expect(existsSync(join(cwd, 'work.txt'))).toBe(true);
+    expect(branches(root)).toContain(branch);
+    expect(git(root, 'rev-parse', branch)).toBe(tip);
+    expect(run.tasks['task-1'].status).toBe('kept');
+    expect(result.kept).toEqual([{ taskId: 'task-1', order: 1, title: 'Committed work' }]);
+  });
+
+  it('keeps an active worktree holding edits the runner had not committed yet', async () => {
+    const root = repo();
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const { cwd, branch } = await iso.prepare(task(1, 'Uncommitted work'), run);
+    writeFileSync(join(cwd, 'loose.txt'), 'still here\n');
+
+    const result = await iso.pruneOrphans(run);
+
+    expect(readFileSync(join(cwd, 'loose.txt'), 'utf8')).toBe('still here\n');
+    expect(branches(root)).toContain(branch);
+    expect(run.tasks['task-1'].status).toBe('kept');
+    expect(result.kept.map((k) => k.taskId)).toEqual(['task-1']);
+  });
+
+  it('does not mistake bootstrapped links for unlanded work', async () => {
+    const root = repo({ '.gitignore': 'node_modules/\n' });
+    mkdirSync(join(root, 'node_modules', 'left-pad'), { recursive: true });
+    writeFileSync(join(root, 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1;\n');
+    writeFileSync(join(root, '.envrc'), 'use flake\n');
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const { cwd } = await iso.prepare(task(1, 'Bootstrap only'), run);
+    expect(lstatSync(join(cwd, '.envrc')).isSymbolicLink()).toBe(true);
+
+    const result = await iso.pruneOrphans(run);
+
+    expect(existsSync(cwd)).toBe(false);
+    expect(run.tasks['task-1']).toBeUndefined();
+    expect(result.kept).toEqual([]);
   });
 
   it('forgets a worktree whose directory was deleted out from under git', async () => {
@@ -1733,7 +1802,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
         await create({ config: fakeConfig({ worktreeIsolation: true }) }).pruneOrphans(persisted);
       }
 
-      it('rolls back the repositories merged before the crash', async () => {
+      it('rolls back the repositories merged before the crash, keeping the task\'s own commit for a retry', async () => {
         const dir = trio();
         const { persisted, tips, workspace } = await crashDuringLanding(dir, {
           conflict: false,
@@ -1746,12 +1815,15 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
 
         for (const repo of ['api', 'db', 'web']) {
           expect(tip(dir, repo, persisted)).toBe(tips[repo]);
-          expect(worktreePaths(join(dir, repo))).toEqual([join(dir, repo)]);
-          expect(branches(join(dir, repo))).toEqual([integrationOf(persisted)]);
+          expect(worktreePaths(join(dir, repo))).toContain(join(workspace, repo));
+          expect(branches(join(dir, repo))).toContain(persisted.tasks['task-2'].branch);
         }
         expect(persisted.landing).toBeUndefined();
-        expect(persisted.tasks['task-2']).toBeUndefined();
-        expect(existsSync(workspace)).toBe(false);
+        // The rolled-back commits are still on the task's own branch. It is
+        // kept rather than deleted: a retry can land them, a red X cannot.
+        expect(persisted.tasks['task-2'].status).toBe('kept');
+        expect(git(join(dir, 'api'), 'log', '--format=%s', persisted.tasks['task-2'].branch)).toContain('Edit all');
+        expect(existsSync(workspace)).toBe(true);
       });
 
       it('finishes a rollback the crash cut short, leaving no repository half-rolled-back', async () => {
@@ -2038,7 +2110,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
       const strayDir = join(dir, '.ordewell', 'worktrees', run.id, '9-stray');
       git(join(dir, 'web'), 'worktree', 'add', '-q', '-b', `ordewell/${run.id}/9-stray`, join(strayDir, 'web'), run.repos[2].integrationBranch);
 
-      await iso.pruneOrphans(run);
+      const result = await iso.pruneOrphans(run);
 
       expect(existsSync(crashed.cwd)).toBe(false);
       expect(existsSync(strayDir)).toBe(false);
@@ -2049,6 +2121,22 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
       expect(readFileSync(join(dir, 'NOTES.md'), 'utf8')).toBe('notes\n');
       expect(readFileSync(join(dir, 'design', 'mock.txt'), 'utf8')).toBe('mock\n');
       expect(Object.keys(run.tasks)).toEqual(['task-2']);
+      expect(result.kept).toEqual([]);
+    });
+
+    it('keeps an active task workspace in every repository where it holds unlanded work', async () => {
+      const dir = group();
+      const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+      const run = await iso.startRun(dir);
+      const working = await iso.prepare(task(1, 'Still running'), run);
+      writeFileSync(join(working.cwd, 'web', 'in-flight.txt'), 'not committed yet\n');
+
+      const result = await iso.pruneOrphans(run);
+
+      expect(existsSync(join(working.cwd, 'web', 'in-flight.txt'))).toBe(true);
+      expect(branches(join(dir, 'web'))).toContain(working.branch);
+      expect(run.tasks['task-1'].status).toBe('kept');
+      expect(result.kept).toEqual([{ taskId: 'task-1', order: 1, title: 'Still running' }]);
     });
 
     it('discard leaves no trace in any repository', async () => {
