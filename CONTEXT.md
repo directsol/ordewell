@@ -343,10 +343,10 @@ duplication is exactly what this module deleted.
 task, from the moment the scheduler claims it to the moment it ends. It holds
 everything that has to die with the run: the attempt number, the phase
 (`starting` while the async spawn is in flight, `running` once the runner is
-up, `integrating` while a passed verdict's worktree merges), the live
+up, `integrating` while *Landing* settles its verdict), the live
 `ITerminalSession`, and the runner, working directory and start
 time the transcript reader needs at verdict time — plus, in an isolated run,
-whether that directory is its worktree and the merge in flight. The orchestrator keeps one
+whether that directory is its worktree and the landing in flight. The orchestrator keeps one
 `Map<taskId, TaskAttempt>`, and every way a run ends — verdict, cancel, release,
 mark complete, retry, a failed spawn, stop, plan load — goes through the one
 `endAttempt`, which also clears the verifier state an interrupted run leaves
@@ -483,7 +483,17 @@ that one merge; a tip that has moved otherwise is left alone and the landing
 stays recorded, which blocks further landings and *Merge all* (`partial-landing`)
 rather than building on part of a task. `merged` always means the whole task
 landed, and a dependent starts only then. `conflictRepo` names the repo that
-stopped it.
+stopped it. A landing that does not go through never fails the task and never
+halts the run: a conflict gets a *conflict repair* or waits on the user, and
+one git refuses (`failed`) leaves the task `awaiting_user` with its verdict,
+worktree and branch kept (ADR-0013, update of 2026-09-28).
+The `Landing` module (`services/Landing.ts`) owns it, and conflict repair,
+between the scheduler and the *isolation run controller*: given a passed
+attempt it lands through the controller and answers `landed`,
+`nothing-to-land`, `repair-needed` or `awaiting_user` (`conflict`,
+`landing-failed`, `repair-failed`) with the words the user is told. It never
+marks a task, starts an attempt or emits — TaskOrchestrator applies the answer.
+It also builds the task `resolveConflictAsTask` adds (`conflictResolverTask`).
 *Avoid:* "merge" for the whole of it — a landing is one merge per changed repo;
 "rollback" for anything done to a user's branch — Ordewell never resets one.
 
@@ -561,9 +571,10 @@ controller*.
 TaskOrchestrator and `WorktreeIsolation` that owns an *isolation run*'s
 lifecycle: deciding at a run's start whether it isolates, shares the workspace
 root or is a *blocked run*; continuing a plan's run or minting a new one; each
-attempt's working directory; releasing a worktree once any merge in flight
-settles; closing the run with its *isolation handoff*; and Merge all, clean-up
-and discard afterwards. It holds the run record, the open run's mode, the
+attempt's working directory; a task's integration and a repair's evidence
+check, with the record reported changed before the first merge; releasing a
+worktree once any landing in flight settles; closing the run with its
+*isolation handoff*; and Merge all, clean-up and discard afterwards. It holds the run record, the open run's mode, the
 parked start of a blocked run and the resolver links, and reports through a
 listener (changed, blocked, handoff, notice, worktrees about to go) — it never
 emits orchestrator events or schedules work itself. A blocked start is handed

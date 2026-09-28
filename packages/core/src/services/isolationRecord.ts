@@ -41,13 +41,18 @@ const ISOLATION_STATE: Record<IsolationTaskStatus, Exclude<TaskIsolation['state'
   failed: 'kept',
 };
 
+/** Paths of the repos a task brought commits to. */
+export function changedReposOf(record: IsolationTaskRecord): string[] {
+  return Object.entries(record.repos).filter(([, r]) => r.changed).map(([repoPath]) => repoPath);
+}
+
 /** `repairLimit` is `conflictRepairAttempts` as it stands now, which is what the next repair will be held to. */
 export function taskIsolationOf(record: IsolationTaskRecord, repairLimit: number): TaskIsolation {
   return {
     state: ISOLATION_STATE[record.status],
     branch: record.branch,
     worktree: record.workspace,
-    repos: Object.entries(record.repos).filter(([, r]) => r.changed).map(([repoPath]) => repoPath),
+    repos: changedReposOf(record),
     ...(record.conflictRepo ? { conflictRepo: record.conflictRepo } : {}),
     ...(record.conflictFiles?.length ? { conflictFiles: record.conflictFiles } : {}),
     ...(record.repairs ? { repair: { attempt: record.repairs, limit: repairLimit } } : {}),

@@ -225,6 +225,47 @@ describe('IsolationRunController', () => {
     });
   });
 
+  describe('integrate', () => {
+    it('reports the record changed before the merge and again once it settles', async () => {
+      const { runs, isolation, listener } = setup();
+      await runs.open(async () => undefined);
+      const t1 = task('t1', 1);
+      await runs.attemptCwd(t1, { repair: false });
+      const release = isolation.holdIntegration('t1');
+      vi.mocked(listener.changed).mockClear();
+
+      const landing = runs.integrate(t1);
+      await vi.waitFor(() => expect(listener.changed).toHaveBeenCalledTimes(1));
+      expect(runs.current?.landing?.taskId).toBe('t1');
+      release();
+
+      expect(await landing).toBe('merged');
+      expect(listener.changed).toHaveBeenCalledTimes(2);
+    });
+
+    it('answers failed, never a throw, when git errors or there is no run', async () => {
+      const { runs, isolation } = setup();
+      const t1 = task('t1', 1);
+      expect(await runs.integrate(t1)).toBe('failed');
+
+      await runs.open(async () => undefined);
+      await runs.attemptCwd(t1, { repair: false });
+      vi.spyOn(isolation, 'integrate').mockRejectedValueOnce(new Error('hook failed'));
+      expect(await runs.integrate(t1)).toBe('failed');
+    });
+
+    it('counts a repair git cannot check against it, in the repo that conflicted', async () => {
+      const { runs, isolation } = setup();
+      await runs.open(async () => undefined);
+      const t1 = task('t1', 1);
+      await runs.attemptCwd(t1, { repair: false });
+      runs.current!.tasks.t1.conflictRepo = 'api';
+      vi.spyOn(isolation, 'verifyRepair').mockRejectedValueOnce(new Error('git died'));
+
+      expect(await runs.verifyRepair(t1)).toEqual({ ok: false, reason: 'failed', repo: 'api' });
+    });
+  });
+
   describe('release', () => {
     it('removes a worktree the task no longer needs, after whatever runs in it', async () => {
       const { runs, isolation, listener } = setup();
