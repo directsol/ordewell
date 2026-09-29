@@ -351,6 +351,32 @@ OpenCode, or a plugin) that runs *one task* in its own session. Identity and
 invocation flow through the `RunnerRegistry` + manifest engine.
 *Avoid:* "backend", "provider" (provider means the LLM vendor, below).
 
+**Transport** (`runnerTransport: terminal | structured`) — how Ordewell drives
+a task's runner (ADR-0018). *Terminal*: a TUI in tmux, or a headless one-shot
+process, read through its screen and written to with keystrokes (ADR-0007).
+*Structured*: the runner's programmatic protocol, with events in and messages
+out. An opt-in, experimental setting, default `terminal`, copied onto the plan
+when a run starts, so a change applies from the next run. Routed per task by
+connector availability: a runner with no task-mode connector runs on the
+terminal transport, and surfaces say so and why.
+*Avoid:* "mode" (that is permission mode, ADR-0001), "backend", "provider".
+
+**Waiting for input** — a structured task whose turn ended without the done
+marker: `awaiting_user` with a saved reason, `input | checkpoint | conflict`
+(a checkpoint wins over input). No verdict and no automatic nudge; the user
+answers or marks the task complete. A pending runner approval is *not* waiting
+for input — it arrives mid-turn, leaves the status alone, and "waiting for
+approval" is derived from the task's pending approvals.
+*Avoid:* "idle" (a silence guess, and its timer still runs during a turn),
+"paused", "blocked" (a dependency term).
+
+**Continue** — a retry of a completed or failed structured task that resumes
+its saved Claude session (`--resume`) with the user's message as the next turn.
+It is verified and landed like any attempt, is not offered on conflicts, and
+leaves dependents alone, as retry does.
+*Avoid:* "resume" for the user action (that is the protocol flag), and "retry"
+for it — a retry starts a fresh attempt with no message.
+
 **Spawn toolkit** — the pure OS/shell policy behind the runner adapters
 (`core/src/utils/shell.ts`): ANSI stripping (`stripAnsi`), POSIX/PowerShell
 quoting, the login-shell invocation (`buildShellInvocation`), and the
