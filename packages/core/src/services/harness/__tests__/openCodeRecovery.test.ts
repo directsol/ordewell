@@ -29,7 +29,7 @@ function fakeFetch(routes: Record<string, Handler>): { fetch: typeof globalThis.
 
 async function startAdapter(deps: AgentProcessDeps, spawned: ReturnType<typeof fakeSpawn>, resume?: string) {
   const adapter = new OpenCodeAdapter(deps);
-  const started = adapter.start({ cwd: '/repo', systemPrompt: 'plan read-only', ...(resume ? { resumeSessionId: resume } : {}) });
+  const started = adapter.start({ kind: 'planner', cwd: '/repo', systemPrompt: 'plan read-only', ...(resume ? { resumeSessionId: resume } : {}) });
   for (let i = 0; i < 50 && spawned.processes.length === 0; i++) await Promise.resolve();
   spawned.processes[0].emitStdout('opencode server listening on http://127.0.0.1:4096\n');
   await started;

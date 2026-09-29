@@ -1,3 +1,5 @@
+import type { AgentEvent } from '../services/harness/AgentAdapter';
+
 export interface ITerminalSession {
   id: string;
   taskId: string;
@@ -20,6 +22,58 @@ export interface ITerminalSession {
    * (a plain piped subprocess); surfaces must feature-detect before calling.
    */
   writeControl?(text: string): void;
+}
+
+/** How a structured turn ended. `failed` carries the agent's own words in the preceding `error` event. */
+export type StructuredTurnEnd = 'completed' | 'interrupted' | 'failed';
+
+/**
+ * One normalized event from a structured task (ADR-0018, O1b): the adapter's
+ * events, with the turn made explicit at both ends. Subagent work carries its
+ * `subagentId`. The source for the full-fidelity task log, never for verdicts.
+ */
+export type StructuredEvent =
+  | Exclude<AgentEvent, { type: 'turn_end' }>
+  | { type: 'turn_start'; text: string }
+  | { type: 'turn_end'; reason: StructuredTurnEnd };
+
+export interface QueuedTaskMessage {
+  id: string;
+  text: string;
+}
+
+/**
+ * What a session driven over its runner's protocol can do that a terminal
+ * cannot (ADR-0018, S2). Optional: callers feature-detect it with
+ * {@link isStructuredSession}, and code that does not look behaves as it did.
+ */
+export interface StructuredSessionCapability {
+  readonly transport: 'structured';
+  /** `working` while a turn runs; `idle` between turns, waiting for a message. */
+  turnState(): 'working' | 'idle';
+  onTurnEnd(listener: (reason: StructuredTurnEnd) => void): void;
+  onEvent(listener: (event: StructuredEvent) => void): void;
+  /**
+   * Queue a user message, delivered when the current turn ends — or at once
+   * when idle. Returns its id, for {@link removeQueued}.
+   */
+  sendMessage(text: string): string;
+  /** Take a message back before it is delivered. False when it already was. */
+  removeQueued(id: string): boolean;
+  /** Messages waiting for the current turn to end, oldest first. */
+  queued(): QueuedTaskMessage[];
+  /**
+   * Stop the running turn, keeping the session: a soft interrupt first, then —
+   * if the runner does not answer in time — kill and resume. Either way the
+   * turn ends `interrupted`. Resolves once it has.
+   */
+  interrupt(): Promise<void>;
+  /** The runner's own session id once announced — what a continue resumes (ADR-0018, K1). */
+  nativeSessionId(): string | null;
+}
+
+export function isStructuredSession(session: ITerminalSession): session is ITerminalSession & StructuredSessionCapability {
+  return (session as Partial<StructuredSessionCapability>).transport === 'structured';
 }
 
 import type { RunnerRegistry } from '../plugins/RunnerRegistry';

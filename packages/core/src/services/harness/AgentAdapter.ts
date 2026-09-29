@@ -49,11 +49,14 @@ export type AgentEvent =
   | { type: 'subagent_started'; subagentId: string; brief: string; model?: string }
   | { type: 'subagent_finished'; subagentId: string; outcome: SubagentOutcome; digest: string }
   /**
-   * The agent asked to do something its read-only mode does not cover. Always
-   * auto-denied (T1) — a planner that can mutate is not a planner. The adapter
-   * is responsible for answering the agent so the turn does not hang.
+   * The agent asked to do something its mode does not cover. A planner always
+   * auto-denies it (T1) — a planner that can mutate is not a planner. The
+   * adapter is responsible for answering the agent so the turn does not hang.
+   *
+   * `input` and `suggestions` are the raw request, carried so a task-mode
+   * caller can later offer the agent's own answers (ADR-0018, A1).
    */
-  | { type: 'permission_request'; id: string; name: string; detail: string }
+  | { type: 'permission_request'; id: string; name: string; detail: string; input?: Record<string, unknown>; suggestions?: unknown[]; toolUseId?: string }
   /**
    * The agent delegated work to a subagent it left running in the background,
    * and may end its turn before that work reports. Ordewell's conversation is
@@ -62,33 +65,83 @@ export type AgentEvent =
    * Naming the launch is what lets the service ask for the results in time.
    */
   | { type: 'background_agent'; id: string }
-  /** The agent finished its turn and is waiting for the next user message. */
-  | { type: 'turn_end' }
+  /**
+   * The agent finished its turn and is waiting for the next user message.
+   * `interrupted` marks a turn cut short by {@link TaskModeAgentAdapter.interrupt}
+   * rather than one the agent chose to end.
+   */
+  | { type: 'turn_end'; interrupted?: boolean }
   /** The turn failed. Carries the agent's own words — never a Ordewell paraphrase. */
   | { type: 'error'; message: string };
 
-export interface AgentStartOptions {
-  /** Workspace root. The agent explores from here and, in read-only mode, cannot leave it. */
+interface AgentStartCommon {
+  /** Workspace root. The agent works from here and, in read-only mode, cannot leave it. */
   cwd: string;
-  /** The planner system prompt, in its harness variant. */
-  systemPrompt: string;
   /** Model id from the runner's own discovery catalog. Omitted means the agent's default. */
   model?: string;
-  /** Variant / reasoning effort id from that model's `variants` list. */
-  effort?: string;
   /**
-   * The agent's own session id from a previous run. A hint only: Ordewell's
-   * transcript is the source of truth (T4), so a failed resume degrades to a
-   * fresh session seeded from the stored history rather than an error.
+   * The agent's own session id from a previous run. For the planner a hint
+   * only: Ordewell's transcript is the source of truth (T4), so a failed resume
+   * degrades to a fresh session seeded from the stored history, not an error.
    */
   resumeSessionId?: string;
+}
+
+/** The read-only planner (ADR-0008/0009). The only start `CliAgentAiService` can express. */
+export interface PlannerStartOptions extends AgentStartCommon {
+  kind: 'planner';
+  /** The planner system prompt, in its harness variant. */
+  systemPrompt: string;
+  /** Variant / reasoning effort id from that model's `variants` list. */
+  effort?: string;
+}
+
+/**
+ * What a runner manifest says the task's mode and effort mean (ADR-0001),
+ * resolved by the same code terminal tasks use — see `resolveTaskRunnerFlags`.
+ * The adapter adds only its protocol flags around these.
+ */
+export interface TaskRunnerFlags {
+  /** The runner's own permission-mode value for the task's mode. */
+  permissionMode: string;
+  /** Thinking/effort arguments, already split into argv entries. */
+  effortArgs: string[];
+}
+
+/** A plan task driven over the runner's programmatic protocol (ADR-0018, C1). */
+export interface TaskStartOptions extends AgentStartCommon {
+  kind: 'task';
+  /** The task's runner mode id, as the plan names it. */
+  mode: string;
+  flags: TaskRunnerFlags;
+}
+
+/**
+ * The explicit start switch. Discriminated so that a read-only planner and a
+ * mutating task can never be confused by a missing field: every caller names
+ * which one it is starting.
+ */
+export type AgentStartOptions = PlannerStartOptions | TaskStartOptions;
+
+/** A runner asked to start in task mode that has no task-mode connector yet. */
+export class TaskModeUnsupportedError extends Error {
+  constructor(readonly runner: string) {
+    super(`${runner} has no structured task connector yet; its tasks run on the terminal transport.`);
+    this.name = 'TaskModeUnsupportedError';
+  }
+}
+
+/** Narrow a start to the planner, refusing task mode for adapters that only plan. */
+export function plannerOnly(runner: string, opts: AgentStartOptions): PlannerStartOptions {
+  if (opts.kind !== 'planner') throw new TaskModeUnsupportedError(runner);
+  return opts;
 }
 
 export interface AgentAdapter {
   /** The runner id this adapter drives — `claude-code`, `codex`, `opencode`. */
   readonly agentId: string;
 
-  /** Spawn the agent in its read-only mode and get it ready to receive messages. */
+  /** Spawn the agent — read-only for a planner, in the task's mode for a task — ready to receive messages. */
   start(opts: AgentStartOptions): Promise<void>;
 
   /**
@@ -111,6 +164,19 @@ export interface AgentAdapter {
 
   /** Kill the process and release its resources. Idempotent. */
   dispose(): void;
+}
+
+/** What an adapter adds to run a task rather than a planner (ADR-0018). */
+export interface TaskModeAgentAdapter extends AgentAdapter {
+  /**
+   * Ask the running turn to stop, keeping the process and its session. Resolves
+   * true once the agent acknowledged it; the turn then ends with
+   * `turn_end { interrupted: true }`. False means the agent did not answer
+   * within `timeoutMs`, and the caller must fall back to killing it.
+   */
+  interrupt(timeoutMs: number): Promise<boolean>;
+  /** Registers a listener for the process ending, for any reason. Fires at most once. */
+  onProcessExit(listener: (code: number) => void): void;
 }
 
 /**

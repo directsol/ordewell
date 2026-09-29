@@ -42,7 +42,7 @@ async function replay(name: string): Promise<AgentEvent[]> {
   const spawned = fakeSpawn([]);
   const deps: AgentProcessDeps = { spawn: spawned.spawn, fetch: fetchImpl, resolvePath: async () => '/usr/bin', isDirectory: () => true, exists: () => true };
   const adapter = new OpenCodeAdapter(deps);
-  const started = adapter.start({ cwd: '/repo', systemPrompt: 'plan read-only' });
+  const started = adapter.start({ kind: 'planner', cwd: '/repo', systemPrompt: 'plan read-only' });
   for (let i = 0; i < 50 && spawned.processes.length === 0; i++) await Promise.resolve();
   spawned.processes[0].emitStdout('opencode server listening on http://127.0.0.1:4096\n');
   await started;

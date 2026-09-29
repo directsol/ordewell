@@ -1,0 +1,405 @@
+import { EventEmitter } from 'events';
+import { spawn as nodeSpawn } from 'child_process';
+import type {
+  ITerminalSession,
+  QueuedTaskMessage,
+  StructuredEvent,
+  StructuredSessionCapability,
+  StructuredTurnEnd,
+} from '../interfaces/ITerminalRunner';
+import type { ResearchToolType } from '../models/Task';
+import { resolveTaskRunnerFlags } from '../plugins/resolveArgs';
+import { AbstractRunner, AbstractTerminalSession, type RunnerSpawnOptions } from './AbstractRunner';
+import type { AgentEvent, AgentProcessDeps, TaskModeAgentAdapter, TaskStartOptions } from './harness/AgentAdapter';
+import { mapAgentTool, normalizeAgentArgs } from './harness/agentTools';
+import { createTaskAdapter } from './harness/taskAdapters';
+
+/** How long a soft interrupt may take before the runner is killed and resumed instead. */
+const DEFAULT_INTERRUPT_GRACE_MS = 5000;
+const TOOL_ARG_MAX_CHARS = 120;
+
+export interface StructuredRunnerDeps {
+  /** The OS boundary the adapters spawn through. `workspaceEnv` is always the spawn's own `env`. */
+  process?: Partial<Omit<AgentProcessDeps, 'workspaceEnv'>>;
+  /** Overrides adapter construction; production picks by runner id and refuses runners without a connector. */
+  createAdapter?: (runner: string, deps: AgentProcessDeps) => TaskModeAgentAdapter;
+  interruptGraceMs?: number;
+}
+
+export type StructuredSpawnOptions = RunnerSpawnOptions & {
+  /** The runner's own session to continue in (ADR-0018, K1). */
+  resumeSessionId?: string;
+};
+
+/** The argument that says what a tool call is about: the command, the file, the pattern. */
+const KEY_ARGS: Partial<Record<ResearchToolType, string>> = {
+  bash: 'command',
+  read_file: 'path',
+  list_dir: 'path',
+  grep: 'pattern',
+  glob: 'pattern',
+  fetch: 'url',
+  web_search: 'query',
+};
+/** For tools with no Ordewell equivalent, the conventional fields in the order they tend to be most telling. */
+const FALLBACK_KEY_ARGS = ['file_path', 'path', 'notebook_path', 'description', 'pattern', 'command', 'url', 'query', 'prompt'];
+
+function toolLine(name: string, args: Record<string, unknown>): string {
+  const { tool } = mapAgentTool(name);
+  const normalized = normalizeAgentArgs(tool, args);
+  const preferred = KEY_ARGS[tool];
+  for (const key of preferred ? [preferred, ...FALLBACK_KEY_ARGS] : FALLBACK_KEY_ARGS) {
+    const value = normalized[key];
+    if (typeof value !== 'string') continue;
+    const oneLine = value.replace(/\s+/g, ' ').trim();
+    if (!oneLine) continue;
+    const shown = oneLine.length > TOOL_ARG_MAX_CHARS ? `${oneLine.slice(0, TOOL_ARG_MAX_CHARS)}…` : oneLine;
+    return `› ${name}(${shown})`;
+  }
+  return `› ${name}`;
+}
+
+/**
+ * The plain-text channel (ADR-0018, O1a): what `VerdictEngine`, the planner's
+ * live read and the fallback summary see. Deliberately lossy — no JSON, no
+ * ANSI, subagents left out.
+ *
+ * Deltas are held back until a line completes or their block ends, so a
+ * marker streamed as `<<<ORDE` + `WELL_DONE…` is written as one piece: a
+ * reader scanning each chunk still sees it whole.
+ */
+class PlainTextChannel {
+  private pending = '';
+  /** What this text block has already written from its deltas. */
+  private streamed = '';
+  private atLineStart = true;
+
+  constructor(private readonly write: (text: string) => void) {}
+
+  delta(text: string): void {
+    this.pending += text;
+    const newline = this.pending.lastIndexOf('\n');
+    if (newline < 0) return;
+    const complete = this.pending.slice(0, newline + 1);
+    this.pending = this.pending.slice(newline + 1);
+    this.streamed += complete;
+    this.out(complete);
+  }
+
+  /** A text block's authoritative copy, which supersedes its deltas. */
+  block(text: string): void {
+    const streamed = this.streamed;
+    this.pending = '';
+    this.streamed = '';
+    // Anything else means the deltas and the block disagree; the block wins,
+    // even at the cost of repeating text — evidence is never dropped.
+    this.out(text.startsWith(streamed) ? text.slice(streamed.length) : text);
+  }
+
+  line(text: string): void {
+    this.flush();
+    if (!this.atLineStart) this.out('\n');
+    this.out(`${text}\n`);
+  }
+
+  endTurn(): void {
+    this.flush();
+    this.streamed = '';
+    if (!this.atLineStart) this.out('\n');
+  }
+
+  private flush(): void {
+    if (!this.pending) return;
+    this.streamed += this.pending;
+    this.out(this.pending);
+    this.pending = '';
+  }
+
+  private out(text: string): void {
+    if (!text) return;
+    this.atLineStart = text.endsWith('\n');
+    this.write(text);
+  }
+}
+
+interface SessionLaunch {
+  runner: string;
+  deps: AgentProcessDeps;
+  createAdapter: (runner: string, deps: AgentProcessDeps) => TaskModeAgentAdapter;
+  startOptions: TaskStartOptions;
+  interruptGraceMs: number;
+}
+
+/**
+ * One task driven over its runner's programmatic protocol (ADR-0018). It *is*
+ * an `ITerminalSession`, so everything downstream of `onOutput` is unchanged;
+ * what a terminal cannot do sits on {@link StructuredSessionCapability}.
+ *
+ * Ordewell owns the message queue (M1): a message sent mid-turn waits for the
+ * turn to end rather than being typed into a runner that is busy.
+ */
+export class StructuredSession extends AbstractTerminalSession implements StructuredSessionCapability {
+  readonly transport = 'structured' as const;
+
+  private adapter: TaskModeAgentAdapter | null = null;
+  private adapterStarted = false;
+  /** Bumped whenever the adapter is replaced, so the old one's late events and exit are ignored. */
+  private generation = 0;
+  private output = '';
+  private readonly text: PlainTextChannel;
+  private state: 'working' | 'idle' = 'idle';
+  private turn: { id: number; abort: AbortController; ended: boolean } | null = null;
+  private turnCount = 0;
+  private queue: QueuedTaskMessage[] = [];
+  private messageCount = 0;
+  private interrupting: Promise<void> | null = null;
+  private lastSessionId: string | null = null;
+  private readonly structuredEmitter = new EventEmitter();
+
+  constructor(id: string, taskId: string, private readonly launch: SessionLaunch) {
+    super(id, taskId);
+    this.text = new PlainTextChannel((text) => {
+      this.output += text;
+      this.outputEmitter.emit('output', text);
+    });
+  }
+
+  /** Start the runner and send the task's prompt as its first turn. */
+  async start(prompt: string): Promise<void> {
+    await this.startAdapter(this.launch.startOptions);
+    // Callers attach their listeners once `spawn` resolves, so the first turn
+    // waits for that or its opening events reach nobody. Working already, so
+    // a message sent in the meantime queues behind the prompt.
+    this.state = 'working';
+    setImmediate(() => { if (!this.exited) this.deliver(prompt); });
+  }
+
+  getOutput(): string { return this.output; }
+
+  /** A reply typed at the task — a checkpoint answer, most often — is a user message. */
+  write(text: string): void {
+    const message = text.trim();
+    if (message) this.sendMessage(message);
+  }
+
+  kill(): void {
+    if (this.exited) return;
+    const adapter = this.adapter;
+    this.generation += 1;
+    this.turn?.abort.abort();
+    // An adapter still starting has no process yet to kill; `startAdapter`
+    // disposes it once it has one.
+    if (adapter && this.adapterStarted) adapter.dispose();
+    this.baseHandleExit(-1);
+  }
+
+  turnState(): 'working' | 'idle' { return this.state; }
+
+  onTurnEnd(listener: (reason: StructuredTurnEnd) => void): void {
+    this.structuredEmitter.on('turnEnd', listener);
+  }
+
+  onEvent(listener: (event: StructuredEvent) => void): void {
+    this.structuredEmitter.on('event', listener);
+  }
+
+  sendMessage(text: string): string {
+    this.messageCount += 1;
+    const id = `msg-${this.messageCount}`;
+    if (this.state === 'idle' && this.adapterStarted && !this.exited) this.deliver(text);
+    else this.queue.push({ id, text });
+    return id;
+  }
+
+  removeQueued(id: string): boolean {
+    const before = this.queue.length;
+    this.queue = this.queue.filter((m) => m.id !== id);
+    return this.queue.length < before;
+  }
+
+  queued(): QueuedTaskMessage[] { return this.queue.map((m) => ({ ...m })); }
+
+  nativeSessionId(): string | null {
+    return this.adapter?.nativeSessionId() ?? this.lastSessionId;
+  }
+
+  interrupt(): Promise<void> {
+    if (this.interrupting) return this.interrupting;
+    const turn = this.turn;
+    const adapter = this.adapter;
+    if (!turn || turn.ended || !adapter) return Promise.resolve();
+    this.interrupting = this.interruptTurn(turn, adapter).finally(() => { this.interrupting = null; });
+    return this.interrupting;
+  }
+
+  private async interruptTurn(turn: NonNullable<StructuredSession['turn']>, adapter: TaskModeAgentAdapter): Promise<void> {
+    const grace = this.launch.interruptGraceMs;
+    const ended = new Promise<void>((resolve) => this.structuredEmitter.once('turnEnd', () => resolve()));
+    if (await adapter.interrupt(grace)) {
+      // Acknowledged, but the turn only ends with its result line.
+      const settled = await Promise.race([
+        ended.then(() => true),
+        new Promise<boolean>((resolve) => { const t = setTimeout(() => resolve(false), grace); t.unref?.(); }),
+      ]);
+      if (settled) return;
+    }
+    if (turn.ended || this.exited) return;
+    await this.restartInterrupted(turn);
+  }
+
+  /**
+   * The fallback when the runner ignores a soft interrupt: kill it and resume
+   * its session in a fresh process, the way the planner restarts from its
+   * session id after an abort.
+   */
+  private async restartInterrupted(turn: NonNullable<StructuredSession['turn']>): Promise<void> {
+    const resumeSessionId = this.nativeSessionId() ?? undefined;
+    this.generation += 1;
+    turn.abort.abort();
+    try {
+      await this.startAdapter({ ...this.launch.startOptions, resumeSessionId });
+    } catch (err) {
+      this.text.line(`Could not restart ${this.launch.runner} after the interrupt: ${err instanceof Error ? err.message : String(err)}`);
+      this.endTurn(turn, 'interrupted');
+      this.baseHandleExit(-1);
+      return;
+    }
+    this.endTurn(turn, 'interrupted');
+  }
+
+  private async startAdapter(opts: TaskStartOptions): Promise<void> {
+    const adapter = this.launch.createAdapter(this.launch.runner, this.launch.deps);
+    this.adapter = adapter;
+    this.adapterStarted = false;
+    const generation = this.generation;
+    await adapter.start(opts);
+    this.adapterStarted = true;
+    if (this.exited || generation !== this.generation) {
+      adapter.dispose();
+      return;
+    }
+    adapter.onProcessExit((code) => {
+      if (generation !== this.generation) return;
+      this.lastSessionId = adapter.nativeSessionId() ?? this.lastSessionId;
+      this.baseHandleExit(code);
+    });
+  }
+
+  private deliver(text: string): void {
+    const adapter = this.adapter;
+    if (!adapter) return;
+    this.turnCount += 1;
+    const turn = { id: this.turnCount, abort: new AbortController(), ended: false };
+    this.turn = turn;
+    this.state = 'working';
+    this.emitEvent({ type: 'turn_start', text });
+    const generation = this.generation;
+    let reason: StructuredTurnEnd = 'completed';
+
+    void adapter.send(text, (event) => {
+      if (generation !== this.generation) return;
+      if (event.type === 'turn_end') reason = event.interrupted ? 'interrupted' : 'completed';
+      else {
+        if (event.type === 'error') reason = 'failed';
+        this.handleEvent(event);
+      }
+    }, turn.abort.signal).catch((err: unknown) => {
+      reason = 'failed';
+      this.handleEvent({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+    }).then(() => {
+      this.lastSessionId = adapter.nativeSessionId() ?? this.lastSessionId;
+      if (generation === this.generation) this.endTurn(turn, reason);
+    });
+  }
+
+  private handleEvent(event: Exclude<AgentEvent, { type: 'turn_end' }>): void {
+    switch (event.type) {
+      case 'assistant_text_delta': this.text.delta(event.text); break;
+      case 'assistant_text': this.text.block(event.text); break;
+      case 'tool_call': if (!event.subagentId) this.text.line(toolLine(event.name, event.args)); break;
+      case 'error': this.text.line(event.message); break;
+      default: break;
+    }
+    this.emitEvent(event);
+  }
+
+  /**
+   * A queued message goes out as the turn closes, and the state never passes
+   * through `idle` on the way, so a listener told the turn ended can already
+   * see the task is not waiting.
+   */
+  private endTurn(turn: NonNullable<StructuredSession['turn']>, reason: StructuredTurnEnd): void {
+    if (turn.ended) return;
+    turn.ended = true;
+    this.text.endTurn();
+    this.emitEvent({ type: 'turn_end', reason });
+    const next = this.exited ? undefined : this.queue.shift();
+    if (!next) this.state = 'idle';
+    this.structuredEmitter.emit('turnEnd', reason);
+    if (next) this.deliver(next.text);
+  }
+
+  private emitEvent(event: StructuredEvent): void {
+    this.structuredEmitter.emit('event', event);
+  }
+}
+
+/**
+ * The structured transport (ADR-0018): a task's runner as a plain child
+ * process speaking its protocol — no tmux, no `script` (W2). Only runners
+ * with a task-mode connector can be spawned here; routing the rest to the
+ * terminal transport is the caller's decision, not a silent downgrade here.
+ */
+export class StructuredRunner extends AbstractRunner<StructuredSession> {
+  private spawnCount = 0;
+  private readonly processDeps: Partial<Omit<AgentProcessDeps, 'workspaceEnv'>>;
+  private readonly createAdapter: (runner: string, deps: AgentProcessDeps) => TaskModeAgentAdapter;
+  private readonly interruptGraceMs: number;
+
+  constructor(deps: StructuredRunnerDeps = {}) {
+    super();
+    this.processDeps = deps.process ?? {};
+    this.createAdapter = deps.createAdapter ?? createTaskAdapter;
+    this.interruptGraceMs = deps.interruptGraceMs ?? DEFAULT_INTERRUPT_GRACE_MS;
+  }
+
+  async spawn(opts: StructuredSpawnOptions): Promise<ITerminalSession> {
+    const manifest = opts.registry?.get(opts.runner)?.manifest;
+    if (!manifest) throw new Error(`No runner manifest is registered for "${opts.runner}".`);
+
+    this.spawnCount += 1;
+    const id = `ordewell-structured-${opts.taskId.slice(0, 8)}-${this.spawnCount}`;
+    const env = { ...opts.env };
+    const session = new StructuredSession(id, opts.taskId, {
+      runner: opts.runner,
+      deps: {
+        spawn: nodeSpawn,
+        fetch: globalThis.fetch,
+        ...this.processDeps,
+        // Already resolved by the caller (ADR-0016); resolving it again here
+        // could disagree with what a terminal task in the same run sees.
+        workspaceEnv: async () => env,
+      },
+      createAdapter: this.createAdapter,
+      startOptions: {
+        kind: 'task',
+        cwd: opts.cwd,
+        model: opts.modelId,
+        mode: opts.mode ?? 'default',
+        flags: resolveTaskRunnerFlags(manifest, { mode: opts.mode ?? 'default', model: opts.modelId, thinkingEffort: opts.thinkingEffort }),
+        resumeSessionId: opts.resumeSessionId,
+      },
+      interruptGraceMs: this.interruptGraceMs,
+    });
+
+    console.error(`[structured] Starting ${opts.runner} [${opts.mode ?? 'default'}] (${opts.modelId || 'default'}) for task ${opts.taskId.slice(0, 8)}`);
+    this.registerSession(id, session);
+    try {
+      await session.start(opts.prompt);
+    } catch (err) {
+      this.sessions.delete(id);
+      throw err;
+    }
+    return session;
+  }
+}

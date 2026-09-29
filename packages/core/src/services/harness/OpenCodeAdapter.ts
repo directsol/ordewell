@@ -5,7 +5,7 @@ import { assertWorkspaceExists } from '../../utils/workspace';
 import { killTree } from '../../utils/processTree';
 import { workspaceEnvOf } from '../workspaceEnv';
 import { partedPromptUsage, type UsageRecord } from '../../models/Usage';
-import type { AgentAdapter, AgentEvent, AgentProcessDeps, AgentStartOptions } from './AgentAdapter';
+import { plannerOnly, type AgentAdapter, type AgentEvent, type AgentProcessDeps, type AgentStartOptions, type PlannerStartOptions } from './AgentAdapter';
 
 const SERVER_READY_TIMEOUT_MS = 30000;
 const STDERR_TAIL_CHARS = 4000;
@@ -228,7 +228,7 @@ export class OpenCodeAdapter implements AgentAdapter {
   private stderrTail = '';
   private exited = false;
   private disposed = false;
-  private opts: AgentStartOptions | null = null;
+  private opts: PlannerStartOptions | null = null;
   /** Whether this turn has already emitted reply text — see {@link emitPart}. */
   private turnHasText = false;
   /** The last assistant message already settled — the baseline {@link recoverReply} measures a new reply against. */
@@ -236,7 +236,9 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   constructor(private deps: AgentProcessDeps) {}
 
-  async start(opts: AgentStartOptions): Promise<void> {
+  /** OpenCode only plans for now (#55): its tasks stay on the terminal transport. */
+  async start(options: AgentStartOptions): Promise<void> {
+    const opts = plannerOnly(this.agentId, options);
     this.opts = opts;
     // Checked before anything else: a workspace deleted out from under a
     // stale `process.cwd()` otherwise surfaces as `spawn`'s ENOENT, which

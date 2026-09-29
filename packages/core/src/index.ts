@@ -62,8 +62,9 @@ export { createAiService } from './services/AiService';
 export type { IAiService, ConversationRequest, ConversationTurn } from './services/AiService';
 export { CliAgentAiService } from './services/harness/CliAgentAiService';
 export type { CliAgentAiServiceDeps } from './services/harness/CliAgentAiService';
-export { LineBuffer } from './services/harness/AgentAdapter';
-export type { AgentAdapter, AgentEvent, AgentStartOptions, AgentProcessDeps, AgentAdapterFactory } from './services/harness/AgentAdapter';
+export { LineBuffer, TaskModeUnsupportedError } from './services/harness/AgentAdapter';
+export type { AgentAdapter, AgentEvent, AgentStartOptions, PlannerStartOptions, TaskStartOptions, TaskRunnerFlags, TaskModeAgentAdapter, AgentProcessDeps, AgentAdapterFactory } from './services/harness/AgentAdapter';
+export { supportsTaskMode, createTaskAdapter } from './services/harness/taskAdapters';
 export { StdioAgentAdapter } from './services/harness/StdioAgentAdapter';
 export type { SpawnSpec } from './services/harness/StdioAgentAdapter';
 export { ClaudeCodeAdapter } from './services/harness/ClaudeCodeAdapter';
@@ -123,6 +124,8 @@ export type { HeadlessRunnerDeps, PreparedLaunch, RunnerSpawnOptions } from './s
 export { TmuxRunner } from './services/TmuxRunner';
 export type { TmuxRunnerDeps, ExecFileFn } from './services/TmuxRunner';
 export { AbstractTerminalSession, AbstractRunner } from './services/AbstractRunner';
+export { StructuredRunner, StructuredSession } from './services/StructuredRunner';
+export type { StructuredRunnerDeps, StructuredSpawnOptions } from './services/StructuredRunner';
 export * from './utils/shell';
 export {
   planDirectLaunch,
@@ -170,7 +173,7 @@ export { isValidManifest } from './plugins/manifestValidation';
 export { isPlainPluginName, assertPlainPluginName, resolvePluginInstallDir, PLUGIN_NAME_PATTERN } from './plugins/pluginNames';
 export { assertInstallablePluginUrl, classifyPluginSource, ALLOWED_PLUGIN_HOSTS } from './plugins/pluginSource';
 export type { PluginSource } from './plugins/pluginSource';
-export { resolveArgs } from './plugins/resolveArgs';
+export { resolveArgs, resolveTaskRunnerFlags } from './plugins/resolveArgs';
 export { CLAUDE_CODE_MANIFEST } from './plugins/builtin/claude-code.manifest';
 export { OPENCODE_MANIFEST } from './plugins/builtin/opencode.manifest';
 export type { RunnerPluginManifest, RunnerInvocation, PluginEntry, ResolveContext, IPluginStore, PluginRunnerDef, BlockingPrompt, PluginFeatures, PluginModelDiscovery, PluginMode, DiscoveryCommand } from './plugins/types';

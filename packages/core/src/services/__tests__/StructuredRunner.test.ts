@@ -1,0 +1,363 @@
+import { describe, it, expect } from 'vitest';
+import { StructuredRunner, type StructuredSpawnOptions } from '../StructuredRunner';
+import { HeadlessSession } from '../HeadlessRunner';
+import { RunnerRegistry } from '../../plugins/RunnerRegistry';
+import { isStructuredSession, type ITerminalSession, type StructuredEvent, type StructuredTurnEnd } from '../../interfaces/ITerminalRunner';
+import { TaskModeUnsupportedError } from '../harness/AgentAdapter';
+import type { SpawnFn } from '../HeadlessRunner';
+import { fakeSpawn, fixture, type ScriptedReply } from './harnessTestKit';
+
+/**
+ * The structured transport (ADR-0018) driven through the real Claude Code
+ * adapter and a fake process, fed transcripts recorded from `claude` 2.1.284.
+ * What is asserted is what the orchestrator and the surfaces would see:
+ * `onOutput`, the turn lifecycle, the queue, and `onExit`.
+ */
+
+const registry = new RunnerRegistry();
+
+function harness(replies: ScriptedReply[], interruptGraceMs = 1000) {
+  const spawned = fakeSpawn(replies);
+  const spawns: Array<{ env: NodeJS.ProcessEnv; cwd: string }> = [];
+  const spawn: SpawnFn = (command, args, options) => {
+    spawns.push({ env: options.env, cwd: options.cwd });
+    return spawned.spawn(command, args, options);
+  };
+  const runner = new StructuredRunner({
+    process: { spawn, resolvePath: async () => '/usr/bin', platform: 'linux', isDirectory: () => true, exists: () => true },
+    interruptGraceMs,
+  });
+  return { runner, spawned, spawns };
+}
+
+function options(overrides: Partial<StructuredSpawnOptions> = {}): StructuredSpawnOptions {
+  return {
+    taskId: 'task-0001-abcdef',
+    runner: 'claude-code',
+    prompt: 'Do the task',
+    modelId: 'sonnet',
+    mode: 'acceptEdits',
+    cwd: '/repo',
+    registry,
+    ...overrides,
+  };
+}
+
+/** Everything a session reports, in order, plus a way to wait for the next turn end. */
+function observe(session: ITerminalSession) {
+  if (!isStructuredSession(session)) throw new Error('not a structured session');
+  const chunks: string[] = [];
+  const events: StructuredEvent[] = [];
+  const turnEnds: StructuredTurnEnd[] = [];
+  const statesAtTurnEnd: string[] = [];
+  const exits: number[] = [];
+  let waiters: Array<() => void> = [];
+  session.onOutput((text) => chunks.push(text));
+  session.onEvent((event) => events.push(event));
+  session.onTurnEnd((reason) => {
+    turnEnds.push(reason);
+    statesAtTurnEnd.push(session.turnState());
+    const ready = waiters;
+    waiters = [];
+    for (const resolve of ready) resolve();
+  });
+  session.onExit((code) => exits.push(code));
+  const nextTurnEnd = () => new Promise<void>((resolve) => { waiters.push(resolve); });
+  return { session, chunks, events, turnEnds, statesAtTurnEnd, exits, nextTurnEnd };
+}
+
+/** The text of each user turn the adapter wrote to the runner's stdin. */
+function userTurns(written: string[]): string[] {
+  return written
+    .map((line) => JSON.parse(line) as { type: string; message?: { content: Array<{ text: string }> } })
+    .filter((msg) => msg.type === 'user')
+    .map((msg) => msg.message!.content[0].text);
+}
+
+const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+describe('StructuredRunner spawn', () => {
+  it.each([
+    ['default', 'default'],
+    ['acceptEdits', 'acceptEdits'],
+    ['plan', 'plan'],
+    ['bypassPermissions', 'bypassPermissions'],
+    // The legacy alias resolves through the manifest, as a terminal task's does.
+    ['build', 'acceptEdits'],
+  ])('runs mode %s under --permission-mode %s', async (mode, expected) => {
+    const { runner, spawned } = harness([]);
+    const session = await runner.spawn(options({ mode }));
+    const args = spawned.lastArgs();
+    expect(args[args.indexOf('--permission-mode') + 1]).toBe(expected);
+    expect(args).not.toContain('--disallowedTools');
+    expect(args).not.toContain('--append-system-prompt');
+    expect(args).not.toContain('--dangerously-skip-permissions');
+    session.kill();
+  });
+
+  it('builds the full command line: protocol, mode, effort from the manifest, model and resume', async () => {
+    const { runner, spawned } = harness([]);
+    const session = await runner.spawn(options({ thinkingEffort: 'high', resumeSessionId: 'sess-prev' }));
+    expect(spawned.lastArgs()).toEqual([
+      '-p',
+      '--input-format', 'stream-json',
+      '--output-format', 'stream-json',
+      '--verbose',
+      '--include-partial-messages',
+      '--permission-prompt-tool', 'stdio',
+      '--permission-mode', 'acceptEdits',
+      '--thinking', 'enabled', '--effort', 'high',
+      '--model', 'sonnet',
+      '--resume', 'sess-prev',
+    ]);
+    session.kill();
+  });
+
+  it.each([
+    ['adaptive', 'sonnet', ['--thinking', 'adaptive']],
+    ['max', 'sonnet', ['--thinking', 'enabled', '--effort', 'max']],
+    // Same gate as the terminal template: effort only rides with a model.
+    ['high', undefined, []],
+  ])('maps effort %s (model %s) the way the terminal transport does', async (thinkingEffort, modelId, expected) => {
+    const { runner, spawned } = harness([]);
+    const session = await runner.spawn(options({ thinkingEffort, modelId }));
+    const args = spawned.lastArgs();
+    const from = args.indexOf('--permission-mode') + 2;
+    const to = modelId ? args.indexOf('--model') : args.length;
+    expect(args.slice(from, to)).toEqual(expected);
+    session.kill();
+  });
+
+  it('runs in the task cwd with the workspace env, and sends the prompt as the first turn', async () => {
+    const { runner, spawned, spawns } = harness([]);
+    const session = await runner.spawn(options({ env: { DATABASE_URL: 'postgres://local' } }));
+    await tick();
+    expect(spawns[0].cwd).toBe('/repo');
+    expect(spawns[0].env.DATABASE_URL).toBe('postgres://local');
+    expect(userTurns(spawned.processes[0].written)).toEqual(['Do the task']);
+    expect(session.interactive).toBeUndefined();
+    session.kill();
+  });
+
+  it('refuses a runner without a task-mode connector', async () => {
+    const { runner, spawned } = harness([]);
+    await expect(runner.spawn(options({ runner: 'codex' }))).rejects.toBeInstanceOf(TaskModeUnsupportedError);
+    expect(spawned.processes).toHaveLength(0);
+    expect(runner.activeCount).toBe(0);
+  });
+});
+
+describe('StructuredSession output', () => {
+  it('writes the done marker whole even though it streamed in four deltas, after one line per tool call', async () => {
+    const { runner } = harness([fixture('claude-code', 'task-marker')]);
+    const turn = observe(await runner.spawn(options()));
+    await turn.nextTurnEnd();
+
+    expect(turn.chunks.some((chunk) => chunk.includes('<<<ORDEWELL_DONE_test-1234>>>'))).toBe(true);
+    expect(turn.session.getOutput()).toBe('› Bash(cat README.md)\n<<<ORDEWELL_DONE_test-1234>>>\n');
+    expect(turn.chunks.join('')).toBe(turn.session.getOutput());
+    expect(turn.turnEnds).toEqual(['completed']);
+    expect(turn.session.turnState()).toBe('idle');
+    expect(turn.session.nativeSessionId()).toBe('sess-task-marker');
+    turn.session.kill();
+  });
+
+  it('writes a checkpoint marker whole', async () => {
+    const { runner } = harness([fixture('claude-code', 'task-checkpoint')]);
+    const turn = observe(await runner.spawn(options()));
+    await turn.nextTurnEnd();
+    expect(turn.chunks.some((chunk) => /<<<ORDEWELL_CHECKPOINT:\s*about to delete README\.md>>>/.test(chunk))).toBe(true);
+    turn.session.kill();
+  });
+
+  it('ends a turn without a marker as a completed turn, and waits', async () => {
+    const { runner } = harness([fixture('claude-code', 'task-no-marker')]);
+    const turn = observe(await runner.spawn(options()));
+    await turn.nextTurnEnd();
+    expect(turn.session.getOutput()).toBe('Hi! Ready to help you with your project.\n');
+    expect(turn.turnEnds).toEqual(['completed']);
+    expect(turn.session.turnState()).toBe('idle');
+    expect(turn.exits).toEqual([]);
+    turn.session.kill();
+  });
+
+  it('leaves subagent work out of the plain text, but not out of the events', async () => {
+    const { runner } = harness([fixture('claude-code', 'stream-subagent')]);
+    const turn = observe(await runner.spawn(options()));
+    await turn.nextTurnEnd();
+    const output = turn.session.getOutput();
+    expect(output).toContain('› Agent(Read README first line)');
+    expect(output).not.toContain('› Read(');
+    expect(output).toContain('The first line of README.md is `hello`.');
+    expect(turn.events.some((e) => e.type === 'tool_call' && e.name === 'Read' && e.subagentId)).toBe(true);
+    turn.session.kill();
+  });
+
+  it('emits the turn and its events in order', async () => {
+    const { runner } = harness([fixture('claude-code', 'task-marker')]);
+    const turn = observe(await runner.spawn(options()));
+    await turn.nextTurnEnd();
+    const types = turn.events.map((e) => e.type);
+    expect(types[0]).toBe('turn_start');
+    expect(turn.events.at(-1)).toEqual({ type: 'turn_end', reason: 'completed' });
+    expect(types).toContain('tool_call');
+    expect(types).toContain('tool_result');
+    expect(types).toContain('assistant_text_delta');
+    expect(types).toContain('usage');
+    turn.session.kill();
+  });
+
+  it('passes a runner permission request on as an event', async () => {
+    const { runner } = harness([fixture('claude-code', 'task-permission'), fixture('claude-code', 'task-permission-after-deny')]);
+    const turn = observe(await runner.spawn(options({ mode: 'default' })));
+    await turn.nextTurnEnd();
+    const request = turn.events.find((e) => e.type === 'permission_request');
+    expect(request).toMatchObject({ name: 'Write', input: { file_path: '/repo/notes.txt' }, suggestions: [{ type: 'setMode', mode: 'acceptEdits' }] });
+    turn.session.kill();
+  });
+});
+
+describe('StructuredSession messages', () => {
+  it('holds a write made during a turn until the turn ends, then delivers it without going idle', async () => {
+    const { runner, spawned } = harness([
+      () => { /* the first turn stays open until the test ends it */ },
+      fixture('claude-code', 'task-no-marker'),
+    ]);
+    const turn = observe(await runner.spawn(options()));
+    await tick();
+
+    turn.session.write('  Yes, go ahead.\r');
+    expect(turn.session.queued()).toEqual([{ id: expect.any(String), text: 'Yes, go ahead.' }]);
+    expect(userTurns(spawned.processes[0].written)).toEqual(['Do the task']);
+
+    spawned.processes[0].emitStdout(fixture('claude-code', 'task-marker'));
+    await turn.nextTurnEnd();
+    expect(turn.statesAtTurnEnd).toEqual(['working']);
+    expect(turn.session.queued()).toEqual([]);
+    expect(userTurns(spawned.processes[0].written)).toEqual(['Do the task', 'Yes, go ahead.']);
+
+    await turn.nextTurnEnd();
+    expect(turn.statesAtTurnEnd).toEqual(['working', 'idle']);
+    turn.session.kill();
+  });
+
+  it('can take a queued message back before it is delivered', async () => {
+    const { runner, spawned } = harness([() => {}]);
+    const turn = observe(await runner.spawn(options()));
+    await tick();
+    const id = turn.session.sendMessage('Never mind');
+    expect(turn.session.removeQueued(id)).toBe(true);
+    expect(turn.session.removeQueued(id)).toBe(false);
+
+    spawned.processes[0].emitStdout(fixture('claude-code', 'task-no-marker'));
+    await turn.nextTurnEnd();
+    expect(userTurns(spawned.processes[0].written)).toEqual(['Do the task']);
+    expect(turn.session.turnState()).toBe('idle');
+    turn.session.kill();
+  });
+
+  it('delivers at once when idle', async () => {
+    const { runner, spawned } = harness([fixture('claude-code', 'task-no-marker'), fixture('claude-code', 'task-no-marker')]);
+    const turn = observe(await runner.spawn(options()));
+    await turn.nextTurnEnd();
+    turn.session.sendMessage('One more thing');
+    expect(turn.session.turnState()).toBe('working');
+    expect(turn.session.queued()).toEqual([]);
+    await turn.nextTurnEnd();
+    expect(userTurns(spawned.processes[0].written)).toEqual(['Do the task', 'One more thing']);
+    turn.session.kill();
+  });
+
+  it('ignores a blank write', async () => {
+    const { runner } = harness([() => {}]);
+    const turn = observe(await runner.spawn(options()));
+    turn.session.write(' \r\n');
+    expect(turn.session.queued()).toEqual([]);
+    turn.session.kill();
+  });
+});
+
+describe('StructuredSession interrupt', () => {
+  it('stops the turn with a soft interrupt and keeps the process', async () => {
+    const { runner, spawned } = harness([
+      fixture('claude-code', 'task-interrupt'),
+      (written, proc) => {
+        const request = JSON.parse(written) as { request_id: string };
+        proc.emitStdout(fixture('claude-code', 'task-interrupt-ack', { REQUEST_ID: request.request_id }));
+      },
+      fixture('claude-code', 'task-interrupt-followup'),
+    ]);
+    const turn = observe(await runner.spawn(options()));
+    await tick();
+
+    await turn.session.interrupt();
+    expect(turn.turnEnds).toEqual(['interrupted']);
+    expect(turn.session.turnState()).toBe('idle');
+    expect(spawned.processes).toHaveLength(1);
+    expect(JSON.parse(spawned.processes[0].written[1])).toMatchObject({ type: 'control_request', request: { subtype: 'interrupt' } });
+
+    turn.session.sendMessage('Say only: ok');
+    await turn.nextTurnEnd();
+    expect(turn.turnEnds).toEqual(['interrupted', 'completed']);
+    expect(turn.session.getOutput()).toBe('ok\n');
+    expect(turn.exits).toEqual([]);
+    turn.session.kill();
+  });
+
+  it('kills and resumes the session when the runner ignores the interrupt', async () => {
+    const { runner, spawned } = harness([fixture('claude-code', 'task-interrupt')], 20);
+    const turn = observe(await runner.spawn(options()));
+    await tick();
+
+    await turn.session.interrupt();
+    expect(turn.turnEnds).toEqual(['interrupted']);
+    expect(spawned.processes).toHaveLength(2);
+    expect(spawned.processes[0].killed).toBe(true);
+    const args = spawned.lastArgs();
+    expect(args[args.indexOf('--resume') + 1]).toBe('sess-task-interrupt');
+    // The killed process was replaced, not lost: the task is still alive.
+    await tick();
+    expect(turn.exits).toEqual([]);
+    turn.session.kill();
+  });
+
+  it('does nothing when idle', async () => {
+    const { runner, spawned } = harness([fixture('claude-code', 'task-no-marker')]);
+    const turn = observe(await runner.spawn(options()));
+    await turn.nextTurnEnd();
+    await turn.session.interrupt();
+    expect(spawned.processes[0].written).toHaveLength(1);
+    expect(turn.turnEnds).toEqual(['completed']);
+    turn.session.kill();
+  });
+});
+
+describe('StructuredSession exit', () => {
+  it('fires onExit exactly once on kill', async () => {
+    const { runner, spawned } = harness([() => {}]);
+    const turn = observe(await runner.spawn(options()));
+    turn.session.kill();
+    turn.session.kill();
+    await tick();
+    expect(spawned.processes[0].killed).toBe(true);
+    expect(turn.exits).toEqual([-1]);
+    expect(runner.activeCount).toBe(0);
+  });
+
+  it('fires onExit exactly once when the runner dies on its own', async () => {
+    const { runner, spawned } = harness([() => {}]);
+    const turn = observe(await runner.spawn(options()));
+    await tick();
+    spawned.processes[0].emitStderr('fatal: out of credits');
+    spawned.processes[0].exit(1);
+    await tick();
+    turn.session.kill();
+    expect(turn.exits).toEqual([1]);
+    expect(turn.turnEnds).toEqual(['failed']);
+    expect(turn.session.getOutput()).toContain('fatal: out of credits');
+  });
+
+  it('is not a structured session when it is a terminal one', () => {
+    expect(isStructuredSession(new HeadlessSession('h', 't', (() => { throw new Error('unused'); }) as SpawnFn))).toBe(false);
+  });
+});

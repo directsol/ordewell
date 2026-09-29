@@ -27,7 +27,7 @@ import { redactSecrets } from '../../utils/redactSecrets';
 import { abortScope } from '../../utils/abortScope';
 import { runnerForProvider } from '../ProviderRegistry';
 import { collectResearchContext } from '../ContextCollector';
-import type { AgentAdapter, AgentEvent, AgentProcessDeps, AgentStartOptions } from './AgentAdapter';
+import type { AgentAdapter, AgentEvent, AgentProcessDeps, PlannerStartOptions } from './AgentAdapter';
 import { ClaudeCodeAdapter } from './ClaudeCodeAdapter';
 import { CodexAdapter } from './CodexAdapter';
 import { OpenCodeAdapter } from './OpenCodeAdapter';
@@ -109,7 +109,7 @@ export class CliAgentAiService implements IAiService {
    * every session boundary — nothing from one goal may reach the next.
    */
   private lastNativeSessionId: string | null = null;
-  private conversation: { startOptions: AgentStartOptions; runners: RunnerId[]; runnerModes?: Record<RunnerId, RunnerModeInfo[]>; autonomousDefault?: boolean } | null = null;
+  private conversation: { startOptions: PlannerStartOptions; runners: RunnerId[]; runnerModes?: Record<RunnerId, RunnerModeInfo[]>; autonomousDefault?: boolean } | null = null;
   private activeAbort: AbortController | null = null;
   /**
    * Every subagent this conversation has reported starting, and finishing.
@@ -183,7 +183,8 @@ export class CliAgentAiService implements IAiService {
       { harness: true, isolatedExecution: req.isolatedExecution },
     );
 
-    const startOptions: AgentStartOptions = {
+    const startOptions: PlannerStartOptions = {
+      kind: 'planner',
       cwd: this.workspaceRoot(),
       systemPrompt,
       model: this.plannerModel(),
@@ -471,7 +472,12 @@ export class CliAgentAiService implements IAiService {
 
   // --- Process lifecycle ---
 
-  private async startAdapter(opts: AgentStartOptions): Promise<AgentAdapter> {
+  /**
+   * The only way this service starts an agent, and it takes a planner start by
+   * type: the read-only boundary (ADR-0008/0009) cannot be crossed into task
+   * mode from here without changing this signature.
+   */
+  private async startAdapter(opts: PlannerStartOptions): Promise<AgentAdapter> {
     const adapter = this.makeAdapter(this.runner, this.processDeps);
     if (!adapter) throw new Error(`No planner adapter is available for "${this.runner}".`);
     await adapter.start(opts);
@@ -513,7 +519,8 @@ export class CliAgentAiService implements IAiService {
     const previousSessionId = this.lastNativeSessionId;
     this.adapter = null;
 
-    const startOptions: AgentStartOptions = {
+    const startOptions: PlannerStartOptions = {
+      kind: 'planner',
       cwd: this.workspaceRoot(),
       systemPrompt: prompt,
       model: this.plannerModel(),

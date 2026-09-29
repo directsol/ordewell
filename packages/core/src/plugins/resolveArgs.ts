@@ -160,6 +160,35 @@ function resolveClaudeThinkingFlags(effort: string): string {
   return '--thinking adaptive';
 }
 
+/** Maps a mode id to the runner's --permission-mode CLI value, falling back to the id itself. */
+function permissionModeValue(manifest: RunnerPluginManifest, mode: string | undefined): string {
+  const id = mode || 'default';
+  const map = manifest.features.permissionModeValues;
+  if (map && map[id] !== undefined) return map[id];
+  return id;
+}
+
+/**
+ * The manifest's meaning of a task's mode and effort, for a runner driven over
+ * its programmatic protocol rather than a command line built from
+ * `argsTemplate` (ADR-0018, C1). Same functions and the same `{{if thinking}}`
+ * gate as the template path, so a structured task and a terminal task given
+ * the same plan run under the same permission mode and effort.
+ */
+export function resolveTaskRunnerFlags(
+  manifest: RunnerPluginManifest,
+  ctx: Pick<ResolveContext, 'mode' | 'model' | 'thinkingEffort'>,
+): { permissionMode: string; effortArgs: string[] } {
+  const context: ResolveContext = { ...ctx, prompt: '' };
+  const effort = shouldIncludeBlock(Block.IfThinking, context)
+    ? resolveToken('{{feature:thinkingFlags}}', manifest, context)
+    : '';
+  return {
+    permissionMode: permissionModeValue(manifest, ctx.mode),
+    effortArgs: effort.split(/(?<!\\) /).filter(Boolean),
+  };
+}
+
 function resolveToken(token: string, manifest: RunnerPluginManifest, ctx: ResolveContext): string {
   if (token === '{{prompt}}') return ctx.prompt;
   if (token === '{{model}}') return ctx.model || '';
@@ -211,14 +240,7 @@ function resolveToken(token: string, manifest: RunnerPluginManifest, ctx: Resolv
     return `-c model_reasoning_effort=${effort}`;
   }
 
-  // Maps the current mode to the runner's --permission-mode CLI value.
-  if (token === '{{feature:permissionModeVal}}') {
-    const mode = ctx.mode || 'default';
-    const map = manifest.features.permissionModeValues;
-    if (map && map[mode] !== undefined) return map[mode];
-    // Fallback: use mode ID directly as CLI value
-    return mode;
-  }
+  if (token === '{{feature:permissionModeVal}}') return permissionModeValue(manifest, ctx.mode);
 
   if (token === '{{feature:planMode}}') {
     return manifest.features.planModeFlag || '';
