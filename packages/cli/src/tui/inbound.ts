@@ -1,7 +1,7 @@
-import { truncateCheckpointSummary, type SessionMessage, type SessionNotice } from '@ordewell/core';
+import { isAwaitingReason, truncateCheckpointSummary, type SessionMessage, type SessionNotice } from '@ordewell/core';
 import type { WsEvent } from '../apiClient';
 import type { Action } from './reducer';
-import type { TaskIsolationView, TaskTransportView } from './state';
+import type { TaskStatusUpdate } from './reducers/shared';
 
 /*
  * One session's inbound events, whichever subscription delivered them.
@@ -332,9 +332,15 @@ function createInbound(dispatch: Dispatch, sessionId: string): SessionInbound {
 function dispatchLifecycle(dispatch: Dispatch, event: LifecycleMessage, sessionId: string): void {
   switch (event.type) {
     case 'status_update': {
-      const updates: Record<string, { status: string; idleSince?: string | null; isolation?: TaskIsolationView; transport?: TaskTransportView }> = {};
+      const updates: Record<string, TaskStatusUpdate> = {};
       for (const task of event.tasks ?? []) {
-        updates[String(task.id)] = { status: String(task.status), idleSince: task.idleSince ?? null, isolation: task.isolation, transport: task.transport };
+        updates[String(task.id)] = {
+          status: String(task.status),
+          idleSince: task.idleSince ?? null,
+          isolation: task.isolation,
+          transport: task.transport,
+          awaitingReason: isAwaitingReason(task.awaitingReason) ? task.awaitingReason : undefined,
+        };
       }
       dispatch({ type: 'tasksStatus', updates, sessionId });
       return;

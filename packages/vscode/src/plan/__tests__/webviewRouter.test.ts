@@ -206,6 +206,32 @@ describe('webview messages reach the session through one entry point each', () =
       expect(approve).toHaveBeenCalledWith('t1');
       expect(reject).toHaveBeenCalledWith('t2', 'wrong approach');
     });
+
+    it('sends, takes back and interrupts on a structured task through the Session', async () => {
+      const send = vi.spyOn(h.session, 'sendTaskMessage').mockReturnValue('msg-1');
+      const remove = vi.spyOn(h.session, 'removeQueuedTaskMessage').mockReturnValue(true);
+      const interrupt = vi.spyOn(h.session, 'interruptTask').mockResolvedValue();
+
+      await h.route({ type: 'sendTaskMessage', taskId: 't1', text: 'use Postgres' });
+      await h.route({ type: 'removeQueuedTaskMessage', taskId: 't1', id: 'msg-1' });
+      await h.route({ type: 'interruptTask', taskId: 't1' });
+
+      expect(send).toHaveBeenCalledWith('t1', 'use Postgres');
+      expect(remove).toHaveBeenCalledWith('t1', 'msg-1');
+      expect(interrupt).toHaveBeenCalledWith('t1');
+    });
+
+    it('shows the Session\'s refusal of a task that cannot take a message', async () => {
+      showWarningMessage.mockClear();
+
+      await h.route({ type: 'sendTaskMessage', taskId: 't1', text: 'hello' });
+      await h.route({ type: 'interruptTask', taskId: 't1' });
+
+      expect(showWarningMessage.mock.calls.map((c) => String(c[0]))).toEqual([
+        expect.stringContaining('is not running'),
+        expect.stringContaining('is not running'),
+      ]);
+    });
   });
 
   describe('chat', () => {

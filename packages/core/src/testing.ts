@@ -109,12 +109,18 @@ export class FakeTerminalSession implements ITerminalSession {
 /**
  * A {@link FakeTerminalSession} that is feature-detected as structured
  * (ADR-0018): the turn, queue and native-session calls a test drives, with
- * no protocol behind them.
+ * no protocol behind them. It queues and delivers as `StructuredSession`
+ * does — a message to an idle session starts a turn at once, one sent
+ * mid-turn goes out as that turn ends, without passing through idle.
  */
 export class FakeStructuredSession extends FakeTerminalSession implements StructuredSessionCapability {
   readonly transport = 'structured' as const;
   state: 'working' | 'idle' = 'working';
   messages: QueuedTaskMessage[] = [];
+  /** Every message a turn was started with, in order. */
+  delivered: string[] = [];
+  interrupts = 0;
+  private messageCount = 0;
   private turnEndCbs: Array<(reason: StructuredTurnEnd) => void> = [];
   private eventCbs: Array<(event: StructuredEvent) => void> = [];
 
@@ -122,12 +128,20 @@ export class FakeStructuredSession extends FakeTerminalSession implements Struct
     super(id, taskId);
   }
 
+  override write(text: string): void {
+    super.write(text);
+    const message = text.trim();
+    if (message) this.sendMessage(message);
+  }
+
   turnState(): 'working' | 'idle' { return this.state; }
   onTurnEnd(cb: (reason: StructuredTurnEnd) => void): void { this.turnEndCbs.push(cb); }
   onEvent(cb: (event: StructuredEvent) => void): void { this.eventCbs.push(cb); }
   sendMessage(text: string): string {
-    const id = `msg-${this.messages.length + 1}`;
-    this.messages.push({ id, text });
+    this.messageCount += 1;
+    const id = `msg-${this.messageCount}`;
+    if (this.state === 'idle') this.deliver(text);
+    else this.messages.push({ id, text });
     return id;
   }
   removeQueued(id: string): boolean {
@@ -135,16 +149,27 @@ export class FakeStructuredSession extends FakeTerminalSession implements Struct
     this.messages = this.messages.filter((m) => m.id !== id);
     return this.messages.length < before;
   }
-  queued(): QueuedTaskMessage[] { return [...this.messages]; }
-  async interrupt(): Promise<void> { this.emitTurnEnd('interrupted'); }
+  queued(): QueuedTaskMessage[] { return this.messages.map((m) => ({ ...m })); }
+  async interrupt(): Promise<void> {
+    this.interrupts += 1;
+    if (this.state === 'working') this.emitTurnEnd('interrupted');
+  }
   nativeSessionId(): string | null { return this.sessionId; }
 
   emitEvent(event: StructuredEvent): void {
     for (const cb of this.eventCbs) cb(event);
   }
   emitTurnEnd(reason: StructuredTurnEnd): void {
-    this.state = 'idle';
+    const next = this.messages.shift();
+    if (!next) this.state = 'idle';
     for (const cb of this.turnEndCbs) cb(reason);
+    if (next) this.deliver(next.text);
+  }
+
+  private deliver(text: string): void {
+    this.state = 'working';
+    this.delivered.push(text);
+    this.emitEvent({ type: 'turn_start', text });
   }
 }
 

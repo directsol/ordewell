@@ -655,7 +655,7 @@ export function applyTaskOps(currentTasks: readonly Task[], ops: TaskOp[], runne
           if (bad.length) { errors.push(`${label}: unknown dependencies: ${bad.join(', ')}`); break; }
           changes.dependencies = ids.filter((id) => id !== target.id);
         }
-        tasks = updateTaskInPlan(tasks, target.id, { ...changes, status: 'pending', verdict: undefined, outputSummary: undefined });
+        tasks = updateTaskInPlan(tasks, target.id, { ...changes, status: 'pending', verdict: undefined, outputSummary: undefined, awaitingReason: undefined });
         // Dependents parked at 'blocked' by this task's earlier failure have
         // nothing else to release them — the scheduler reads `status` directly,
         // not a live recomputation of the dependency graph.

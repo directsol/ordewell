@@ -363,6 +363,24 @@ export function handleCheckpointAnswer(taskId: string, approved: boolean, reason
 }
 
 /**
+ * Talking to a structured task (ADR-0018, M1). A refusal — a terminal task, or
+ * one not running — is the Session's answer, shown rather than swallowed.
+ */
+export async function handleTaskControl(
+  control: { kind: 'message'; text: string } | { kind: 'removeQueued'; id: string } | { kind: 'interrupt' },
+  taskId: string,
+  deps: Pick<PlanManagerDeps, 'session'>,
+): Promise<void> {
+  try {
+    if (control.kind === 'message') deps.session.sendTaskMessage(taskId, control.text);
+    else if (control.kind === 'removeQueued') deps.session.removeQueuedTaskMessage(taskId, control.id);
+    else await deps.session.interruptTask(taskId);
+  } catch (err) {
+    void vscode.window.showWarningMessage(err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
  * Stop aborts the current planner turn only — never the plan, the dialogue or
  * the persisted state; that is a new session. The turn stays the host's until
  * its handler returns, so a prompt sent meanwhile is held, not raced against

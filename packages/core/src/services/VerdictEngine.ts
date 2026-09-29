@@ -1,5 +1,5 @@
 import type { Task, Verdict, VerificationCheck } from '../models/Task';
-import type { ITerminalSession } from '../interfaces/ITerminalRunner';
+import { isStructuredSession, type ITerminalSession } from '../interfaces/ITerminalRunner';
 import { flattenTerminalOutput, renderTerminalOutput } from './terminalRender';
 
 export type VerdictListener = (taskId: string, verdict: Verdict) => void;
@@ -52,6 +52,8 @@ export class VerdictEngine {
   private lastGeneration = 0;
   private idleTimers = new Map<string, NodeJS.Timeout>();
   private idleSince = new Map<string, string | null>();
+  /** Tasks waiting on the user, whose silence is expected rather than a sign of a stuck runner. */
+  private idlePaused = new Set<string>();
 
   onVerdict(listener: VerdictListener): void {
     this.listeners.push(listener);
@@ -70,8 +72,24 @@ export class VerdictEngine {
     return this.idleSince.get(taskId) ?? null;
   }
 
+  /**
+   * Stop watching a task's silence while it waits on the user (ADR-0018, W1).
+   * Watching resumes when its next turn starts, or when a checkpoint is answered.
+   */
+  pauseIdle(taskId: string): void {
+    this.idlePaused.add(taskId);
+    this.clearIdle(taskId);
+  }
+
+  private resumeIdle(taskId: string): void {
+    const gen = this.generations.get(taskId);
+    if (!this.idlePaused.delete(taskId) || gen === undefined) return;
+    this.touchIdle(taskId, gen);
+  }
+
   /** Restart the silence timer on fresh output; broadcasts the null transition if it was idle. */
   private touchIdle(taskId: string, gen: number): void {
+    if (this.idlePaused.has(taskId)) return;
     const existing = this.idleTimers.get(taskId);
     if (existing) clearTimeout(existing);
     if (this.idleSince.get(taskId)) {
@@ -110,6 +128,7 @@ export class VerdictEngine {
   }
 
   approveCheckpoint(taskId: string): void {
+    this.resumeIdle(taskId);
     const session = this.pausedSessions.get(taskId);
     if (session) {
       session.write(this.resumeToken(session, 'ORDEWELL_CONTINUE'));
@@ -118,6 +137,7 @@ export class VerdictEngine {
   }
 
   rejectCheckpoint(taskId: string, reason: string): void {
+    this.resumeIdle(taskId);
     const session = this.pausedSessions.get(taskId);
     if (session) {
       session.write(this.resumeToken(session, `ORDEWELL_REJECT: ${reason}`));
@@ -156,6 +176,11 @@ export class VerdictEngine {
       }
       this.scanCheckpoints(task.id, session, text);
     });
+    if (isStructuredSession(session)) {
+      session.onEvent((event) => {
+        if (event.type === 'turn_start' && this.generations.get(task.id) === gen) this.resumeIdle(task.id);
+      });
+    }
     session.onExit((exitCode: number) => {
       if (this.generations.get(task.id) !== gen) return;
       // The raw tail, not session.getOutput(): runners strip ANSI from that
@@ -189,6 +214,7 @@ export class VerdictEngine {
     this.markerTails.delete(taskId);
     this.checkpointCarry.delete(taskId);
     this.pausedSessions.delete(taskId);
+    this.idlePaused.delete(taskId);
     this.clearIdle(taskId);
   }
 
@@ -228,6 +254,7 @@ export class VerdictEngine {
     for (const timer of this.idleTimers.values()) clearTimeout(timer);
     this.idleTimers.clear();
     this.idleSince.clear();
+    this.idlePaused.clear();
     this.generations.clear();
   }
 

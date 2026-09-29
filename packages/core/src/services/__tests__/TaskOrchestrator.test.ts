@@ -518,6 +518,8 @@ describe('TaskOrchestrator', () => {
       const paused = orchestrator.storeInstance.get('t1');
       expect(paused!.status).toBe('awaiting_user');
       expect(paused!.verdict!.outcome).toBe('fail');
+      // Neither input, a checkpoint nor a conflict: a retry answers it, not a message.
+      expect(paused!.awaitingReason).toBeUndefined();
     });
 
     it('does not promise a kept worktree when the paused task ran in the workspace root', async () => {

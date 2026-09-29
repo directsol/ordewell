@@ -5,7 +5,7 @@ import { isKnownSlashCommand } from '../commands/SlashParser';
 import { handleIsolationAction } from './isolation';
 import {
   handleAddTask, handleCheckpointAnswer, handleMergePlan, handleNewSession, handleRemoveTask,
-  handleSendMessage, handleSplitPlan, handleStopPlanning, handleSystemCommand, handleTaskEdit, type PlanManagerDeps,
+  handleSendMessage, handleSplitPlan, handleStopPlanning, handleSystemCommand, handleTaskControl, handleTaskEdit, type PlanManagerDeps,
 } from './PlanManager';
 
 /** What the extension itself answers: the catalog, the planner choice and the skill toggles — none of it a plan action. */
@@ -67,6 +67,15 @@ export async function routeWebviewMessage(msg: WebviewToHost, deps: WebviewRoute
       return;
     case 'answerCheckpoint':
       handleCheckpointAnswer(msg.taskId, msg.approved, msg.reason, deps);
+      return;
+    case 'sendTaskMessage':
+      await handleTaskControl({ kind: 'message', text: msg.text }, msg.taskId, deps);
+      return;
+    case 'removeQueuedTaskMessage':
+      await handleTaskControl({ kind: 'removeQueued', id: msg.id }, msg.taskId, deps);
+      return;
+    case 'interruptTask':
+      await handleTaskControl({ kind: 'interrupt' }, msg.taskId, deps);
       return;
     case 'mergeTasks':
       await handleMergePlan(msg.taskIds, deps);

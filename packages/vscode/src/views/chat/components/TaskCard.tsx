@@ -4,6 +4,7 @@ import ModelSelector, { getModelClass, providerLabel } from './ModelSelector';
 import DependencyPicker from './DependencyPicker';
 import { lastLine } from '../taskOutput';
 import { checkLabel } from '../checkLabel';
+import { awaitingLabel } from '../awaitingLabel';
 import { dependencyCandidates, capConflictFiles } from '@ordewell/core/plan-utils';
 import { Task, DiscoveredModel, TaskModelAssignment, TaskIsolation } from '@ordewell/core';
 
@@ -171,7 +172,8 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
   // Stalled overrides the spinning "Running" badge — same status, distinct
   // visual, and reverts the instant idleSince clears on resumed output.
   const isStalled = task.status === 'in_progress' && !!idleSince;
-  const status = isStalled ? STATUS_CONFIG.stalled : (STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending);
+  const baseStatus = isStalled ? STATUS_CONFIG.stalled : (STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending);
+  const status = { ...baseStatus, label: awaitingLabel(task) ?? baseStatus.label };
   const isUserTask = task.type === 'user';
   const activeModes = modes && modes.length > 0 ? modes : DEFAULT_MODES;
 

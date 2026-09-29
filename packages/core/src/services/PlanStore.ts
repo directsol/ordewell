@@ -1,5 +1,5 @@
 import {
-  Task, TaskSnapshot, TaskStatus, RunnerId, flattenTasks,
+  Task, TaskSnapshot, TaskStatus, RunnerId, AwaitingReason, flattenTasks,
   addTaskToPlan, removeTaskFromPlan, updateTaskInPlan,
   createTask, renumberTasks,
 } from '../models/Task';
@@ -248,37 +248,44 @@ export class PlanStore {
   }
 
   markCompleted(id: string): void {
-    const task = this._taskMap.get(id);
-    if (task) task.status = 'completed';
+    this.setStatus(id, 'completed');
   }
 
   markFailed(id: string): void {
-    const task = this._taskMap.get(id);
-    if (task) task.status = 'failed';
+    this.setStatus(id, 'failed');
   }
 
   markInProgress(id: string): void {
-    const task = this._taskMap.get(id);
-    if (task) task.status = 'in_progress';
+    this.setStatus(id, 'in_progress');
   }
 
-  markAwaitingUser(id: string): void {
+  markAwaitingUser(id: string, reason?: AwaitingReason): void {
     const task = this._taskMap.get(id);
-    if (task) task.status = 'awaiting_user';
+    if (!task) return;
+    task.status = 'awaiting_user';
+    if (reason) task.awaitingReason = reason;
+    else delete task.awaitingReason;
   }
 
   markPending(id: string): void {
-    const task = this._taskMap.get(id);
-    if (task) task.status = 'pending';
+    this.setStatus(id, 'pending');
   }
 
   retry(id: string): void {
     const task = this._taskMap.get(id);
     if (task) {
-      task.status = 'pending';
+      this.setStatus(id, 'pending');
       task.verdict = undefined;
       task.outputSummary = undefined;
     }
+  }
+
+  /** A reason outlives nothing: any status but `awaiting_user` drops it. */
+  private setStatus(id: string, status: Exclude<TaskStatus, 'awaiting_user'>): void {
+    const task = this._taskMap.get(id);
+    if (!task) return;
+    task.status = status;
+    delete task.awaitingReason;
   }
 
   blockDependents(id: string): void {

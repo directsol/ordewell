@@ -16,7 +16,7 @@ export interface SessionEventRelayDeps {
   /** Where isolation notices go, for a host whose notifications are not seen by the user. */
   onNotice?: (notice: SessionNotice) => void;
   store: Pick<PlanStore, 'allTasks' | 'snapshot'>;
-  orchestrator: Pick<TaskOrchestrator, 'getIdleSince' | 'getTaskIsolation'>;
+  orchestrator: Pick<TaskOrchestrator, 'getIdleSince' | 'getTaskIsolation' | 'getQueuedTaskMessages'>;
   /** Shared with the Session, which snapshots, restores and clears it. */
   usage: PlannerUsageLedger;
 }
@@ -99,7 +99,7 @@ export class SessionEventRelay {
     plan.tasks = this.store.snapshot();
     this.broadcast({
       type: 'status_update',
-      tasks: this.store.allTasks.map((t) => serializeTaskStatus(t, this.orchestrator.getIdleSince(t.id), this.orchestrator.getTaskIsolation(t.id))),
+      tasks: this.store.allTasks.map((t) => serializeTaskStatus(t, this.orchestrator.getIdleSince(t.id), this.orchestrator.getTaskIsolation(t.id), this.orchestrator.getQueuedTaskMessages(t.id))),
     });
   }
 
