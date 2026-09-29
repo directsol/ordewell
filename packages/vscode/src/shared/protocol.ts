@@ -143,6 +143,8 @@ export type WebviewToHost =
   | { type: 'toggleSkill'; skillId: string; enabled: boolean }
   /** The experimental runner transport (ADR-0018); a run copies it when it starts. */
   | { type: 'setRunnerTransport'; transport: RunnerTransport }
+  /** Open (or focus) the on-demand task-log tab for a structured task (ADR-0018, V1). */
+  | { type: 'openTaskLog'; taskId: string }
   /** Who plans (ADR-0009) — a vendor provider id or one of the harness planners. */
   | { type: 'setPlanner'; provider: string }
   /** The planner's own model and thinking effort, a pair so neither can outlive the other. */

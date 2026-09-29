@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { AiProvider, LegacyPlanState, DiscoveredModel, RunnerId, TaskIsolation, IsolationHandoff, IsolationMergeResult, RunnerTransport } from '@ordewell/core';
 import { ConversationViewHost, type SavedConversation } from '../ConversationViewHost';
+import { renderWebviewHtml } from './webviewHtml';
 import type { ChatState, HostToWebview, ModelOption, PendingPlanEdit, PlannerBackend, RunnerMeta, RunnerModeMeta, WebviewToHost } from '../shared/protocol';
 
 export type { PlannerBackend, RunnerMeta } from '../shared/protocol';
@@ -8,13 +9,6 @@ export type { PlannerBackend, RunnerMeta } from '../shared/protocol';
 // The union core owns, not a copy of it: a hand-maintained duplicate silently
 // diverged the moment ADR-0009 added the three harness planners.
 type ApiProvider = AiProvider;
-
-function getNonce(): string {
-  let text = '';
-  const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  for (let i = 0; i < 64; i++) text += possible.charAt(Math.floor(Math.random() * possible.length));
-  return text;
-}
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
@@ -243,20 +237,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
 
   private renderHtml(webviewView: vscode.WebviewView): void {
-    const nonce = getNonce();
-    const scriptUri = webviewView.webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'dist', 'webviews', 'chat.js'));
-    const styleUri = webviewView.webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'dist', 'webviews', 'assets', 'chat.css'));
-    const cspSource = webviewView.webview.cspSource;
-    webviewView.webview.html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; style-src-elem ${cspSource} 'unsafe-inline'; script-src ${cspSource} 'nonce-${nonce}'; connect-src ${cspSource}; img-src ${cspSource};">
-  <link rel="stylesheet" href="${styleUri}">
-  <title>Ordewell Chat</title>
-</head>
-<body><div id="root"></div><script type="module" nonce="${nonce}" src="${scriptUri}"></script></body>
-</html>`;
+    webviewView.webview.html = renderWebviewHtml({
+      webview: webviewView.webview,
+      extensionUri: this._extensionUri,
+      script: 'chat.js',
+      title: 'Ordewell Chat',
+    });
   }
 }

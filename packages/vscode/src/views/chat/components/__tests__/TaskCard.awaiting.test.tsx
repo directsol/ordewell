@@ -33,6 +33,11 @@ describe('what an awaiting task waits on (ADR-0018, W1)', () => {
     expect(screen.getByText('Mark Complete')).toBeTruthy();
   });
 
+  it('does not require a running plan to show the wait — a stopped run leaves it held', () => {
+    render(<TaskCard task={makeTask({ awaitingReason: 'input' })} models={[]} />);
+    expect(screen.getByText('Waiting for your input', { selector: '.task-status-badge' })).toBeTruthy();
+  });
+
   it('shows the reason on a subtask card too', () => {
     const parent = makeTask({ id: 'p1', status: 'in_progress' });
     render(<SubTaskCard task={makeTask({ id: 's1', awaitingReason: 'checkpoint' })} parentTask={parent} models={[]} isExecuting />);

@@ -95,7 +95,7 @@ function page(theme) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="stylesheet" href="/assets/chat.css">
+<link rel="stylesheet" href="/assets/styles.css">
 <title>Ordewell webview harness</title>
 <style>
   ${themeStyle(theme)}

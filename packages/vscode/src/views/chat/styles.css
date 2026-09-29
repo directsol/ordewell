@@ -4936,3 +4936,287 @@ body {
   border-radius: var(--radius-full);
   background: var(--bg-secondary);
 }
+
+/* ---- Task log tab (ADR-0018, V1) ---- */
+/* The on-demand editor tab a structured task opens. It reuses the chat's
+   ConversationBlocks classes above; these are only what a task adds: the
+   header, the queue and the composer, all on the same theme variables. */
+
+.task-log-open-btn {
+  font-size: 10px;
+  padding: 1px 8px;
+  margin-left: 6px;
+  border-radius: 3px;
+  font-weight: 500;
+  flex-shrink: 0;
+  cursor: pointer;
+  font-family: inherit;
+  background: var(--purple-subtle);
+  color: var(--purple);
+  border: 1px solid color-mix(in srgb, var(--purple) 40%, transparent);
+}
+
+.task-log-open-btn:hover {
+  background: color-mix(in srgb, var(--purple) 22%, transparent);
+}
+
+.task-log-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.task-log-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+
+.task-log-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-log-runner {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.task-log-state {
+  font-size: 10px;
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.task-log-state.working {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.task-log-state.waiting {
+  background: var(--orange-subtle);
+  color: var(--orange);
+}
+
+.task-log-state.checkpoint {
+  background: var(--orange-subtle);
+  color: var(--orange);
+}
+
+.task-log-state.done {
+  background: var(--green-subtle);
+  color: var(--green);
+}
+
+.task-log-state.failed {
+  background: var(--red-subtle);
+  color: var(--red);
+}
+
+.task-log-state.idle {
+  background: rgba(139, 148, 158, 0.1);
+  color: var(--text-muted);
+}
+
+.task-log-spacer {
+  flex: 1;
+}
+
+.task-log-detail,
+.task-log-interrupt,
+.task-log-attempt,
+.task-log-send {
+  font-family: inherit;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.task-log-detail {
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.task-log-detail:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.task-log-attempt {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+}
+
+.task-log-attempt select {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.task-log-interrupt {
+  padding: 2px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--red);
+  background: var(--red-subtle);
+  color: var(--red);
+  cursor: pointer;
+}
+
+.task-log-interrupt:hover {
+  background: color-mix(in srgb, var(--red) 22%, transparent);
+}
+
+.task-log-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 6px 14px;
+  font-size: 12px;
+  background: var(--red-subtle);
+  color: var(--red);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.task-log-error button {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--red);
+  background: transparent;
+  color: var(--red);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.task-log-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.task-log-empty {
+  padding: 16px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.task-log-queued {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+
+.task-log-queued-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.task-log-queued-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.task-log-queued-text {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-log-queued-remove {
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.task-log-queued-remove:hover {
+  color: var(--red);
+}
+
+.task-log-composer {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-primary);
+}
+
+.task-log-input {
+  flex: 1;
+  resize: none;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.task-log-input::placeholder {
+  color: var(--text-placeholder);
+}
+
+.task-log-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.task-log-send {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent-emphasis);
+  background: var(--accent-emphasis);
+  color: #ffffff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.task-log-send:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.task-log-send:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

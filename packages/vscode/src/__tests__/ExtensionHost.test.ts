@@ -17,6 +17,7 @@ import type { VsCodeFileSystem } from '../adapters/VsCodeFileSystem';
 import type { VsCodeNotification } from '../adapters/VsCodeNotification';
 import type { VsCodeTerminalRunner } from '../adapters/VsCodeTerminalRunner';
 import type { WebviewToHost } from '../shared/protocol';
+import { __panels, __resetPanels } from '../test/vscode.mock';
 
 const models: DiscoveredModel[] = [
   { modelId: 'claude-sonnet-4-5', modelLabel: 'Claude Sonnet 4.5', variants: [], runnerProvider: 'anthropic' },
@@ -219,7 +220,7 @@ function harness(overrides: {
   const pluginRegistry = new RunnerRegistry();
 
   const services: ExtensionServices = {
-    context: { subscriptions: [] } as unknown as vscode.ExtensionContext,
+    context: { subscriptions: [], extensionUri: { toString: () => 'file:///ext' } } as unknown as vscode.ExtensionContext,
     outputChannel: { appendLine: vi.fn() } as unknown as vscode.OutputChannel,
     secretStore: { set: vi.fn(), get: vi.fn() } as unknown as SecretStore,
     config: config.config,
@@ -352,5 +353,19 @@ describe('the extension host wires one state, one deps bag and one lifecycle', (
     h.host.dispose();
 
     expect(stopAll).toHaveBeenCalled();
+  });
+
+  it('opens a task log tab on request, through the one registry', async () => {
+    await h.host.start();
+    __resetPanels();
+    (h.session.spies as unknown as { planTasks: unknown[] }).planTasks = [
+      createTask({ id: 't1', order: 1, title: 'Parse JSON', assignedRunner: 'claude-code' }),
+    ];
+
+    h.chat.messages.fire({ type: 'openTaskLog', taskId: 't1' });
+
+    await vi.waitFor(() => expect(__panels).toHaveLength(1));
+    expect(__panels[0].viewType).toBe('ordewellTaskLog');
+    expect(__panels[0].title).toBe('Task 1 · Parse JSON');
   });
 });

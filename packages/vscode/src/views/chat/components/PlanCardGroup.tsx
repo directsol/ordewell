@@ -42,6 +42,8 @@ interface PlanCardGroupProps {
   onExecutePlan?: () => void;
   onStopExecution?: () => void;
   onRunTask?: (taskId: string) => void;
+  /** Open (or focus) a structured task's log tab (ADR-0018, V1). */
+  onOpenLog?: (taskId: string) => void;
 }
 
 export default function PlanCardGroup({
@@ -75,6 +77,7 @@ export default function PlanCardGroup({
   onExecutePlan,
   onStopExecution,
   onRunTask,
+  onOpenLog,
 }: PlanCardGroupProps) {
   const [mergeSelectedIds, setMergeSelectedIds] = useState<string[]>([]);
   const [mergeValidationError, setMergeValidationError] = useState<string | null>(null);
@@ -243,6 +246,7 @@ export default function PlanCardGroup({
                 onMarkComplete={onMarkComplete}
                 onMarkIncomplete={onMarkIncomplete}
                 onRunTask={onRunTask}
+                onOpenLog={onOpenLog}
                 expanded={expandedTaskId === task.id}
                 onExpandedChange={(next) => setExpandedTaskId(next ? task.id : null)}
               />
