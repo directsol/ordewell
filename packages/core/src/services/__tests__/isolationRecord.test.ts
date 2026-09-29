@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { capConflictFiles, handoffOf, migratePlanIsolation, taskIsolationOf, type Adr0013PlanIsolation, type Adr0013TaskRecord } from '../isolationRecord';
+import { handoffOf, migratePlanIsolation, taskIsolationOf, type Adr0013PlanIsolation, type Adr0013TaskRecord } from '../isolationRecord';
+import { capConflictFiles } from '../conflictFiles';
 import type { IsolationRun, IsolationTaskRecord, IsolationTaskStatus, PlanIsolation } from '../../interfaces/IWorktreeIsolation';
 
 const legacyTask = (taskId: string, order: number, status: IsolationTaskStatus, linked: string[] = []): Adr0013TaskRecord => ({

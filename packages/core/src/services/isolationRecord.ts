@@ -60,11 +60,6 @@ export function taskIsolationOf(record: IsolationTaskRecord, repairLimit: number
   };
 }
 
-/** A conflict's files as one surface shows them: every one, up to `max`, then how many more. */
-export function capConflictFiles(files: string[], max = 5): string {
-  return files.length <= max ? files.join(', ') : `${files.slice(0, max).join(', ')}, +${files.length - max} more`;
-}
-
 /** What a run hands over: each repo's integration branch and base, and what landed, in plan order. */
 export function handoffOf(run: IsolationRun): IsolationHandoff {
   const merged = Object.values(run.tasks)
