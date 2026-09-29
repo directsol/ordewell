@@ -381,4 +381,27 @@ describe('ApiClient — adopting a saved session', () => {
       'POST /api/plans/s1/tasks/t1/interrupt',
     ]);
   });
+
+  it('answers a planner prompt with a yes/no and a runner\'s request with its whole decision', async () => {
+    const hits: string[] = [];
+    const srv = await startCustomServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => { body += String(chunk); });
+      req.on('end', () => {
+        hits.push(`${req.method} ${req.url} ${body}`);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    servers.push(srv);
+    const client = new ApiClient(srv.port);
+
+    await client.respondToApproval('s1', 'ap-1', true);
+    await client.respondToApproval('s1', 'ap-2', { decision: 'deny', note: 'not there' });
+    expect(hits).toEqual([
+      'POST /api/approvals/s1/ap-1 {"granted":true}',
+      'POST /api/approvals/s1/ap-2 {"decision":"deny","note":"not there"}',
+    ]);
+  });
 });
+

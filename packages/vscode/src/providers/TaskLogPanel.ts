@@ -1,14 +1,14 @@
 import * as vscode from 'vscode';
-import type { DisplayBlock, SessionMessage, Task, TaskLogEvent } from '@ordewell/core';
+import type { ApprovalAnswer, DisplayBlock, PendingApproval, SessionMessage, Task, TaskLogEvent } from '@ordewell/core';
 import { EMPTY_TASK_LOG, reduceTaskLog, replayTaskLog, type TaskLogView } from '@ordewell/core/plan-utils';
 import { diffConversation } from '../shared/conversationPatch';
 import { renderWebviewHtml } from './webviewHtml';
 import type { HostToTaskLog, TaskLogStatus, TaskLogToHost } from '../shared/taskLogProtocol';
 
 /**
- * The Session calls a task-log panel makes (ADR-0018, M1). Narrowed to the five
- * the panel owns, so its test needs no Session — the concrete Session
- * satisfies this structurally.
+ * The Session calls a task-log panel makes (ADR-0018, M1, A1). Narrowed to
+ * the ones the panel owns, so its test needs no Session — the concrete
+ * Session satisfies this structurally.
  */
 export interface TaskLogSession {
   taskLogAttempts(taskId: string): number[];
@@ -16,6 +16,8 @@ export interface TaskLogSession {
   sendTaskMessage(taskId: string, text: string): string;
   removeQueuedTaskMessage(taskId: string, id: string): boolean;
   interruptTask(taskId: string): Promise<void>;
+  outstandingApprovals(): PendingApproval[];
+  resolveApproval(id: string, answer: ApprovalAnswer): boolean;
 }
 
 export interface TaskLogPanelDeps {
@@ -116,6 +118,12 @@ export class TaskLogPanel {
       case 'interruptTask':
         this.controlAsync(() => this.deps.session.interruptTask(this.taskId));
         return;
+      // The card settles when the task log reports the answer.
+      case 'answerApproval':
+        this.control(() => {
+          if (!this.deps.session.resolveApproval(msg.id, msg.decision)) throw new Error('That request is no longer waiting for an answer.');
+        });
+        return;
     }
   }
 
@@ -190,6 +198,8 @@ export class TaskLogPanel {
       runner: task?.assignedRunner ?? '',
       planStatus: task?.status ?? 'pending',
       awaitingReason: task?.awaitingReason,
+      awaitingApproval: this.deps.session.outstandingApprovals()
+        .filter((p) => p.request.kind === 'runner_tool' && p.request.taskId === this.taskId).length,
       working: this.view.working,
       lastTurnEnd: this.view.lastTurnEnd,
       queued: this.view.queued,

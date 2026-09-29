@@ -1,6 +1,6 @@
-import { EMPTY_TASK_LOG, reduceTaskLog, replayTaskLog, type TaskLogEvent } from '@ordewell/core';
+import { EMPTY_TASK_LOG, reduceTaskLog, replayTaskLog, runnerToolSubject, type ApprovalDecision, type TaskLogEvent } from '@ordewell/core';
 import type { Key } from '../keys';
-import { findTask, type TaskLogState, type TuiState } from '../state';
+import { findTask, waitingApproval, type TaskLogState, type TuiState } from '../state';
 import { say } from '../transcript';
 import { step, type Step, type Action } from './shared';
 
@@ -92,6 +92,21 @@ export function taskLogArrived(state: TuiState, action: Extract<Action, { type: 
 }
 
 /**
+ * A runner asking for approval is announced wherever the user is (ADR-0018,
+ * A1), except in the view already showing its card: the task may be one the
+ * user is not watching, and it waits until someone answers. Another task's
+ * open view keeps its place.
+ */
+export function announceApprovals(state: TuiState, action: Extract<Action, { type: 'taskLog' }>): TuiState {
+  if (state.taskView?.taskId === action.taskId) return state;
+  const task = findTask(state.tasks, action.taskId);
+  const spoken = action.events.reduce((s, event) => (event.type === 'approval_requested'
+    ? say(s, 'system', `· Task ${task?.order ?? '?'} waits for approval: ${runnerToolSubject(event.tool, event.args)} — t on it to answer`)
+    : s), state);
+  return state.taskView && spoken !== state ? { ...spoken, scroll: state.scroll } : spoken;
+}
+
+/**
  * A saved log (or its absence): replay it, then catch up on buffered live
  * batches. A batch for the attempt just replayed is dropped — the recorder
  * appends before it broadcasts, so the file already holds it; a batch for any
@@ -114,6 +129,23 @@ export function taskLogLoaded(state: TuiState, action: Extract<Action, { type: '
     next = applyLive(next, batch.attempt, batch.events);
   }
   return { ...state, taskView: clampQueueIndex(next) };
+}
+
+/**
+ * Answer the waiting request (ADR-0018, A1). A denial takes what is in the
+ * composer as its note to the agent, so the note is written the way any
+ * message to the task is, and the composer is emptied once it is sent.
+ */
+function answerApproval(state: TuiState, tv: TaskLogState, sessionId: string, decision: ApprovalDecision['decision']): Step {
+  const approval = waitingApproval(tv);
+  if (!approval?.approvalId) return step(say(state, 'system', 'Nothing is waiting for approval.'));
+  if (decision === 'allowForTask' && !approval.allowForTask) {
+    return step(say(state, 'system', 'The runner offered no grant for the rest of this task — ctrl-y allows this call.'));
+  }
+  const note = decision === 'deny' ? state.editor.text.trim() : '';
+  const answer: ApprovalDecision = decision === 'deny' ? { decision, ...(note ? { note } : {}) } : { decision };
+  const next = note ? { ...state, editor: { ...state.editor, text: '', cursor: 0 } } : state;
+  return step(next, [{ type: 'answerTaskApproval', sessionId, approvalId: approval.approvalId, answer }]);
 }
 
 /**
@@ -148,6 +180,10 @@ export function handleTaskViewKey(state: TuiState, key: Key): Step | null {
   if (key.name === 'ctrl-x') {
     return step(state, [{ type: 'interruptTask', sessionId: state.sessionId, taskId: tv.taskId }]);
   }
+
+  if (key.name === 'ctrl-y') return answerApproval(state, tv, state.sessionId, 'allow');
+  if (key.name === 'ctrl-t') return answerApproval(state, tv, state.sessionId, 'allowForTask');
+  if (key.name === 'ctrl-g') return answerApproval(state, tv, state.sessionId, 'deny');
 
   if (key.name === 'ctrl-n' || key.name === 'ctrl-p') {
     const count = tv.view.queued.length;

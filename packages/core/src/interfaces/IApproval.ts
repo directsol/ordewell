@@ -11,7 +11,12 @@
  * result — never a silent success.
  */
 
-export type ApprovalKind = 'external_path' | 'shell_command' | 'url_fetch';
+/**
+ * `runner_tool` is a task runner's own tool request (ADR-0018, A1): it waits
+ * for an answer as long as it takes, and never passes through the planner's
+ * policy — the runner's mode already decided it needed asking.
+ */
+export type ApprovalKind = 'external_path' | 'shell_command' | 'url_fetch' | 'runner_tool';
 
 export interface ApprovalRequest {
   kind: ApprovalKind;
@@ -24,6 +29,36 @@ export interface ApprovalRequest {
   scope: string;
   /** One-line context for the prompt. */
   detail?: string;
+  /** The task whose runner asked; absent for the planner's own requests. */
+  taskId?: string;
+  /** "Allow for this task" can be offered: the runner proposed its own session-scoped grant. */
+  allowForTask?: boolean;
+}
+
+/**
+ * An answer, from whoever gives it — a person on any surface, or later the
+ * supervisor (#28). `allowForTask` is Allow plus the runner's own grant for
+ * the rest of the task; `note` goes back to the agent with a denial.
+ */
+export type ApprovalDecision =
+  | { decision: 'allow' }
+  | { decision: 'allowForTask' }
+  | { decision: 'deny'; note?: string };
+
+/** What an answer may be given as: a planner prompt's yes/no still is one. */
+export type ApprovalAnswer = boolean | ApprovalDecision;
+
+export function toApprovalDecision(answer: ApprovalAnswer): ApprovalDecision {
+  if (typeof answer === 'boolean') return { decision: answer ? 'allow' : 'deny' };
+  return answer;
+}
+
+export function isGranted(decision: ApprovalDecision): boolean {
+  return decision.decision !== 'deny';
+}
+
+export function isRunnerApproval(request: ApprovalRequest): boolean {
+  return request.kind === 'runner_tool';
 }
 
 export interface IApproval {

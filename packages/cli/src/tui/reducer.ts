@@ -10,7 +10,7 @@ import { findTask, isTaskRunning, planRows, plannerInFlight, type RunStatus, typ
 import type { Key } from './keys';
 import { handleOverlayKey } from './reducers/overlays';
 import { handlePlanKey } from './reducers/planPane';
-import { handleTaskViewKey, taskLogAbandoned, taskLogArrived, taskLogLoaded } from './reducers/taskView';
+import { announceApprovals, handleTaskViewKey, taskLogAbandoned, taskLogArrived, taskLogLoaded } from './reducers/taskView';
 import { pickRewindTarget, runCommand } from './reducers/commands';
 import { disarmStop, drainQueue, plannerEscape } from './reducers/turnQueue';
 import { applySettings, followSession, normalizeTasks, runLabel } from './reducers/incoming';
@@ -100,7 +100,7 @@ export function reduce(state: TuiState, action: Action): Step {
 
     case 'taskLog':
       if (stale(state, action.sessionId)) return step(state);
-      return step(taskLogArrived(state, action));
+      return step(announceApprovals(taskLogArrived(state, action), action));
 
     case 'taskLogLoaded':
       if (stale(state, action.sessionId)) return step(state);
@@ -144,12 +144,13 @@ export function reduce(state: TuiState, action: Action): Step {
         // means the task's latest attempt was not asked to run structured.
         const transport = update.transport;
         const awaitingReason = update.awaitingReason;
+        const awaitingApproval = update.awaitingApproval;
         if (
           update.status !== t.status || idleSince !== (t.idleSince ?? null) || !sameIsolation(isolation, t.isolation)
-          || !sameTransport(transport, t.transport) || awaitingReason !== t.awaitingReason
+          || !sameTransport(transport, t.transport) || awaitingReason !== t.awaitingReason || awaitingApproval !== t.awaitingApproval
         ) {
           changed = true;
-          return { ...t, status: update.status, idleSince, isolation, transport, awaitingReason };
+          return { ...t, status: update.status, idleSince, isolation, transport, awaitingReason, awaitingApproval };
         }
         return t;
       });

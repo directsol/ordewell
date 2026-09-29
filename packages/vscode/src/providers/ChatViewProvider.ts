@@ -47,6 +47,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   sendTaskOutput(taskId: string, text: string): void { this.postMessage({ type: 'taskOutput', taskId, text }); }
   /** Advisory silence timestamp for one task; null clears the stalled indicator. */
   sendTaskIdle(taskId: string, idleSince: string | null): void { this.postMessage({ type: 'taskIdle', taskId, idleSince }); }
+  /** Runner requests one task waits on (ADR-0018, A1); 0 clears the card's badge. */
+  sendTaskApprovals(taskId: string, count: number): void { this.postMessage({ type: 'taskApprovals', taskId, count }); }
   setModels(models: DiscoveredModel[]): void {
     this.postMessage({ type: 'setModels', models });
   }

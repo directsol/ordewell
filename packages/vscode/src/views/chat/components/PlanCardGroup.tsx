@@ -19,6 +19,8 @@ interface PlanCardGroupProps {
   taskOutput?: Record<string, string>;
   /** Advisory silence timestamp per task id; null/absent means not stalled. */
   taskIdle?: Record<string, string | null>;
+  /** Runner requests waiting for an answer per task id (ADR-0018, A1). */
+  taskApprovals?: Record<string, number>;
   /** Per-task isolation state (ADR-0013), keyed by task id. */
   isolationByTask?: Record<string, TaskIsolation>;
   /** Opt in to resolving a conflicted task's merge as a new AI task. */
@@ -56,6 +58,7 @@ export default function PlanCardGroup({
   runnerLabels: _runnerLabels,
   taskOutput,
   taskIdle,
+  taskApprovals,
   isolationByTask,
   onResolveConflict,
   onRunnerChange,
@@ -229,6 +232,7 @@ export default function PlanCardGroup({
                 dependentCount={dependentCountMap.get(task.id) ?? 0}
                 output={taskOutput?.[task.id]}
                 idleSince={taskIdle?.[task.id] ?? null}
+                awaitingApproval={taskApprovals?.[task.id] ?? 0}
                 isolation={isolationByTask?.[task.id] ?? null}
                 onResolveConflict={onResolveConflict}
                 siblings={sorted}

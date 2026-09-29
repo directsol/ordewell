@@ -39,6 +39,8 @@ interface TaskCardProps {
   output?: string;
   /** Advisory silence timestamp (VerdictEngine) — set while in_progress with no recent output. */
   idleSince?: string | null;
+  /** Runner requests this task waits on (ADR-0018, A1); answered in its log tab. */
+  awaitingApproval?: number;
   /** Per-task isolation state (ADR-0013), only when the plan has an isolation run. */
   isolation?: TaskIsolation | null;
   /** Opt in to resolving this task's merge conflict as an AI task. */
@@ -136,7 +138,7 @@ export function runnerOptionsFor(runners: RunnerOption[] | undefined, assignedRu
   return [...runners, { id: assignedRunner, displayName: assignedRunner }];
 }
 
-export default function TaskCard({ task, models, modes, modelsByRunner, modesByRunner, runners, effectiveRunner, configuredProviders, modelApiMapping, isExecuting, output, idleSince, isolation, onResolveConflict, taskOrderMap, dependentCount, siblings, onDependenciesChange, onRunnerChange, onModelChange, onModelsRefreshNeeded, onModeChange, onRemoveTask, onPromptChange, onRetry, onSkip, onCancel, onForceStart, onMarkComplete, onMarkIncomplete, onRunTask, onOpenLog, expanded: expandedProp, onExpandedChange }: TaskCardProps) {
+export default function TaskCard({ task, models, modes, modelsByRunner, modesByRunner, runners, effectiveRunner, configuredProviders, modelApiMapping, isExecuting, output, idleSince, awaitingApproval = 0, isolation, onResolveConflict, taskOrderMap, dependentCount, siblings, onDependenciesChange, onRunnerChange, onModelChange, onModelsRefreshNeeded, onModeChange, onRemoveTask, onPromptChange, onRetry, onSkip, onCancel, onForceStart, onMarkComplete, onMarkIncomplete, onRunTask, onOpenLog, expanded: expandedProp, onExpandedChange }: TaskCardProps) {
   const [internalExpanded, setInternalExpanded] = useState(false);
   const isControlled = expandedProp !== undefined;
   const expanded = isControlled ? expandedProp : internalExpanded;
@@ -246,6 +248,17 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
         )}
         {task.transport?.fallback && (
           <span className="task-transport-badge fallback" title={`Ran in a terminal: ${task.transport.fallback}`}>Terminal: {task.transport.fallback}</span>
+        )}
+
+        {/* Approvals arrive mid-turn and leave the status alone (ADR-0018,
+            A1), so waiting on one is a badge beside it, which opens the log
+            where the request is answered. */}
+        {awaitingApproval > 0 && (
+          <button type="button" className="task-approval-badge"
+            onClick={(e) => { e.stopPropagation(); onOpenLog?.(task.id); }}
+            title="The runner is waiting for you to allow or deny a tool call — open the log to answer">
+            {awaitingApproval > 1 ? `Waiting for approval (${awaitingApproval})` : 'Waiting for approval'}
+          </button>
         )}
 
         {isStructured && onOpenLog && (

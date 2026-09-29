@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { describe, it, expect, vi } from 'vitest';
@@ -9,6 +9,7 @@ import { StructuredRunner } from '../StructuredRunner';
 import { TransportRouter } from '../TransportRouter';
 import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
 import type { RunnerSpawnOptions } from '../AbstractRunner';
+import type { SessionMessage } from '../SessionMessage';
 import { makeSession, taskOf } from './sessionTestKit';
 
 /**
@@ -90,4 +91,103 @@ describe.runIf(live)('structured run — live', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, TIMEOUT_MS * 2);
+
+  // Mode `default` is "Ask before edits": the write is a request Claude asks
+  // over the control channel, and the task waits on it for as long as it takes.
+  it('parks an Ask before edits task on its write until the request is answered (A1)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ordewell-structured-approval-'));
+    writeFileSync(join(dir, 'package.json'), '{ "name": "structured-approval" }\n');
+    const router = new TransportRouter({ terminal: new HeadlessRunner(), structured: new StructuredRunner() });
+    const sent: SessionMessage[] = [];
+    const session = makeSession({
+      runner: router,
+      workspaceRoot: () => dir,
+      broadcast: (m) => sent.push(m),
+      settings: () => ({ tddEnabled: false, runnerTransport: 'structured' }),
+      taskOutput: new BufferedTaskOutputSource(),
+    });
+    const plan: LegacyPlanState = {
+      tasks: [createTask({
+        id: 'live-approval', order: 1, title: 'Write a note', taskMode: 'default', assignedModel: { modelId: model, modelLabel: model },
+        prompt: 'Use the Write tool to create notes.txt containing exactly the word hello. Do nothing else.',
+      })],
+      generatedAt: new Date().toISOString(),
+      status: 'approved',
+      runners: ['claude-code'],
+      lastUpdated: new Date().toISOString(),
+    };
+    const logged = () => sent.flatMap((m) => (m.type === 'task_log' ? m.events : []));
+
+    try {
+      session.loadPlan(plan, 'Structured approval', dir);
+      await session.executePlan();
+
+      await vi.waitFor(() => expect(session.outstandingApprovals()).toHaveLength(1), { timeout: TIMEOUT_MS, interval: 250 });
+      const [pending] = session.outstandingApprovals();
+      expect(pending.request).toMatchObject({ kind: 'runner_tool', taskId: 'live-approval', scope: 'Write', allowForTask: true });
+      expect(taskOf(session, 'live-approval')?.status).toBe('in_progress');
+      const status = sent.filter((m): m is Extract<SessionMessage, { type: 'status_update' }> => m.type === 'status_update').at(-1);
+      expect(status?.tasks.find((t) => t.id === 'live-approval')?.awaitingApproval).toBe(1);
+      expect(sent.some((m) => m.type === 'approval_request')).toBe(false);
+      expect(existsSync(join(dir, 'notes.txt'))).toBe(false);
+
+      expect(session.resolveApproval(pending.id, { decision: 'allow' })).toBe(true);
+      await vi.waitFor(() => expect(taskOf(session, 'live-approval')?.status).toBe('completed'), { timeout: TIMEOUT_MS, interval: 500 });
+      expect(readFileSync(join(dir, 'notes.txt'), 'utf8').trim()).toBe('hello');
+      expect(logged()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'approval_requested', approvalId: pending.id, tool: 'Write', allowForTask: true }),
+        { type: 'approval_decided', approvalId: pending.id, decision: 'allow' },
+      ]));
+    } finally {
+      session.destroy();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, TIMEOUT_MS * 2);
+
+  it('hands a denial\'s note to the agent, and denies what is left when the task is cancelled (A1)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ordewell-structured-deny-'));
+    writeFileSync(join(dir, 'package.json'), '{ "name": "structured-deny" }\n');
+    const router = new TransportRouter({ terminal: new HeadlessRunner(), structured: new StructuredRunner() });
+    const sent: SessionMessage[] = [];
+    const session = makeSession({
+      runner: router,
+      workspaceRoot: () => dir,
+      broadcast: (m) => sent.push(m),
+      settings: () => ({ tddEnabled: false, runnerTransport: 'structured' }),
+      taskOutput: new BufferedTaskOutputSource(),
+    });
+    const plan: LegacyPlanState = {
+      tasks: [createTask({
+        id: 'live-deny', order: 1, title: 'Write a note', taskMode: 'default', assignedModel: { modelId: model, modelLabel: model },
+        prompt: 'Use the Write tool to create a.txt containing a. If that is denied, follow the reason you are given.',
+      })],
+      generatedAt: new Date().toISOString(),
+      status: 'approved',
+      runners: ['claude-code'],
+      lastUpdated: new Date().toISOString(),
+    };
+    const logged = () => sent.flatMap((m) => (m.type === 'task_log' ? m.events : []));
+    const writes = () => logged().flatMap((e) => (e.type === 'approval_requested' ? [e] : []));
+
+    try {
+      session.loadPlan(plan, 'Structured deny', dir);
+      await session.executePlan();
+
+      await vi.waitFor(() => expect(session.outstandingApprovals()).toHaveLength(1), { timeout: TIMEOUT_MS, interval: 250 });
+      session.resolveApproval(session.outstandingApprovals()[0].id, { decision: 'deny', note: 'Not a.txt — write it to notes/b.txt instead.' });
+      await vi.waitFor(() => expect(logged()).toContainEqual(expect.objectContaining({ type: 'tool_result', success: false, output: 'Not a.txt — write it to notes/b.txt instead.' })), { timeout: TIMEOUT_MS, interval: 250 });
+
+      await vi.waitFor(() => expect(writes()).toHaveLength(2), { timeout: TIMEOUT_MS, interval: 250 });
+      expect(writes()[1].args).toContain('notes/b.txt');
+      await session.cancelTask('live-deny');
+      expect(session.outstandingApprovals()).toEqual([]);
+      await vi.waitFor(() => expect(logged()).toContainEqual({ type: 'approval_decided', approvalId: writes()[1].approvalId, decision: 'deny' }), { timeout: 10_000 });
+      expect(existsSync(join(dir, 'a.txt'))).toBe(false);
+      expect(existsSync(join(dir, 'notes', 'b.txt'))).toBe(false);
+    } finally {
+      session.destroy();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, TIMEOUT_MS * 2);
 });
+

@@ -1,6 +1,7 @@
 import type { IConfig } from './interfaces/IConfig';
 import type { IFileSystem, ToolOutcome } from './interfaces/IFileSystem';
 import type { ITerminalSession, QueuedTaskMessage, StructuredEvent, StructuredSessionCapability, StructuredTurnEnd } from './interfaces/ITerminalRunner';
+import type { ApprovalDecision } from './interfaces/IApproval';
 import type {
   IsolationAvailability,
   IsolationHandoff,
@@ -155,6 +156,26 @@ export class FakeStructuredSession extends FakeTerminalSession implements Struct
     if (this.state === 'working') this.emitTurnEnd('interrupted');
   }
   nativeSessionId(): string | null { return this.sessionId; }
+
+  /** Every answer this session was given, in order. */
+  answers: Array<{ id: string; decision: ApprovalDecision }> = [];
+  private readonly openPermissions = new Set<string>();
+
+  /** The runner asks to use a tool, as `StructuredSession` announces it. */
+  requestPermission(id: string, name: string, input: Record<string, unknown>, suggestions: unknown[] = []): void {
+    this.openPermissions.add(id);
+    this.emitEvent({ type: 'permission_request', id, name, detail: JSON.stringify(input), input, suggestions });
+  }
+  /** The runner gives up on a request, as an interrupt makes it. */
+  withdrawPermission(id: string): void {
+    if (this.openPermissions.delete(id)) this.emitEvent({ type: 'permission_withdrawn', id });
+  }
+  answerPermission(id: string, decision: ApprovalDecision): boolean {
+    if (!this.openPermissions.delete(id)) return false;
+    this.answers.push({ id, decision });
+    this.emitEvent({ type: 'permission_decided', id, decision });
+    return true;
+  }
 
   emitEvent(event: StructuredEvent): void {
     for (const cb of this.eventCbs) cb(event);

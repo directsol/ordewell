@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as vscode from 'vscode';
-import { createTask, type Task, type TaskLogEvent } from '@ordewell/core';
+import { createTask, type PendingApproval, type Task, type TaskLogEvent } from '@ordewell/core';
 import { TaskLogRegistry } from '../providers/TaskLogRegistry';
 import type { HostToTaskLog } from '../shared/taskLogProtocol';
 import { __panels, __resetPanels } from '../test/vscode.mock';
@@ -25,6 +25,9 @@ function harness(attempts: Record<number, TaskLogEvent[]> = { 1: attemptOne }) {
     sendTaskMessage: vi.fn(() => 'm1'),
     removeQueuedTaskMessage: vi.fn(() => true),
     interruptTask: vi.fn(async () => {}),
+    pending: [] as PendingApproval[],
+    outstandingApprovals: vi.fn((): PendingApproval[] => session.pending),
+    resolveApproval: vi.fn(() => true),
   };
   const registry = new TaskLogRegistry({
     extensionUri: vscode.Uri.file('/ext'),
@@ -68,7 +71,10 @@ describe('the task-log registry (ADR-0018, V1)', () => {
   it('does nothing for a task that is not in the plan', () => {
     const registry = new TaskLogRegistry({
       extensionUri: vscode.Uri.file('/ext'),
-      session: () => ({ taskLogAttempts: () => [], taskLog: () => [], sendTaskMessage: () => 'm', removeQueuedTaskMessage: () => false, interruptTask: async () => {} }),
+      session: () => ({
+        taskLogAttempts: () => [], taskLog: () => [], sendTaskMessage: () => 'm', removeQueuedTaskMessage: () => false, interruptTask: async () => {},
+        outstandingApprovals: () => [], resolveApproval: () => false,
+      }),
       getTask: () => undefined,
       log: vi.fn(),
     });
@@ -166,4 +172,34 @@ describe('the task-log registry (ADR-0018, V1)', () => {
     const status = posted(__panels[0]).find((m) => m.type === 'status');
     expect(status).toMatchObject({ type: 'status', status: { planStatus: 'awaiting_user', awaitingReason: 'input' } });
   });
+
+  it('says the task waits for approval while its runner has a request open, and counts only its own', () => {
+    const h = harness();
+    h.registry.open('t1');
+    __panels[0].__receive({ type: 'ready' });
+    expect(posted(__panels[0])[0]).toMatchObject({ type: 'init', status: { awaitingApproval: 0 } });
+    __panels[0].webview.postMessage.mockClear();
+
+    const request = (id: string, taskId: string, kind: 'runner_tool' | 'shell_command' = 'runner_tool'): PendingApproval => ({
+      id, createdAt: '', request: { kind, subject: 'Bash(npm test)', scope: 'Bash', taskId },
+    });
+    h.session.pending = [request('a', 't1'), request('b', 't2'), request('c', 't1', 'shell_command')];
+    h.registry.receive({ type: 'status_update', tasks: [] });
+
+    expect(posted(__panels[0]).find((m) => m.type === 'status')).toMatchObject({ status: { awaitingApproval: 1 } });
+  });
+
+  it('answers a request with the card\'s whole decision, and says when it no longer waits', () => {
+    const h = harness();
+    h.registry.open('t1');
+    __panels[0].__receive({ type: 'ready' });
+
+    __panels[0].__receive({ type: 'answerApproval', id: 'ap-1', decision: { decision: 'deny', note: 'use notes/' } });
+    expect(h.session.resolveApproval).toHaveBeenCalledWith('ap-1', { decision: 'deny', note: 'use notes/' });
+
+    h.session.resolveApproval.mockReturnValue(false);
+    __panels[0].__receive({ type: 'answerApproval', id: 'ap-1', decision: { decision: 'allow' } });
+    expect(posted(__panels[0])).toContainEqual({ type: 'showError', error: 'That request is no longer waiting for an answer.' });
+  });
 });
+

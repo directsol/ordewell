@@ -340,6 +340,7 @@ function dispatchLifecycle(dispatch: Dispatch, event: LifecycleMessage, sessionI
           isolation: task.isolation,
           transport: task.transport,
           awaitingReason: isAwaitingReason(task.awaitingReason) ? task.awaitingReason : undefined,
+          awaitingApproval: typeof task.awaitingApproval === 'number' && task.awaitingApproval > 0 ? task.awaitingApproval : undefined,
         };
       }
       dispatch({ type: 'tasksStatus', updates, sessionId });

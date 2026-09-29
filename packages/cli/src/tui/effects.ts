@@ -1,6 +1,6 @@
 import { execSync } from 'child_process';
 import {
-  ALL_PROVIDERS, clipboardCopyCommand, isCliProvider, type AiProvider, type HasBinFn, type LegacyPlanState,
+  ALL_PROVIDERS, clipboardCopyCommand, isCliProvider, type AiProvider, type ApprovalAnswer, type HasBinFn, type LegacyPlanState,
   type PlannerModelRecall, type SerializedPlan, type SessionMeta, type TaskLogEvent,
 } from '@ordewell/core';
 import { describeConnectionRefused, isConnectionRefused } from '../daemonClient';
@@ -56,7 +56,7 @@ export interface OrdewellApi {
   setRunnerEnabled(runner: string, enabled: boolean): Promise<{ ok: boolean }>;
   getModels(): Promise<RawCatalog>;
   streamPlanning(sessionId: string, onEvent: (event: WsEvent) => void): { ready: Promise<void>; close: () => void };
-  respondToApproval(sessionId: string, approvalId: string, granted: boolean): Promise<{ ok: boolean }>;
+  respondToApproval(sessionId: string, approvalId: string, answer: ApprovalAnswer): Promise<{ ok: boolean }>;
   /** Opens the execution stream. `onReady` runs only once the subscription is live. */
   streamExecution(sessionId: string, onEvent: (event: WsEvent) => void, onReady?: (error?: Error) => void): Promise<void>;
 }
@@ -292,6 +292,18 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
         // The planner's own timeout denies an unanswered request, so a lost
         // answer degrades to a denial rather than a stuck session.
         dispatch({ type: 'failed', message: 'Could not deliver the approval answer — the planner will treat it as denied.' });
+      }
+      return;
+    }
+
+    // The card settles when the task log reports the answer, not here.
+    case 'answerTaskApproval': {
+      try {
+        await api.respondToApproval(effect.sessionId, effect.approvalId, effect.answer);
+      } catch {
+        // A runner's request never times out, so a lost answer leaves it
+        // waiting rather than denied.
+        dispatch({ type: 'failed', message: 'Could not deliver the answer — the task is still waiting for approval.' });
       }
       return;
     }

@@ -2,7 +2,7 @@ import http from 'http';
 import WebSocket from 'ws';
 import { DEFAULT_PORT } from './daemon';
 import { bearerHeaderValue, readDaemonToken, tokenSubprotocols, mintSessionId } from '@ordewell/core';
-import type { SerializedPlan, DiscoveredModel, SessionMessage, SessionNotice, RewindTarget, IsolationMergeResult, SessionMeta, TaskLogEvent } from '@ordewell/core';
+import type { ApprovalAnswer, SerializedPlan, DiscoveredModel, SessionMessage, SessionNotice, RewindTarget, IsolationMergeResult, SessionMeta, TaskLogEvent } from '@ordewell/core';
 import type { RawCatalog } from './catalog';
 
 const DEFAULT_HTTP_TIMEOUT_MS = 15 * 60 * 1000;
@@ -649,12 +649,16 @@ export class ApiClient {
     });
   }
 
-  /** Answer a planner approval prompt. Requests arrive over the session socket. */
-  async respondToApproval(sessionId: string, approvalId: string, granted: boolean): Promise<{ ok: boolean }> {
+  /**
+   * Answer an approval prompt: the planner's with a yes/no, a task runner's
+   * with the whole decision (ADR-0018, A1). The planner's requests arrive over
+   * the session socket; a runner's, in its task log.
+   */
+  async respondToApproval(sessionId: string, approvalId: string, answer: ApprovalAnswer): Promise<{ ok: boolean }> {
     const { status, data } = await this.httpRequest<{ ok: boolean }>(
       'POST',
       `/api/approvals/${encodeURIComponent(sessionId)}/${encodeURIComponent(approvalId)}`,
-      { granted },
+      typeof answer === 'boolean' ? { granted: answer } : answer,
     );
     if (status !== 200) throw new Error(`Failed to answer approval ${approvalId} (HTTP ${status})`);
     return data;

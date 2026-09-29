@@ -1767,4 +1767,22 @@ describe('a structured task\'s log, messages and interrupt', () => {
     expect(interruptTask).toHaveBeenCalledWith('s1', 't1');
     expect(messageOf(h.actions, 'notice')).toMatch(/Interrupting/);
   });
+
+  it('answers a runner\'s request with the whole decision', async () => {
+    const respondToApproval = vi.fn().mockResolvedValue({ ok: true });
+    const h = harness({ respondToApproval } as Partial<OrdewellApi>);
+
+    await runEffect({ type: 'answerTaskApproval', sessionId: 's1', approvalId: 'ap-1', answer: { decision: 'deny', note: 'not there' } }, h.deps);
+
+    expect(respondToApproval).toHaveBeenCalledWith('s1', 'ap-1', { decision: 'deny', note: 'not there' });
+    expect(h.actions).toEqual([]);
+  });
+
+  it('says a lost answer leaves the task waiting, not denied', async () => {
+    const h = harness({ respondToApproval: vi.fn().mockRejectedValue(new Error('HTTP 409')) } as Partial<OrdewellApi>);
+
+    await runEffect({ type: 'answerTaskApproval', sessionId: 's1', approvalId: 'ap-1', answer: { decision: 'allow' } }, h.deps);
+
+    expect(messageOf(h.actions, 'failed')).toMatch(/still waiting for approval/);
+  });
 });
