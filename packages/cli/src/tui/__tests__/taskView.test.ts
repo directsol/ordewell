@@ -4,7 +4,7 @@ import { width } from '../ansi';
 import { initialState, reduce } from '../reducer';
 import { render } from '../render';
 import type { TaskLogState, TaskView, TuiState } from '../state';
-import { messagesOf } from './chat';
+import { chatOf, messagesOf } from './chat';
 
 function run(text: string, overrides: Partial<TuiState> = {}) {
   const base = initialState(overrides);
@@ -348,5 +348,170 @@ describe('continuing a finished task (ADR-0018, K1)', () => {
     expect(on.tasks[0].continuable).toBe(true);
     const off = reduce(on, { type: 'tasksStatus', sessionId: 's1', updates: { t1: { status: 'in_progress', transport: { kind: 'structured' } } } }).state;
     expect(off.tasks[0].continuable).toBe(false);
+  });
+});
+
+describe('the task view header says what the task is doing', () => {
+  const header = (state: TuiState): string => plain({ ...state, cols: 160 }).split('\n').find((line) => line.includes('→ Task 1 ·')) ?? '';
+
+  it.each([
+    ['input', 'waiting for your input'],
+    ['checkpoint', 'checkpoint'],
+    ['conflict', 'merge conflict'],
+  ] as const)('an awaiting task waiting on %s reads "%s"', (awaitingReason, label) => {
+    const waiting = opened({
+      tasks: [task({ transport: { kind: 'structured' }, status: 'awaiting_user', awaitingReason })],
+      taskView: loaded({ view: replayTaskLog([]) }),
+    });
+    expect(header(waiting)).toContain(`→ Task 1 · Refactor PlanStore · claude-code · ${label}`);
+  });
+
+  it('a live turn reads as working, whatever reason is still saved', () => {
+    const live = opened({
+      tasks: [task({ transport: { kind: 'structured' }, status: 'awaiting_user', awaitingReason: 'input' })],
+      taskView: loaded({ view: replayTaskLog([{ type: 'turn_start', message: 'go on' }]) }),
+    });
+    expect(header(live)).toContain('· working');
+    expect(header(live)).not.toContain('waiting for your input');
+  });
+
+  it('a runner request waiting for an answer beats the live turn it stopped', () => {
+    const asking = opened({ tasks: [task({ transport: { kind: 'structured' }, awaitingApproval: 2 })] });
+    expect(header(asking)).toContain('· waiting for approval (2)');
+  });
+
+  it('a task removed from the plan under an open view says so', () => {
+    expect(plain({ ...opened({ tasks: [] }), cols: 160 })).toContain('→ Task ? · (task removed)');
+  });
+
+  it('shows which attempt is on screen once there is more than one', () => {
+    expect(plain({ ...opened({ taskView: loaded({ attempts: [1, 2, 3], attempt: 2 }) }), cols: 160 })).toContain('alt←/→ attempt 2/3');
+    expect(plain({ ...opened(), cols: 160 })).not.toContain('alt←/→');
+  });
+
+  it('keeps the accent to the task view: the planner chat never takes it', () => {
+    expect(accent(opened())).toBe(true);
+    expect(accent(opened({ taskView: null }))).toBe(false);
+  });
+});
+
+describe('the task view\'s keys at their edges', () => {
+  const last = (state: TuiState): string | undefined => messagesOf(state).at(-1)?.text;
+
+  it('alt-left at the first attempt and alt-right at the latest say so', () => {
+    const only = opened({ taskView: loaded({ attempts: [1, 2], attempt: 1 }) });
+    expect(last(reduce(only, { type: 'key', key: key('alt-left') }).state)).toBe('This is the first attempt.');
+    const latest = opened({ taskView: loaded({ attempts: [1, 2], attempt: 2 }) });
+    const { state, effects } = reduce(latest, { type: 'key', key: key('alt-right') });
+    expect(effects).toEqual([]);
+    expect(last(state)).toBe('This is the latest attempt.');
+  });
+
+  it('alt-right from an earlier attempt loads the next one', () => {
+    const earlier = opened({ taskView: loaded({ attempts: [1, 2], attempt: 1, followLatest: false }) });
+    expect(reduce(earlier, { type: 'key', key: key('alt-right') }).effects).toEqual([
+      { type: 'loadTaskAttempt', sessionId: 's1', taskId: 't1', attempt: 2 },
+    ]);
+  });
+
+  it('ctrl-r with nothing queued says so and sends nothing', () => {
+    const { state, effects } = reduce(opened(), { type: 'key', key: key('ctrl-r') });
+    expect(effects).toEqual([]);
+    expect(last(state)).toBe('No queued message to remove.');
+  });
+
+  it('ctrl-n with nothing queued leaves the selection alone', () => {
+    const { state, effects } = reduce(opened(), { type: 'key', key: key('ctrl-n') });
+    expect(effects.some((e) => e.type === 'removeTaskMessage')).toBe(false);
+    expect(state.taskView?.queuedIndex).toBe(0);
+  });
+
+  it('ctrl-x interrupts even while nothing is queued, and ctrl-r never interrupts', () => {
+    expect(reduce(opened(), { type: 'key', key: key('ctrl-x') }).effects).toEqual([{ type: 'interruptTask', sessionId: 's1', taskId: 't1' }]);
+    expect(reduce(opened(), { type: 'key', key: key('ctrl-r') }).effects.some((e) => e.type === 'interruptTask')).toBe(false);
+  });
+
+  it('takes no task keys once the session is gone', () => {
+    const { effects } = reduce(opened({ sessionId: null }), { type: 'key', key: key('ctrl-x') });
+    expect(effects.some((e) => e.type === 'interruptTask')).toBe(false);
+  });
+});
+
+describe('the queue as the runner takes messages off it', () => {
+  const twoQueued = () => opened({
+    taskView: loaded({
+      view: replayTaskLog([
+        { type: 'turn_start', message: 'Do the task' },
+        { type: 'message_queued', messageId: 'm1', text: 'use Postgres' },
+        { type: 'message_queued', messageId: 'm2', text: 'also tests' },
+      ]),
+      queuedIndex: 1,
+    }),
+  });
+
+  it('moves the selection back when the selected message is taken back', () => {
+    const state = reduce(twoQueued(), {
+      type: 'taskLog', taskId: 't1', attempt: 1, events: [{ type: 'message_removed', messageId: 'm2' }], sessionId: 's1',
+    }).state;
+    expect(state.taskView?.view.queued.map((m) => m.id)).toEqual(['m1']);
+    expect(state.taskView?.queuedIndex).toBe(0);
+    expect(plain(state)).not.toContain('also tests');
+  });
+
+  it('drops a message from the queue once a turn delivers it, and shows it as sent', () => {
+    const state = reduce(twoQueued(), {
+      type: 'taskLog', taskId: 't1', attempt: 1, sessionId: 's1',
+      events: [{ type: 'turn_end', reason: 'completed' }, { type: 'turn_start', message: 'use Postgres', messageId: 'm1' }],
+    }).state;
+    expect(state.taskView?.view.queued.map((m) => m.id)).toEqual(['m2']);
+    expect(state.taskView?.queuedIndex).toBe(0);
+    const out = plain(state);
+    expect(out).toContain('use Postgres');
+    expect(out).toContain('also tests · queued');
+  });
+});
+
+describe('following the live attempt', () => {
+  it('starts a task with no saved log empty, and takes up its first attempt when it streams', () => {
+    const none = reduce(opened({ taskView: notLoaded() }), {
+      type: 'taskLogLoaded', taskId: 't1', attempts: [], attempt: 0, events: [], sessionId: 's1',
+    }).state;
+    expect(none.taskView).toMatchObject({ loaded: true, attempt: 0, attempts: [] });
+    expect(none.taskView?.view.blocks).toEqual([]);
+
+    const streaming = reduce(none, {
+      type: 'taskLog', taskId: 't1', attempt: 1, events: [{ type: 'turn_start', message: 'Do the task' }], sessionId: 's1',
+    }).state;
+    expect(streaming.taskView).toMatchObject({ attempt: 1, attempts: [1] });
+    expect(streaming.taskView?.view.working).toBe(true);
+  });
+
+  it('swaps to a retry\'s new attempt while following, and ignores what the old one still sends', () => {
+    const retried = reduce(opened(), {
+      type: 'taskLog', taskId: 't1', attempt: 2, events: [{ type: 'turn_start', message: 'again' }], sessionId: 's1',
+    }).state;
+    expect(retried.taskView).toMatchObject({ attempt: 2, attempts: [1, 2] });
+    expect(retried.taskView?.view.blocks.filter((b) => b.type === 'tool')).toEqual([]);
+
+    const late = reduce(retried, {
+      type: 'taskLog', taskId: 't1', attempt: 1, events: [{ type: 'text_delta', text: 'from before' }], sessionId: 's1',
+    }).state;
+    expect(late.taskView).toBe(retried.taskView);
+  });
+});
+
+describe('esc back to the planner', () => {
+  it('puts the planner conversation back in the pane, and the composer back on the planner', () => {
+    const withPlanner = opened({ conversation: chatOf(['planner', 'Which database should the cache use?']) });
+    expect(plain(withPlanner)).not.toContain('Which database should the cache use?');
+
+    const back = reduce(withPlanner, { type: 'key', key: key('escape') }).state;
+    expect(back.taskView).toBeNull();
+    const out = plain(back);
+    expect(out).toContain('Which database should the cache use?');
+    expect(out).not.toContain('→ Task 1');
+
+    const { effects } = run('Redis', back);
+    expect(effects.some((e) => e.type === 'sendTaskMessage')).toBe(false);
   });
 });

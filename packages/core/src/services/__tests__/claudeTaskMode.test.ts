@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { ClaudeCodeAdapter } from '../harness/ClaudeCodeAdapter';
 import { CodexAdapter } from '../harness/CodexAdapter';
 import { OpenCodeAdapter } from '../harness/OpenCodeAdapter';
-import { TaskModeUnsupportedError, type AgentEvent, type AgentProcessDeps, type TaskStartOptions } from '../harness/AgentAdapter';
+import { TaskModeUnsupportedError, type AgentEvent, type AgentProcessDeps, type AgentStartOptions, type TaskStartOptions } from '../harness/AgentAdapter';
 import { supportsTaskMode, createTaskAdapter } from '../harness/taskAdapters';
 import { fakeSpawn, fixture, type ScriptedReply } from './harnessTestKit';
 
@@ -62,6 +62,26 @@ describe('ClaudeCodeAdapter start switch', () => {
       '--effort', 'high',
       '--resume', 'sess-1',
     ]);
+    adapter.dispose();
+  });
+
+  it.each([
+    ['nothing else', {}],
+    ['a model, an effort and a resume', { model: 'opus', effort: 'max', resumeSessionId: 'sess-1' }],
+    // Task fields smuggled onto a planner start: nothing on the planner path reads them.
+    ['a task\'s bypass mode and flags', { mode: 'bypassPermissions', flags: { permissionMode: 'bypassPermissions', effortArgs: ['--dangerously-skip-permissions'] } }],
+    ['the legacy build alias a task resolves to acceptEdits', { mode: 'build', flags: { permissionMode: 'acceptEdits', effortArgs: [] } }],
+  ])('starts a planner read-only whatever else its start carries: %s', async (_label, extra) => {
+    const { spawned, processDeps } = deps([]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start({ kind: 'planner', cwd: '/repo', systemPrompt: 'PLAN', ...extra } as unknown as AgentStartOptions);
+    const args = spawned.lastArgs();
+
+    expect(args.flatMap((arg, i) => (arg === '--permission-mode' ? [args[i + 1]] : []))).toEqual(['plan']);
+    expect(args[args.indexOf('--disallowedTools') + 1].split(',')).toEqual(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'KillShell']);
+    for (const flag of ['--permission-prompt-tool', '--dangerously-skip-permissions', 'acceptEdits', 'bypassPermissions']) {
+      expect(args).not.toContain(flag);
+    }
     adapter.dispose();
   });
 

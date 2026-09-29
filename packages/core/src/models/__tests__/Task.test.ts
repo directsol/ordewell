@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { createTask, createEmptyPlan, migrateLegacyPlan, migratePlanState, taskOrderLabel, resolveOrderLabel, flattenTasksWithParents, keepExecutionState } from '../Task';
+import { createTask, createEmptyPlan, migrateLegacyPlan, migratePlanState, taskOrderLabel, resolveOrderLabel, flattenTasksWithParents, keepExecutionState, isAwaitingReason } from '../Task';
+import { serializeTaskStatus } from '../../services/SessionMessage';
 import type { LegacyPlanState, PlanState, Message, TaskSnapshot } from '../Task';
 
 describe('LegacyPlanState conversation fields', () => {
@@ -496,5 +497,25 @@ describe('keepExecutionState', () => {
 
     expect(result.map((t) => [t.id, t.status])).toEqual([['a', 'failed'], ['b', 'pending'], ['new', 'pending']]);
     expect(result[2].verdict).toBeUndefined();
+  });
+});
+
+describe('what an awaiting_user task waits on (ADR-0018, W1)', () => {
+  it.each(['input', 'checkpoint', 'conflict'])('%s is a reason', (reason) => {
+    expect(isAwaitingReason(reason)).toBe(true);
+  });
+
+  it.each([undefined, null, '', 'Input', 'approval', 'waiting for your input', 1, {}])('%o is not', (value) => {
+    expect(isAwaitingReason(value)).toBe(false);
+  });
+
+  it.each(['input', 'checkpoint', 'conflict'] as const)('a %s wait goes on the wire with its reason', (awaitingReason) => {
+    const task = { ...createTask({ id: 't1', title: 'T', status: 'awaiting_user' }), awaitingReason };
+    expect(serializeTaskStatus(task).awaitingReason).toBe(awaitingReason);
+  });
+
+  it('a reason left on a task that no longer waits never reaches a surface', () => {
+    const task = { ...createTask({ id: 't1', title: 'T', status: 'in_progress' }), awaitingReason: 'input' as const };
+    expect(serializeTaskStatus(task)).not.toHaveProperty('awaitingReason');
   });
 });

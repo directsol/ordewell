@@ -6,7 +6,7 @@ import { RunnerRegistry } from '../../plugins/RunnerRegistry';
 import { isStructuredSession, type ITerminalSession, type StructuredEvent, type StructuredTurnEnd } from '../../interfaces/ITerminalRunner';
 import { TaskModeUnsupportedError } from '../harness/AgentAdapter';
 import type { SpawnFn } from '../HeadlessRunner';
-import { fakeSpawn, fixture, type ScriptedReply } from './harnessTestKit';
+import { fakeSpawn, fixture, type FakeSpawnResult, type ScriptedReply } from './harnessTestKit';
 
 /**
  * The structured transport (ADR-0018) driven through the real Claude Code
@@ -82,6 +82,15 @@ async function until(condition: () => boolean): Promise<void> {
   if (!condition()) throw new Error('condition never held');
 }
 
+/**
+ * The prompt goes out in a `setImmediate` once the runner has started, and a
+ * zero-delay timer is not ordered against it: under load the timer fires
+ * first. A test that acts on the first turn waits until it was sent.
+ */
+async function firstTurn(spawned: FakeSpawnResult): Promise<void> {
+  await until(() => (spawned.processes[0]?.written.length ?? 0) > 0);
+}
+
 describe('StructuredRunner spawn', () => {
   it.each([
     ['default', 'default'],
@@ -137,7 +146,7 @@ describe('StructuredRunner spawn', () => {
   it('runs in the task cwd with the workspace env, and sends the prompt as the first turn', async () => {
     const { runner, spawned, spawns } = harness([]);
     const session = await runner.spawn(options({ env: { DATABASE_URL: 'postgres://local' } }));
-    await tick();
+    await firstTurn(spawned);
     expect(spawns[0].cwd).toBe('/repo');
     expect(spawns[0].env.DATABASE_URL).toBe('postgres://local');
     expect(userTurns(spawned.processes[0].written)).toEqual(['Do the task']);
@@ -271,7 +280,7 @@ describe('StructuredSession messages', () => {
       fixture('claude-code', 'task-no-marker'),
     ]);
     const turn = observe(await runner.spawn(options()));
-    await tick();
+    await firstTurn(spawned);
 
     turn.session.write('  Yes, go ahead.\r');
     expect(turn.session.queued()).toEqual([{ id: expect.any(String), text: 'Yes, go ahead.' }]);
@@ -298,7 +307,7 @@ describe('StructuredSession messages', () => {
   it('can take a queued message back before it is delivered', async () => {
     const { runner, spawned } = harness([() => {}]);
     const turn = observe(await runner.spawn(options()));
-    await tick();
+    await firstTurn(spawned);
     const id = turn.session.sendMessage('Never mind');
     expect(turn.session.removeQueued(id)).toBe(true);
     expect(turn.session.removeQueued(id)).toBe(false);
@@ -343,7 +352,7 @@ describe('StructuredSession interrupt', () => {
       fixture('claude-code', 'task-interrupt-followup'),
     ]);
     const turn = observe(await runner.spawn(options()));
-    await tick();
+    await firstTurn(spawned);
 
     await turn.session.interrupt();
     expect(turn.turnEnds).toEqual(['interrupted']);
@@ -362,7 +371,7 @@ describe('StructuredSession interrupt', () => {
   it('kills and resumes the session when the runner ignores the interrupt', async () => {
     const { runner, spawned } = harness([fixture('claude-code', 'task-interrupt')], 20);
     const turn = observe(await runner.spawn(options()));
-    await tick();
+    await firstTurn(spawned);
 
     await turn.session.interrupt();
     expect(turn.turnEnds).toEqual(['interrupted']);
@@ -379,7 +388,7 @@ describe('StructuredSession interrupt', () => {
   it('resumes the session it was continuing when interrupted before the runner took it up (ADR-0018, K1)', async () => {
     const { runner, spawned } = harness([() => {}], 20);
     const turn = observe(await runner.spawn(options({ resumeSessionId: 'sess-prev' })));
-    await tick();
+    await firstTurn(spawned);
     expect(turn.session.nativeSessionId()).toBeNull();
 
     await turn.session.interrupt();
@@ -416,7 +425,7 @@ describe('StructuredSession exit', () => {
   it('fires onExit exactly once when the runner dies on its own', async () => {
     const { runner, spawned } = harness([() => {}]);
     const turn = observe(await runner.spawn(options()));
-    await tick();
+    await firstTurn(spawned);
     spawned.processes[0].emitStderr('fatal: out of credits');
     spawned.processes[0].exit(1);
     await tick();
