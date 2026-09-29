@@ -44,7 +44,7 @@ Ask: **how many of these should become tasks?** Default, unless told otherwise: 
 
 ### 3. Resolve open questions per selected candidate
 
-For each candidate going into the plan, settle whatever a runner would otherwise have to guess: the target seam, what sits behind it, what's explicitly out of scope, which tests survive. Interview only where the answer is genuinely unclear for that candidate — number the open questions, give your recommended answer, wait for the user before the next round. Don't grill a candidate that's already unambiguous.
+For each candidate going into the plan, settle whatever a runner would otherwise have to guess: the target seam, what sits behind it, what's explicitly out of scope, which tests survive. Interview only where the answer is genuinely unclear for that candidate — ask one question at a time, give your recommended answer, wait for the user before the next question. Don't grill a candidate that's already unambiguous.
 
 If the user rejects a candidate with a load-bearing reason ("not now, that would break the plugin API"), offer: _"Want a one-line ADR task recording this, so a future run of this skill doesn't re-suggest it?"_ Only offer when the reason would actually be needed by a future run to avoid re-suggesting the same thing; skip ephemeral reasons ("not worth it right now") and self-evident ones.
 
