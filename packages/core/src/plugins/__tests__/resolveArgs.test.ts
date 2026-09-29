@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { resolveArgs, ResolveError } from '../resolveArgs';
+import { resolveArgs, resolveTaskRunnerFlags, ResolveError } from '../resolveArgs';
 import { CODEX_MANIFEST } from '../builtin/codex.manifest';
+import { CLAUDE_CODE_MANIFEST } from '../builtin/claude-code.manifest';
 import type { RunnerPluginManifest, ResolveContext } from '../types';
 
 function basicManifest(overrides?: Partial<RunnerPluginManifest>): RunnerPluginManifest {
@@ -448,5 +449,58 @@ describe('resolveArgs — Codex manifest', () => {
       prompt: 'go', mode: 'build', model: 'gpt-5.4', headless: true,
     });
     expect(result.args).toContain('workspace-write');
+  });
+});
+
+/**
+ * The structured transport reads a task's mode and effort from the same
+ * manifest as the terminal template (ADR-0018, C1), so the same plan task
+ * runs under the same permission mode and thinking flags either way.
+ */
+describe('resolveTaskRunnerFlags — Claude Code manifest', () => {
+  /** The permission-mode value and the thinking args the terminal command line carries. */
+  function terminalFlags(mode: string, model: string | undefined, thinkingEffort: string | undefined) {
+    const { args } = resolveArgs(CLAUDE_CODE_MANIFEST, { prompt: 'go', mode, model, thinkingEffort });
+    const at = args.indexOf('--permission-mode');
+    const from = model ? args.indexOf('--model') + 2 : 0;
+    return { permissionMode: args[at + 1], effortArgs: args.slice(from, at) };
+  }
+
+  const modes = ['', 'default', 'acceptEdits', 'plan', 'bypassPermissions', 'build'];
+  const efforts = [undefined, 'adaptive', 'low', 'medium', 'high', 'xhigh', 'max', 'disabled', 'thinking-16k'];
+  const cases = modes.flatMap((mode) => efforts.flatMap((thinkingEffort) =>
+    [undefined, 'sonnet'].map((model) => ({ mode, thinkingEffort, model }))));
+
+  it.each(cases)('agrees with the terminal template: mode "$mode", effort $thinkingEffort, model $model', ({ mode, model, thinkingEffort }) => {
+    expect(resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode, model, thinkingEffort })).toEqual(terminalFlags(mode, model, thinkingEffort));
+  });
+
+  it.each([
+    ['build', 'acceptEdits'],
+    ['', 'default'],
+    ['plan', 'plan'],
+    // A mode the manifest does not map is passed through as its own id, as the template does.
+    ['dontAsk', 'dontAsk'],
+  ])('maps mode "%s" to --permission-mode %s', (mode, expected) => {
+    expect(resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode }).permissionMode).toBe(expected);
+  });
+
+  it.each([
+    ['adaptive', ['--thinking', 'adaptive']],
+    ['high', ['--thinking', 'enabled', '--effort', 'high']],
+    ['disabled', ['--thinking', 'disabled']],
+    ['thinking-16k', ['--thinking', 'adaptive']],
+  ])('splits effort %s into separate argv entries', (thinkingEffort, expected) => {
+    expect(resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode: 'default', model: 'sonnet', thinkingEffort }).effortArgs).toEqual(expected);
+  });
+
+  it('drops the effort without a model, behind the same gate as the template', () => {
+    expect(resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode: 'default', thinkingEffort: 'max' }).effortArgs).toEqual([]);
+  });
+
+  it('never carries the headless skip-permissions flag: the structured transport has no headless shape', () => {
+    const flags = resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode: 'bypassPermissions', model: 'sonnet', thinkingEffort: 'max' });
+    expect(flags.effortArgs).not.toContain('--dangerously-skip-permissions');
+    expect(flags.permissionMode).toBe('bypassPermissions');
   });
 });

@@ -296,6 +296,25 @@ describe('a terminal task keeps its checkpoint reason', () => {
   });
 });
 
+describe('a structured checkpoint, answered as a terminal one is (VerdictEngine unchanged)', () => {
+  it.each<[string, (o: TaskOrchestrator) => void, string]>([
+    ['approve', (o) => o.approveCheckpoint('t1'), 'ORDEWELL_CONTINUE'],
+    ['reject', (o) => o.rejectCheckpoint('t1', 'keep the README'), 'ORDEWELL_REJECT: keep the README'],
+  ])('%s is written to the session and goes out as the next user turn', async (_how, answer, token) => {
+    const { orchestrator, structured } = await started();
+    structured!.emitOutput('<<<ORDEWELL_CHECKPOINT: about to delete README.md>>>\n');
+    structured!.emitTurnEnd('completed');
+    expect(task(orchestrator)).toMatchObject({ status: 'awaiting_user', awaitingReason: 'checkpoint' });
+
+    answer(orchestrator);
+
+    expect(structured!.written).toEqual([`\n${token}\n`]);
+    expect(structured!.delivered).toEqual([token]);
+    expect(task(orchestrator).status).toBe('in_progress');
+    expect(task(orchestrator).awaitingReason).toBeUndefined();
+  });
+});
+
 describe('through the Session', () => {
   function sessionWith() {
     const sessions: FakeStructuredSession[] = [];

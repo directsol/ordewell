@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as vscode from 'vscode';
-import { createTask, type PendingApproval, type Task, type TaskLogEvent } from '@ordewell/core';
+import { createTask, type PendingApproval, type SessionMessage, type Task, type TaskLogEvent } from '@ordewell/core';
 import { TaskLogRegistry } from '../providers/TaskLogRegistry';
 import type { HostToTaskLog } from '../shared/taskLogProtocol';
 import { __panels, __resetPanels } from '../test/vscode.mock';
@@ -245,3 +245,130 @@ describe('the task-log registry (ADR-0018, V1)', () => {
   });
 });
 
+describe('task-log tabs over a whole run (ADR-0018, V1)', () => {
+  beforeEach(() => {
+    __resetPanels();
+    createWebviewPanel.mockClear();
+  });
+
+  it('opens no tab for anything the session says, however much of it concerns the task', () => {
+    const h = harness();
+    const heard: SessionMessage[] = [
+      { type: 'task_started', taskId: 't1', order: 1, title: 'Parse JSON', runner: 'claude-code' },
+      { type: 'task_log', taskId: 't1', attempt: 1, events: [{ type: 'turn_start', message: 'do it' }] },
+      { type: 'task_log', taskId: 't1', attempt: 1, events: [{ type: 'approval_requested', approvalId: 'ap-1', tool: 'Write', args: '{}', allowForTask: false }] },
+      { type: 'status_update', tasks: [] },
+      { type: 'task_updated', taskId: 't1', changes: { status: 'awaiting_user' } },
+      { type: 'execution_complete', summary: { total: 1, completed: 0, failed: 1 } },
+      { type: 'execution_stopped' },
+    ];
+    for (const msg of heard) h.registry.receive(msg);
+
+    expect(createWebviewPanel).not.toHaveBeenCalled();
+    expect(__panels).toHaveLength(0);
+  });
+
+  it('keeps one tab per task, each drawing only its own task\'s log', () => {
+    const tasks: Record<string, Task> = {
+      t1: createTask({ id: 't1', order: 1, title: 'Parse JSON', assignedRunner: 'claude-code', status: 'in_progress' }) as Task,
+      t2: createTask({ id: 't2', order: 2, title: 'Write tests', assignedRunner: 'claude-code', status: 'in_progress' }) as Task,
+    };
+    const session = harness().session;
+    const registry = new TaskLogRegistry({ extensionUri: vscode.Uri.file('/ext'), session: () => session, getTask: (id) => tasks[id], log: vi.fn() });
+    registry.open('t1');
+    registry.open('t2');
+    for (const panel of __panels) panel.__receive({ type: 'ready' });
+    for (const panel of __panels) panel.webview.postMessage.mockClear();
+
+    registry.receive({ type: 'task_log', taskId: 't2', attempt: 1, events: [{ type: 'text_delta', text: 'tests pass' }] });
+    registry.open('t1');
+
+    expect(__panels.map((p) => p.title)).toEqual(['Task 1 · Parse JSON', 'Task 2 · Write tests']);
+    expect(posted(__panels[0])).toEqual([]);
+    expect(posted(__panels[1]).some((m) => m.type === 'patch')).toBe(true);
+    expect(__panels[0].reveal).toHaveBeenCalledTimes(1);
+    expect(__panels[1].reveal).not.toHaveBeenCalled();
+  });
+
+  it('leaves an earlier attempt the user picked on screen when a retry starts, and lists the new one', () => {
+    const h = harness({ 1: attemptOne, 2: attemptTwo });
+    h.registry.open('t1');
+    __panels[0].__receive({ type: 'ready' });
+    __panels[0].__receive({ type: 'selectAttempt', attempt: 1 });
+    __panels[0].webview.postMessage.mockClear();
+
+    h.registry.receive({ type: 'task_log', taskId: 't1', attempt: 3, events: [{ type: 'turn_start', message: 'again' }] });
+
+    expect(posted(__panels[0]).some((m) => m.type === 'init' || m.type === 'patch')).toBe(false);
+    expect(posted(__panels[0]).at(-1)).toMatchObject({ type: 'status', status: { attempt: 1, attempts: [1, 2, 3] } });
+  });
+
+  it('ignores a pick of an attempt it does not have', () => {
+    const h = harness();
+    h.registry.open('t1');
+    __panels[0].__receive({ type: 'ready' });
+    __panels[0].webview.postMessage.mockClear();
+    h.session.taskLog.mockClear();
+
+    __panels[0].__receive({ type: 'selectAttempt', attempt: 7 });
+
+    expect(h.session.taskLog).not.toHaveBeenCalled();
+    expect(posted(__panels[0])).toEqual([]);
+  });
+
+  it('posts nothing before its webview is ready, then draws the file — which already holds what streamed', () => {
+    const h = harness();
+    h.registry.open('t1');
+    h.registry.receive({ type: 'task_log', taskId: 't1', attempt: 1, events: attemptOne });
+    expect(posted(__panels[0])).toEqual([]);
+
+    __panels[0].__receive({ type: 'ready' });
+
+    const sent = posted(__panels[0]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ type: 'init', status: { attempt: 1, attempts: [1] } });
+    expect(sent[0].type === 'init' && sent[0].blocks.filter((b) => b.type === 'message')).toHaveLength(2);
+  });
+
+  it('says nothing when the header has not changed, and retitles the tab when the task is renamed', () => {
+    const h = harness();
+    h.registry.open('t1');
+    __panels[0].__receive({ type: 'ready' });
+    __panels[0].webview.postMessage.mockClear();
+
+    h.registry.receive({ type: 'status_update', tasks: [] });
+    h.registry.receive({ type: 'task_started', taskId: 't1', order: 1, title: 'Parse JSON', runner: 'claude-code' });
+    expect(posted(__panels[0])).toEqual([]);
+
+    h.task.title = 'Parse JSON5';
+    h.registry.receive({ type: 'task_updated', taskId: 't1', changes: { title: 'Parse JSON5' } });
+    expect(posted(__panels[0])).toEqual([expect.objectContaining({ type: 'status', status: expect.objectContaining({ title: 'Parse JSON5' }) })]);
+    expect(__panels[0].title).toBe('Task 1 · Parse JSON5');
+  });
+
+  it('shows the Session\'s refusal of an interrupt', async () => {
+    const h = harness();
+    h.session.interruptTask.mockImplementation(async () => { throw new Error('Task 1 has no turn running.'); });
+    h.registry.open('t1');
+    __panels[0].__receive({ type: 'ready' });
+
+    __panels[0].__receive({ type: 'interruptTask' });
+
+    await vi.waitFor(() => expect(posted(__panels[0])).toContainEqual({ type: 'showError', error: 'Task 1 has no turn running.' }));
+  });
+
+  it('closes every tab on dispose, and a later event reaches none of them', () => {
+    const h = harness();
+    h.registry.open('t1');
+    __panels[0].__receive({ type: 'ready' });
+
+    h.registry.dispose();
+    expect(__panels[0].dispose).toHaveBeenCalledTimes(1);
+    __panels[0].webview.postMessage.mockClear();
+
+    h.registry.receive({ type: 'task_log', taskId: 't1', attempt: 1, events: [{ type: 'text_delta', text: ' late' }] });
+    expect(posted(__panels[0])).toEqual([]);
+    h.registry.open('t1');
+    expect(__panels).toHaveLength(2);
+  });
+});

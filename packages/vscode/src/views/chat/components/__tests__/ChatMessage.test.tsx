@@ -1,7 +1,7 @@
 import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, fireEvent } from '@testing-library/react';
-import type { DisplayBlock, MessageBlock, SubagentBlock, ThinkingDisplayBlock, ToolBlock } from '@ordewell/core';
+import type { ApprovalBlock, DisplayBlock, MessageBlock, SubagentBlock, ThinkingDisplayBlock, ToolBlock } from '@ordewell/core';
 import ChatMessage, { CommandRow, ConversationBlocks, SubagentCard, ThinkingBlock, renderMarkdown } from '../ChatMessage';
 
 const message = (over: Partial<MessageBlock>): MessageBlock => ({ type: 'message', id: 'm', role: 'planner', text: '', streaming: false, ...over });
@@ -187,6 +187,78 @@ describe('ConversationBlocks', () => {
       <ConversationBlocks blocks={[{ type: 'plan', id: 'pl', status: 'updated', taskCount: 2, text: '' }]} detailAll={false} onShowPlan={() => {}} />,
     );
     expect(getByText('Plan updated · 2 tasks')).toBeTruthy();
+  });
+});
+
+describe('approval cards (ADR-0018, A1)', () => {
+  const card = (over: Partial<ApprovalBlock> = {}): ApprovalBlock => ({
+    type: 'approval', id: 'ap', approvalId: 'ap-1', kind: 'runner_tool', subject: 'Write(/repo/a.txt)', scope: 'Write', status: 'pending', allowForTask: true, ...over,
+  });
+
+  function draw(block: ApprovalBlock) {
+    const onAnswerApproval = vi.fn();
+    const onResolveApproval = vi.fn();
+    const view = render(<ConversationBlocks blocks={[block]} detailAll={false} onShowPlan={() => {}}
+      onAnswerApproval={onAnswerApproval} onResolveApproval={onResolveApproval} />);
+    return { ...view, onAnswerApproval, onResolveApproval };
+  }
+
+  it('answers a runner\'s request with the runner\'s own decisions, never the planner\'s yes/no', () => {
+    const { getByText, onAnswerApproval, onResolveApproval } = draw(card());
+    expect(getByText('Use a tool')).toBeTruthy();
+    expect(getByText('Waiting for you')).toBeTruthy();
+
+    fireEvent.click(getByText('Allow'));
+    fireEvent.click(getByText('Allow for this task'));
+    fireEvent.click(getByText('Deny'));
+
+    expect(onAnswerApproval.mock.calls).toEqual([
+      ['ap-1', { decision: 'allow' }],
+      ['ap-1', { decision: 'allowForTask' }],
+      // A blank note is no note: the agent is not handed an empty message.
+      ['ap-1', { decision: 'deny' }],
+    ]);
+    expect(onResolveApproval).not.toHaveBeenCalled();
+  });
+
+  it('sends the typed note with a denial, trimmed', () => {
+    const { getByText, getByPlaceholderText, onAnswerApproval } = draw(card());
+    fireEvent.change(getByPlaceholderText(/Note to the agent/), { target: { value: '  use notes/ instead ' } });
+    fireEvent.click(getByText('Deny'));
+    expect(onAnswerApproval).toHaveBeenCalledWith('ap-1', { decision: 'deny', note: 'use notes/ instead' });
+  });
+
+  it('offers no grant for the task when the runner proposed none', () => {
+    const { queryByText, getByText } = draw(card({ allowForTask: false }));
+    expect(queryByText('Allow for this task')).toBeNull();
+    expect(getByText('Allow')).toBeTruthy();
+  });
+
+  it.each<[Partial<ApprovalBlock>, string]>([
+    [{ status: 'granted', decidedBy: 'asked' }, 'Approved'],
+    [{ status: 'granted', decidedBy: 'asked', forTask: true }, 'Approved for this task'],
+    [{ status: 'denied', decidedBy: 'asked', note: 'use notes/' }, 'Denied'],
+    [{ status: 'withdrawn' }, 'Withdrawn'],
+  ])('settles a runner card %o as "%s", with nothing left to press', (over, label) => {
+    const { getByText, queryByText, container } = draw(card(over));
+    expect(getByText(label)).toBeTruthy();
+    expect(queryByText('Allow')).toBeNull();
+    expect(queryByText('Deny')).toBeNull();
+    expect(container.querySelector('.approval-card-note')).toBeNull();
+    if (over.note) expect(getByText(`Note to the agent: ${over.note}`)).toBeTruthy();
+  });
+
+  it('keeps a planner\'s request on its own Allow/Deny card, answered yes or no', () => {
+    const { getByText, queryByText, onAnswerApproval, onResolveApproval } = draw(card({
+      kind: 'shell_command', subject: 'npm test', scope: 'npm test', allowForTask: undefined,
+    }));
+    expect(getByText('Run a command')).toBeTruthy();
+    expect(queryByText('Allow for this task')).toBeNull();
+
+    fireEvent.click(getByText('Allow'));
+    fireEvent.click(getByText('Deny'));
+    expect(onResolveApproval.mock.calls).toEqual([['ap-1', true], ['ap-1', false]]);
+    expect(onAnswerApproval).not.toHaveBeenCalled();
   });
 });
 
