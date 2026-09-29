@@ -1,8 +1,9 @@
-import type { LegacyPlanState, QueuedMessage, ResearchStep, RunnerId, SubagentOutcome, Task, TaskTransport, Verdict } from '../models/Task';
+import type { AwaitingReason, LegacyPlanState, QueuedMessage, ResearchStep, RunnerId, SubagentOutcome, Task, TaskTransport, Verdict } from '../models/Task';
 import type { UsageTotals } from '../models/Usage';
 import type { ApprovalKind } from '../interfaces/IApproval';
 import type { ApprovalSource } from './ApprovalPolicy';
 import type { IsolationHandoff, IsolationMergeResult, TaskIsolation } from '../interfaces/IWorktreeIsolation';
+import type { QueuedTaskMessage } from '../interfaces/ITerminalRunner';
 
 export type SerializedTaskStatus = {
   id: string;
@@ -14,6 +15,10 @@ export type SerializedTaskStatus = {
   isolation?: TaskIsolation;
   /** Absent unless the task's plan asked for the structured transport (ADR-0018): what it ran on, or why it fell back. */
   transport?: Pick<TaskTransport, 'kind' | 'fallback'>;
+  /** What an `awaiting_user` task waits on, when it was saved (ADR-0018, W1). */
+  awaitingReason?: AwaitingReason;
+  /** Messages waiting for a structured task's turn to end, oldest first; absent when there are none. */
+  queued?: QueuedTaskMessage[];
 };
 
 export type SerializedTask = {
@@ -227,7 +232,12 @@ export function serializeTask(t: Task): SerializedTask {
   };
 }
 
-export function serializeTaskStatus(t: Task, idleSince: string | null = null, isolation: TaskIsolation | null = null): SerializedTaskStatus {
+export function serializeTaskStatus(
+  t: Task,
+  idleSince: string | null = null,
+  isolation: TaskIsolation | null = null,
+  queued: readonly QueuedTaskMessage[] = [],
+): SerializedTaskStatus {
   return {
     id: t.id,
     status: t.status,
@@ -237,6 +247,8 @@ export function serializeTaskStatus(t: Task, idleSince: string | null = null, is
     idleSince,
     ...(isolation ? { isolation } : {}),
     ...(t.transport ? { transport: t.transport.fallback ? { kind: t.transport.kind, fallback: t.transport.fallback } : { kind: t.transport.kind } } : {}),
+    ...(t.status === 'awaiting_user' && t.awaitingReason ? { awaitingReason: t.awaitingReason } : {}),
+    ...(queued.length > 0 ? { queued: queued.map((m) => ({ ...m })) } : {}),
   };
 }
 

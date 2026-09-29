@@ -113,7 +113,8 @@ export function reduce(state: TuiState, action: Action): Step {
 
     case 'taskStatus': {
       if (stale(state, action.sessionId) || !state.tasks.some((t) => t.id === action.taskId)) return step(state);
-      const tasks = state.tasks.map((t) => (t.id === action.taskId ? { ...t, status: action.status } : t));
+      // This event names no reason, so one kept from an earlier wait would be stale.
+      const tasks = state.tasks.map((t) => (t.id === action.taskId ? { ...t, status: action.status, awaitingReason: undefined } : t));
       // The indicator follows the tasks, not the stream: once none is running
       // the run is over, whatever the daemon's scheduler still holds armed.
       const status = runStatus(state, tasks);
@@ -132,9 +133,13 @@ export function reduce(state: TuiState, action: Action): Step {
         // Unlike isolation, every status carries the transport whole: absent
         // means the task's latest attempt was not asked to run structured.
         const transport = update.transport;
-        if (update.status !== t.status || idleSince !== (t.idleSince ?? null) || !sameIsolation(isolation, t.isolation) || !sameTransport(transport, t.transport)) {
+        const awaitingReason = update.awaitingReason;
+        if (
+          update.status !== t.status || idleSince !== (t.idleSince ?? null) || !sameIsolation(isolation, t.isolation)
+          || !sameTransport(transport, t.transport) || awaitingReason !== t.awaitingReason
+        ) {
           changed = true;
-          return { ...t, status: update.status, idleSince, isolation, transport };
+          return { ...t, status: update.status, idleSince, isolation, transport, awaitingReason };
         }
         return t;
       });

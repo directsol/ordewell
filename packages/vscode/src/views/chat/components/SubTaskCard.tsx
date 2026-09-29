@@ -6,6 +6,7 @@ import { TaskCheck } from './TaskCard';
 import { runnerOptionsFor } from './TaskCard';
 import type { RunnerMode, RunnerOption } from './TaskCard';
 import { checkLabel } from '../checkLabel';
+import { awaitingLabel } from '../awaitingLabel';
 
 interface SubTaskCardProps {
   task: Task;
@@ -61,7 +62,8 @@ export default function SubTaskCard({ task, parentTask, models, modes, runners, 
   const activeModes = modes && modes.length > 0 ? modes : DEFAULT_MODES;
   const runnerOptions = runnerOptionsFor(runners, task.assignedRunner);
   const runnerAbbrev = effectiveRunner ? (RUNNER_ABBREV[effectiveRunner] ?? effectiveRunner.slice(0, 2).toUpperCase()) : null;
-  const status = STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending;
+  const baseStatus = STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending;
+  const status = { ...baseStatus, label: awaitingLabel(task) ?? baseStatus.label };
 
   const handlePromptSave = () => {
     if (editingPrompt !== null && editingPrompt !== task.prompt) {

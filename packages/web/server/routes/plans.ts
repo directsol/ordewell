@@ -1,5 +1,5 @@
 import { Hono, type Context } from 'hono';
-import { ConversationBusyError, ConversationEditError, PlanEditError, WorkspaceNotFoundError, WorkspaceNotAProjectError } from '@ordewell/core';
+import { ConversationBusyError, ConversationEditError, PlanEditError, TaskControlError, WorkspaceNotFoundError, WorkspaceNotAProjectError } from '@ordewell/core';
 import { OrchestratorPool } from '../pool/orchestratorPool';
 
 /**
@@ -11,7 +11,7 @@ import { OrchestratorPool } from '../pool/orchestratorPool';
 function editFailure(c: Context, err: unknown) {
   const e = err as Error;
   if (e.message === 'Session not found') return c.json({ error: e.message }, 404);
-  if (e instanceof PlanEditError) return c.json({ error: e.message }, 400);
+  if (e instanceof PlanEditError || e instanceof TaskControlError) return c.json({ error: e.message }, 400);
   console.error('[plans] task edit failed:', err);
   return c.json({ error: e.message || 'Internal error' }, 500);
 }
@@ -120,6 +120,38 @@ export function plansRoute(pool: OrchestratorPool) {
       }
     });
   }
+
+  // Talking to a structured task (ADR-0018, M1). A terminal task, or one not
+  // running, is refused with the reason rather than typed at.
+  router.post('/:sessionId/tasks/:taskId/messages', async (c) => {
+    try {
+      const body: unknown = await c.req.json().catch(() => ({}));
+      const text = typeof body === 'object' && body !== null && 'text' in body ? body.text : undefined;
+      if (typeof text !== 'string' || !text.trim()) return c.json({ error: 'text is required' }, 400);
+      const id = pool.session(c.req.param('sessionId')).sendTaskMessage(c.req.param('taskId'), text);
+      return c.json({ id });
+    } catch (err) {
+      return editFailure(c, err);
+    }
+  });
+
+  router.delete('/:sessionId/tasks/:taskId/messages/:messageId', (c) => {
+    try {
+      const removed = pool.session(c.req.param('sessionId')).removeQueuedTaskMessage(c.req.param('taskId'), c.req.param('messageId'));
+      return c.json({ removed });
+    } catch (err) {
+      return editFailure(c, err);
+    }
+  });
+
+  router.post('/:sessionId/tasks/:taskId/interrupt', async (c) => {
+    try {
+      await pool.session(c.req.param('sessionId')).interruptTask(c.req.param('taskId'));
+      return c.json({ ok: true });
+    } catch (err) {
+      return editFailure(c, err);
+    }
+  });
 
   // Isolated-run handoff (ADR-0013). A merge that conflicts or fails is an
   // outcome the surface reports, not a malformed request, so it answers 200.

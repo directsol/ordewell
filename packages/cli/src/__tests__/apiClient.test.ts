@@ -337,4 +337,33 @@ describe('ApiClient — adopting a saved session', () => {
 
     await expect(new ApiClient(server.port).adoptSession('s1')).rejects.toThrow('Session not found');
   });
+
+  it('sends, takes back and interrupts on a task\'s own routes, and surfaces a refusal', async () => {
+    const hits: string[] = [];
+    const srv = await startCustomServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => { body += String(chunk); });
+      req.on('end', () => {
+        hits.push(`${req.method} ${req.url} ${body}`.trim());
+        res.setHeader('Content-Type', 'application/json');
+        if (req.url?.endsWith('/interrupt')) {
+          res.statusCode = 400;
+          return res.end(JSON.stringify({ error: 'Task "Only" runs in a terminal' }));
+        }
+        res.end(JSON.stringify(req.method === 'DELETE' ? { removed: true } : { id: 'msg-1' }));
+      });
+    });
+    servers.push(srv);
+    const client = new ApiClient(srv.port);
+
+    expect(await client.sendTaskMessage('s1', 't1', 'use Postgres')).toEqual({ id: 'msg-1' });
+    expect(await client.removeQueuedTaskMessage('s1', 't1', 'msg-1')).toEqual({ removed: true });
+    await expect(client.interruptTask('s1', 't1')).rejects.toThrow('runs in a terminal');
+
+    expect(hits).toEqual([
+      'POST /api/plans/s1/tasks/t1/messages {"text":"use Postgres"}',
+      'DELETE /api/plans/s1/tasks/t1/messages/msg-1',
+      'POST /api/plans/s1/tasks/t1/interrupt',
+    ]);
+  });
 });

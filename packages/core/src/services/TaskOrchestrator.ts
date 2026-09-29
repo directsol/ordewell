@@ -2,7 +2,7 @@ import * as path from 'path';
 import { Task, TaskSnapshot, Verdict, QueuedMessage, RunnerId, flattenTasksWithParents, taskOrderLabel } from '../models/Task';
 import { IConfig } from '../interfaces/IConfig';
 import { INotification } from '../interfaces/INotification';
-import { isStructuredSession, type ITerminalRunner, type ITerminalSession, type RunnerTransport } from '../interfaces/ITerminalRunner';
+import { isStructuredSession, type ITerminalRunner, type ITerminalSession, type QueuedTaskMessage, type RunnerTransport, type StructuredSessionCapability } from '../interfaces/ITerminalRunner';
 import { composeAugmentedPrompt, summarizeOutput } from './promptAugment';
 import { VerdictEngine } from './VerdictEngine';
 import { BufferedTaskOutputSource } from './BufferedTaskOutputSource';
@@ -66,6 +66,18 @@ export interface OrchestratorObserver {
 }
 
 /**
+ * A message or interrupt a task cannot take: it is not running, it runs on the
+ * terminal transport, or it is waiting on something a message does not answer.
+ * The request is wrong, not the orchestrator, so a surface says why.
+ */
+export class TaskControlError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TaskControlError';
+  }
+}
+
+/**
  * One run of one task, from the moment the scheduler claims it until its
  * verdict, cancel, stop or plan load. Everything that has to die with the run
  * lives on this record, so {@link TaskOrchestrator.endAttempt} releases all of
@@ -93,6 +105,12 @@ interface TaskAttempt {
   /** Set when this attempt is a conflict repair (ADR-0015) of work that already passed. */
   readonly repair: RepairAttempt | null;
   readonly startedAt: string;
+  /**
+   * Set as its verdict arrives, before the verdict is applied: the turn that
+   * carried the marker ends while the verdict is still settling, and must not
+   * read as waiting for input.
+   */
+  decided: boolean;
 }
 
 type AttemptPhase = 'starting' | 'running' | 'integrating';
@@ -239,7 +257,8 @@ export class TaskOrchestrator {
     this.verifier.onCheckpoint((taskId, summary) => {
       const task = this.store.get(taskId);
       if (!task) return;
-      this.store.markAwaitingUser(taskId);
+      this.store.markAwaitingUser(taskId, 'checkpoint');
+      this.verifier.pauseIdle(taskId);
       this.emit('onTaskSettled', { taskId });
       this.emit('onCheckpoint', { taskId, taskTitle: task.title, summary });
     });
@@ -330,22 +349,96 @@ export class TaskOrchestrator {
     return resolved.env;
   }
 
-  /*
-   * A checkpoint only exists while its attempt runs. Without a live attempt the
-   * task is awaiting the user for another reason — a merge conflict — and
-   * putting it back to in_progress would strand it with no runner behind it.
-   */
   approveCheckpoint(taskId: string): void {
-    if (!this.attempts.has(taskId)) return;
+    if (!this.atCheckpoint(taskId)) return;
     this.verifier.approveCheckpoint(taskId);
     this.store.markInProgress(taskId);
     this.emit('onTaskChanged');
   }
 
   rejectCheckpoint(taskId: string, reason?: string): void {
-    if (!this.attempts.has(taskId)) return;
+    if (!this.atCheckpoint(taskId)) return;
     this.verifier.rejectCheckpoint(taskId, reason ?? 'Checkpoint rejected by user');
     this.store.markInProgress(taskId);
+    this.emit('onTaskChanged');
+  }
+
+  /*
+   * The saved reason says what the task waits on. The live attempt stays a
+   * guard: a checkpoint reloaded from disk has no runner left to answer it,
+   * and putting it back to in_progress would strand it with nothing behind it.
+   */
+  private atCheckpoint(taskId: string): boolean {
+    return this.store.get(taskId)?.awaitingReason === 'checkpoint' && this.attempts.has(taskId);
+  }
+
+  /**
+   * Send a structured task a user message (ADR-0018, M1). Mid-turn it queues
+   * behind the turn; a task waiting for input takes it at once and is back in
+   * progress. Returns the message's id, for {@link removeQueuedTaskMessage}.
+   */
+  sendTaskMessage(taskId: string, text: string): string {
+    const message = text.trim();
+    if (!message) throw new TaskControlError('A message to a task cannot be empty.');
+    const task = this.store.get(taskId);
+    const session = this.structuredSession(taskId, 'message');
+    if (task?.status === 'awaiting_user' && task.awaitingReason !== 'input') {
+      throw new TaskControlError(`Task "${task.title}" is at a checkpoint: approve or reject it instead.`);
+    }
+    const id = session.sendMessage(message);
+    if (task?.status === 'awaiting_user') this.store.markInProgress(taskId);
+    this.emit('onTaskChanged');
+    return id;
+  }
+
+  /** Take back a message still queued behind a turn; false once it was delivered. */
+  removeQueuedTaskMessage(taskId: string, id: string): boolean {
+    const removed = this.structuredSession(taskId, 'message').removeQueued(id);
+    if (removed) this.emit('onTaskChanged');
+    return removed;
+  }
+
+  /** Stop a structured task's running turn; it then waits for input like any turn that ends without its marker. */
+  async interruptTask(taskId: string): Promise<void> {
+    await this.structuredSession(taskId, 'interrupt').interrupt();
+  }
+
+  /** What is waiting for a structured task's turn to end; empty for any other task. */
+  getQueuedTaskMessages(taskId: string): QueuedTaskMessage[] {
+    const session = this.attempts.get(taskId)?.session;
+    return session && isStructuredSession(session) ? session.queued() : [];
+  }
+
+  private structuredSession(taskId: string, action: 'message' | 'interrupt'): StructuredSessionCapability {
+    const task = this.store.get(taskId);
+    if (!task) throw new TaskControlError(`No task ${taskId} in this plan.`);
+    const attempt = this.attempts.get(taskId);
+    const session = attempt?.session;
+    if (!attempt || !session || attempt.phase !== 'running' || attempt.decided) {
+      throw new TaskControlError(`Task "${task.title}" is not running, so there is no turn to ${action === 'message' ? 'send a message to' : 'interrupt'}.`);
+    }
+    if (!isStructuredSession(session)) {
+      throw new TaskControlError(`Task "${task.title}" runs in a terminal, which cannot take a ${action === 'message' ? 'message' : 'interrupt'} from Ordewell: use its terminal instead.`);
+    }
+    return session;
+  }
+
+  /**
+   * A structured turn that ended without the done marker (ADR-0018, W1). No
+   * verdict is guessed: the task waits for input, unless a checkpoint in the
+   * same turn already has it waiting, or a queued message went straight out —
+   * the session never passes through idle then, so nothing flickers.
+   */
+  private onTurnEnd(taskId: string, attempt: TaskAttempt, session: ITerminalSession & StructuredSessionCapability): void {
+    if (this.attempts.get(taskId) !== attempt || attempt.phase !== 'running' || attempt.decided) return;
+    if (session.turnState() === 'working') {
+      this.emit('onTaskChanged');
+      return;
+    }
+    if (this.store.get(taskId)?.status !== 'in_progress') return;
+    this.store.markAwaitingUser(taskId, 'input');
+    this.verifier.pauseIdle(taskId);
+    this.emit('onTaskSettled', { taskId });
     this.emit('onTaskChanged');
   }
 
@@ -582,7 +675,7 @@ export class TaskOrchestrator {
     // `active` so a crash-recovery prune does not sweep it away. A stopped
     // repair did not land, so its task waits on the user as its conflict did.
     for (const a of this.endAllAttempts('stop')) {
-      if (a.repair) this.store.markAwaitingUser(a.taskId);
+      if (a.repair) this.store.markAwaitingUser(a.taskId, 'conflict');
       if (a.worktree) void this.runs.release(a.taskId, { keep: true }, a.integration);
     }
     this.runs.interrupt();
@@ -598,6 +691,7 @@ export class TaskOrchestrator {
     const task = this.store.get(taskId);
     const attempt = this.attempts.get(taskId);
     if (!task || !attempt) return;
+    attempt.decided = true;
 
     console.error(`[TaskOrchestrator] Task #${task.order} "${task.title}" verdict=${verdict.outcome}`);
     console.error(`[TaskOrchestrator] Runner: ${task.assignedRunner}, Model: ${task.assignedModel?.modelId ?? 'default'}`);
@@ -705,7 +799,7 @@ export class TaskOrchestrator {
    * the ending attempt freed and never one more than the run allows.
    */
   private settleUnlanded(task: Task, outcome: UnlandedOutcome): void {
-    this.store.markAwaitingUser(task.id);
+    this.store.markAwaitingUser(task.id, 'conflict');
     this.say(outcome.messages);
     if (outcome.kind !== 'repair-needed') return;
     if (this.attempts.size < this.config.maxParallelSessions) void this.startTask(task);
@@ -1009,6 +1103,7 @@ export class TaskOrchestrator {
       integration: null,
       repair: this.landing.nextRepair(task.id),
       startedAt: new Date().toISOString(),
+      decided: false,
     };
     this.spawnCounts.set(task.id, attempt.attempt);
     this.attempts.set(task.id, attempt);
@@ -1091,6 +1186,7 @@ export class TaskOrchestrator {
       // captured before that chunk's verdict asks for the final text.
       this.output.attach(task.id, session);
       this.verifier.watch(task, session);
+      if (isStructuredSession(session)) session.onTurnEnd(() => this.onTurnEnd(task.id, attempt, session));
       this.watchBlockingPrompts(task, attempt, session);
       return true;
     } catch (err) {
@@ -1145,7 +1241,7 @@ export class TaskOrchestrator {
   private abandonSpawn(task: Task, attempt: TaskAttempt, session?: ITerminalSession): void {
     session?.kill();
     if (this.attempts.has(task.id) || this.store.get(task.id)?.status !== 'in_progress') return;
-    if (attempt.repair) this.store.markAwaitingUser(task.id);
+    if (attempt.repair) this.store.markAwaitingUser(task.id, 'conflict');
     else this.store.markPending(task.id);
     this.emit('onTaskChanged');
   }

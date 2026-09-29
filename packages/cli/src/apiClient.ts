@@ -321,6 +321,35 @@ export class ApiClient {
     return res.data;
   }
 
+  /** A user message to a structured task: delivered now if it waits for input, else queued behind its turn. */
+  async sendTaskMessage(sessionId: string, taskId: string, text: string): Promise<{ id: string }> {
+    const res = await this.httpRequest<{ id: string } & ErrorResponse>('POST', `/api/plans/${sessionId}/tasks/${taskId}/messages`, { text });
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Send message failed');
+    }
+    return res.data;
+  }
+
+  /** `removed` is false once the message was already delivered. */
+  async removeQueuedTaskMessage(sessionId: string, taskId: string, messageId: string): Promise<{ removed: boolean }> {
+    const res = await this.httpRequest<{ removed: boolean } & ErrorResponse>(
+      'DELETE',
+      `/api/plans/${sessionId}/tasks/${taskId}/messages/${encodeURIComponent(messageId)}`,
+    );
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Remove message failed');
+    }
+    return res.data;
+  }
+
+  async interruptTask(sessionId: string, taskId: string): Promise<{ ok: boolean }> {
+    const res = await this.httpRequest<{ ok: boolean } & ErrorResponse>('POST', `/api/plans/${sessionId}/tasks/${taskId}/interrupt`);
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Interrupt failed');
+    }
+    return res.data;
+  }
+
   async addTask(sessionId: string, task: Record<string, unknown>): Promise<{ ok: boolean }> {
     const res = await this.httpRequest<{ ok: boolean } & ErrorResponse>('POST', `/api/plans/${sessionId}/tasks`, task);
     if (res.status !== 200) {

@@ -1094,6 +1094,26 @@ export class Session {
     this.orchestrator.rejectCheckpoint(taskId, reason);
   }
 
+  /**
+   * A user message to a structured task (ADR-0018, M1); throws
+   * `TaskControlError` for one that cannot take it. A task waiting for input
+   * is back in progress, and saved so before any surface is told.
+   */
+  sendTaskMessage(taskId: string, text: string): string {
+    const id = this.events.holdStatus(() => this.orchestrator.sendTaskMessage(taskId, text));
+    this.persist({ background: true });
+    this.events.releaseStatus(this.plan);
+    return id;
+  }
+
+  removeQueuedTaskMessage(taskId: string, id: string): boolean {
+    return this.orchestrator.removeQueuedTaskMessage(taskId, id);
+  }
+
+  async interruptTask(taskId: string): Promise<void> {
+    await this.orchestrator.interruptTask(taskId);
+  }
+
   getQueuedMessages(): QueuedMessage[] { return this.orchestrator.getQueuedMessages(); }
   /** Take back one unsent message; the plan's persisted queue follows so a reload cannot resurrect it. */
   removeQueuedMessage(id: string): boolean {

@@ -293,6 +293,39 @@ describe('PlanStore completion and failure have one source', () => {
   });
 });
 
+describe('PlanStore keeps an awaiting reason only while the task waits', () => {
+  function waiting(): PlanStore {
+    const store = new PlanStore();
+    store.load([createTask({ id: 'a', title: 'A', status: 'in_progress' })], ['claude-code']);
+    store.markAwaitingUser('a', 'input');
+    return store;
+  }
+
+  it('saves the reason with the status', () => {
+    expect(waiting().get('a')).toMatchObject({ status: 'awaiting_user', awaitingReason: 'input' });
+  });
+
+  it('replaces the reason on a new wait, and a wait with none leaves none', () => {
+    const store = waiting();
+    store.markAwaitingUser('a', 'checkpoint');
+    expect(store.get('a')!.awaitingReason).toBe('checkpoint');
+    store.markAwaitingUser('a');
+    expect(store.get('a')!).not.toHaveProperty('awaitingReason');
+  });
+
+  it.each<[string, (store: PlanStore) => void]>([
+    ['markInProgress', (s) => s.markInProgress('a')],
+    ['markCompleted', (s) => s.markCompleted('a')],
+    ['markFailed', (s) => s.markFailed('a')],
+    ['markPending', (s) => s.markPending('a')],
+    ['retry', (s) => s.retry('a')],
+  ])('drops it on %s', (_name, op) => {
+    const store = waiting();
+    op(store);
+    expect(store.get('a')!).not.toHaveProperty('awaitingReason');
+  });
+});
+
 describe('PlanStore owns its tasks', () => {
   it('load() changes neither the caller\'s array nor its task objects', () => {
     const tasks = [

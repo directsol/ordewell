@@ -109,6 +109,12 @@ export type WebviewToHost =
   | { type: 'addTask'; draft: TaskDraft }
   /** The user's answer to a task paused at a checkpoint; a rejection resumes the agent with the reason. */
   | { type: 'answerCheckpoint'; taskId: string; approved: boolean; reason?: string }
+  /** A user message to a structured task (ADR-0018): queued behind its turn, or delivered at once if it waits for input. */
+  | { type: 'sendTaskMessage'; taskId: string; text: string }
+  /** Take back a message still queued behind a structured task's turn. */
+  | { type: 'removeQueuedTaskMessage'; taskId: string; id: string }
+  /** Stop a structured task's running turn; the task then waits for input. */
+  | { type: 'interruptTask'; taskId: string }
   /** The planner merges these tasks into one (issue #18). */
   | { type: 'mergeTasks'; taskIds: string[] }
   /** The planner splits this task into smaller ones (issue #18). */

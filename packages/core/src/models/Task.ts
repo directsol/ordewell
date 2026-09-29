@@ -36,6 +36,17 @@ export type TaskType = 'ai' | 'user';
 export type TaskStatus = 'pending' | 'approved' | 'in_progress' | 'completed' | 'failed' | 'blocked' | 'awaiting_user';
 export type TaskMode = string;
 
+/**
+ * Why an `awaiting_user` task waits (ADR-0018, W1): a structured turn that
+ * ended without the done marker, a checkpoint question, or work that did not
+ * land. Saved, so no surface has to guess it from whether an attempt is live.
+ */
+export type AwaitingReason = 'input' | 'checkpoint' | 'conflict';
+
+export function isAwaitingReason(value: unknown): value is AwaitingReason {
+  return value === 'input' || value === 'checkpoint' || value === 'conflict';
+}
+
 export interface TaskModelAssignment {
   modelId: string;
   modelLabel: string;
@@ -86,6 +97,8 @@ export interface Task {
   sliceType?: 'HITL' | 'AFK';
   userStoriesCovered?: string[];
   transport?: TaskTransport;
+  /** Set only while `status` is `awaiting_user`, and not always then — a usage-limit pause has none. */
+  awaitingReason?: AwaitingReason;
 }
 
 export interface DiscoveredMode {

@@ -1,4 +1,4 @@
-import { isRunnerTransport, type DisplayBlock, type SessionMessage } from '@ordewell/core';
+import { isAwaitingReason, isRunnerTransport, type DisplayBlock, type SessionMessage } from '@ordewell/core';
 import { sanitize } from '../ansi';
 import {
   isTaskRunning, plannerInFlight, SKILL_IDS, type SkillId, type TaskView, type TuiState,
@@ -71,6 +71,7 @@ function toTaskView(t: Record<string, unknown>, index: number): TaskView {
     prompt: typeof t.prompt === 'string' ? sanitize(t.prompt) : undefined,
     type: t.type === 'user' ? 'user' : 'ai',
     status: planLabel(t.status, 'pending'),
+    awaitingReason: t.status === 'awaiting_user' && isAwaitingReason(t.awaitingReason) ? t.awaitingReason : undefined,
     dependencies: Array.isArray(t.dependencies) ? t.dependencies.map((id: unknown) => planLabel(id)) : [],
     assignedRunner: typeof t.assignedRunner === 'string' ? planLabel(t.assignedRunner) : undefined,
     taskMode: typeof t.taskMode === 'string' ? planLabel(t.taskMode) : undefined,

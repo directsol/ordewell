@@ -6,7 +6,7 @@ import { taskRepoNames } from '../isolation';
 import { SLASH_COMMANDS, type SlashCategory } from './slash';
 import { isTaskRunning, planRows, plannerInFlight, selectedPlanRow, type PlanRow, type TuiState } from './state';
 import { modesForTask } from './taskAssignment';
-import { ALL_PROVIDERS, capConflictFiles, hasHiddenDetail, runnerForProvider, taskOrderLabel, type AiProvider, type DisplayBlock } from '@ordewell/core';
+import { ALL_PROVIDERS, capConflictFiles, hasHiddenDetail, runnerForProvider, taskOrderLabel, type AiProvider, type AwaitingReason, type DisplayBlock } from '@ordewell/core';
 
 /**
  * What each pane's content actually is, and therefore how far it can scroll.
@@ -377,6 +377,13 @@ const STATUS_ICON: Record<string, string> = {
   pending: '·',
 };
 
+/** What an awaiting_user task waits on, in the words its row uses. */
+const AWAITING_LABEL: Record<AwaitingReason, string> = {
+  input: 'waiting for your input',
+  checkpoint: 'checkpoint',
+  conflict: 'merge conflict',
+};
+
 /** Static marker for a running task whose runner has gone quiet — distinct from both the busy spinner and the awaiting_user '?'. */
 const IDLE_ICON = '~';
 
@@ -564,7 +571,8 @@ function taskLines(state: TuiState, row: PlanRow, index: number, cols: number): 
   // "working" over an agent that has printed nothing for a minute hid the one
   // case that needs the user: an agent stopped at a question in its terminal.
   const structured = task.transport?.kind === 'structured';
-  const activity = idle ? (structured ? 'quiet' : 'quiet — t opens its terminal') : running ? 'working' : '';
+  const waiting = task.status === 'awaiting_user' && task.awaitingReason ? AWAITING_LABEL[task.awaitingReason] : '';
+  const activity = idle ? (structured ? 'quiet' : 'quiet — t opens its terminal') : running ? 'working' : waiting;
   const meta = [activity, runner, structured ? 'structured' : '', model].filter(Boolean).join(' · ');
   if (meta) lines.push(style.grey(truncate(`${bodyPad}${meta}`, cols)));
   // Asked for structured and did not get it: said on the row, never silently.

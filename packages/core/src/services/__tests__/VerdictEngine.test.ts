@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { VerdictEngine } from '../VerdictEngine';
 import { composeAugmentedPrompt } from '../promptAugment';
 import { createTask, type Task } from '../../models/Task';
-import { flushMicrotasks } from '../../testing';
+import { FakeStructuredSession, flushMicrotasks } from '../../testing';
 
 const buildTask = (extra: Partial<Task> = {}): Task =>
   createTask({ id: 't1', title: 'do thing', taskMode: 'build', completionMarker: 'mk-1', ...extra });
@@ -540,6 +540,73 @@ describe('VerdictEngine', () => {
 
       expect(engine.getIdleSince('t1')).toBeNull();
       expect(idleEvents).toHaveLength(0);
+    });
+  });
+
+  describe('idle while the task waits on the user (ADR-0018, W1)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('still flags silence during a running structured turn', () => {
+      const engine = new VerdictEngine();
+      const session = new FakeStructuredSession();
+      engine.watch(buildTask(), session);
+
+      session.emitOutput('› Bash(npm test)\n');
+      vi.advanceTimersByTime(60_000);
+
+      expect(engine.getIdleSince('t1')).not.toBeNull();
+    });
+
+    it('does not flag a paused task, and resumes watching when its next turn starts', () => {
+      const engine = new VerdictEngine();
+      const session = new FakeStructuredSession();
+      engine.watch(buildTask(), session);
+      session.emitOutput('working\n');
+      session.emitTurnEnd('completed');
+
+      engine.pauseIdle('t1');
+      vi.advanceTimersByTime(120_000);
+      expect(engine.getIdleSince('t1')).toBeNull();
+
+      session.sendMessage('carry on');
+      vi.advanceTimersByTime(60_000);
+      expect(engine.getIdleSince('t1')).not.toBeNull();
+    });
+
+    it('clears an idle flag already raised when the task starts waiting', () => {
+      const engine = new VerdictEngine();
+      const idleEvents: (string | null)[] = [];
+      engine.onIdleChange((_id, idleSince) => idleEvents.push(idleSince));
+      const session = new FakeStructuredSession();
+      engine.watch(buildTask(), session);
+      session.emitOutput('working\n');
+      vi.advanceTimersByTime(60_000);
+
+      engine.pauseIdle('t1');
+
+      expect(engine.getIdleSince('t1')).toBeNull();
+      expect(idleEvents.at(-1)).toBeNull();
+    });
+
+    it('keeps a terminal checkpoint quiet until it is answered', () => {
+      const engine = new VerdictEngine();
+      const session = fakeSession();
+      engine.watch(buildTask(), session);
+      session.emit('<<<ORDEWELL_CHECKPOINT: ok?>>>');
+
+      engine.pauseIdle('t1');
+      vi.advanceTimersByTime(120_000);
+      expect(engine.getIdleSince('t1')).toBeNull();
+
+      engine.approveCheckpoint('t1');
+      vi.advanceTimersByTime(60_000);
+      expect(engine.getIdleSince('t1')).not.toBeNull();
     });
   });
 

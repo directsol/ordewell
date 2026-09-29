@@ -1,10 +1,19 @@
-import type { ConversationMessage, PlannerUsage, ResearchLogEntry, RunnerTransport, SessionMessage } from '@ordewell/core';
+import type { AwaitingReason, ConversationMessage, PlannerUsage, ResearchLogEntry, RunnerTransport, SessionMessage } from '@ordewell/core';
 import type { Key } from '../keys';
 import type {
   HandoffView, LandedTaskView, ModelView, ModeView, RewindTargetView, RunnerView, SessionView,
   TaskIsolationView, TaskTransportView, TuiState,
 } from '../state';
 import { say } from '../transcript';
+
+/** One task's entry in a daemon `status_update`, as the TUI keeps it. */
+export interface TaskStatusUpdate {
+  status: string;
+  idleSince?: string | null;
+  isolation?: TaskIsolationView;
+  transport?: TaskTransportView;
+  awaitingReason?: AwaitingReason;
+}
 
 /** Side effects the runtime performs; the reducer itself stays pure. */
 export type Effect =
@@ -75,7 +84,7 @@ export type Action =
   | { type: 'sessionMessage'; message: SessionMessage; sessionId?: string }
   | { type: 'taskStarted'; taskId: string; title: string; runner?: string; sessionId?: string }
   | { type: 'taskStatus'; taskId: string; status: string; sessionId?: string }
-  | { type: 'tasksStatus'; updates: Record<string, { status: string; idleSince?: string | null; isolation?: TaskIsolationView; transport?: TaskTransportView }>; sessionId?: string }
+  | { type: 'tasksStatus'; updates: Record<string, TaskStatusUpdate>; sessionId?: string }
   | { type: 'isolationBlocked'; message: string; repos?: string[]; sessionId?: string }
   | { type: 'isolationHandoff'; handoff: HandoffView; sessionId?: string }
   | { type: 'handoffDiff'; diff: string; sessionId?: string }

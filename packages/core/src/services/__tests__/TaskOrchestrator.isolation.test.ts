@@ -122,6 +122,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
     await flushMicrotasks();
 
     expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'conflict', branch: 'ordewell/run1/1-t1' });
+    expect(orchestrator.storeInstance.get('t1')!.awaitingReason).toBe('conflict');
     expect(isolation.taskIdsFor('release')).toEqual([]);
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(vi.mocked(notifications.warn).mock.calls.flat().join('\n')).toMatch(/conflict/i);
@@ -139,6 +140,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
     await vi.waitFor(() => expect(orchestrator.storeInstance.get('t1')!.status).toBe('awaiting_user'));
 
     expect(orchestrator.storeInstance.get('t1')!.verdict!.outcome).toBe('pass');
+    expect(orchestrator.storeInstance.get('t1')!.awaitingReason).toBe('conflict');
     expect(orchestrator.getTaskIsolation('t1')).toMatchObject({ state: 'kept' });
     expect(isolation.taskIdsFor('release')).toEqual([]);
     expect(vi.mocked(notifications.error).mock.calls.flat().join('\n')).toMatch(/integrat/i);

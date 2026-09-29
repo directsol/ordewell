@@ -1,0 +1,84 @@
+import { describe, it, expect, vi } from 'vitest';
+import { Hono } from 'hono';
+import { TaskControlError } from '@ordewell/core';
+import type { OrchestratorPool } from '../../pool/orchestratorPool';
+import { plansRoute } from '../plans';
+
+function appFor(session: Record<string, unknown>, known = true) {
+  const pool = {
+    session: vi.fn(() => {
+      if (!known) throw new Error('Session not found');
+      return session;
+    }),
+  } as unknown as OrchestratorPool;
+  const app = new Hono();
+  app.route('/api/plans', plansRoute(pool));
+  return app;
+}
+
+function request(app: Hono, method: string, path: string, body?: unknown) {
+  return app.request(`/api/plans/s1/tasks/t1${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+}
+
+describe('talking to a structured task over the daemon (ADR-0018, M1)', () => {
+  it('sends a message and answers with its queued id', async () => {
+    const sendTaskMessage = vi.fn(() => 'msg-1');
+    const res = await request(appFor({ sendTaskMessage }), 'POST', '/messages', { text: 'use Postgres' });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: 'msg-1' });
+    expect(sendTaskMessage).toHaveBeenCalledWith('t1', 'use Postgres');
+  });
+
+  it('asks for the text rather than sending an empty message', async () => {
+    const sendTaskMessage = vi.fn();
+    const res = await request(appFor({ sendTaskMessage }), 'POST', '/messages', { text: '  ' });
+
+    expect(res.status).toBe(400);
+    expect(sendTaskMessage).not.toHaveBeenCalled();
+  });
+
+  it('takes back a queued message, saying whether it was still there', async () => {
+    const removeQueuedTaskMessage = vi.fn(() => false);
+    const res = await request(appFor({ removeQueuedTaskMessage }), 'DELETE', '/messages/msg-2');
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ removed: false });
+    expect(removeQueuedTaskMessage).toHaveBeenCalledWith('t1', 'msg-2');
+  });
+
+  it('interrupts the running turn', async () => {
+    const interruptTask = vi.fn(async () => {});
+    const res = await request(appFor({ interruptTask }), 'POST', '/interrupt');
+
+    expect(res.status).toBe(200);
+    expect(interruptTask).toHaveBeenCalledWith('t1');
+  });
+
+  it('answers a refusal — a terminal task, say — with 400 and the reason', async () => {
+    const refusal = new TaskControlError('Task "Only" runs in a terminal, which cannot take a message from Ordewell: use its terminal instead.');
+    const app = appFor({
+      sendTaskMessage: () => { throw refusal; },
+      removeQueuedTaskMessage: () => { throw refusal; },
+      interruptTask: async () => { throw refusal; },
+    });
+
+    for (const res of [
+      await request(app, 'POST', '/messages', { text: 'hi' }),
+      await request(app, 'DELETE', '/messages/msg-1'),
+      await request(app, 'POST', '/interrupt'),
+    ]) {
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: refusal.message });
+    }
+  });
+
+  it('answers 404 for a session the daemon does not have', async () => {
+    const res = await request(appFor({}, false), 'POST', '/interrupt');
+    expect(res.status).toBe(404);
+  });
+});

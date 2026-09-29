@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, type ConversationView, type PromptHold, type RunnerTransport, type TaskTransport, type TurnGate } from '@ordewell/core';
+import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, type AwaitingReason, type ConversationView, type PromptHold, type RunnerTransport, type TaskTransport, type TurnGate } from '@ordewell/core';
 import { emptyEditor, type EditorState } from './editor';
 
 export type RunStatus = 'idle' | 'planning' | 'researching' | 'executing';
@@ -26,6 +26,8 @@ export interface TaskView {
   isolation?: TaskIsolationView;
   /** Absent unless the task's plan asked for the structured transport: what it ran on, or why it fell back. */
   transport?: TaskTransportView;
+  /** What an `awaiting_user` task waits on, when the daemon saved why. */
+  awaitingReason?: AwaitingReason;
   /** Child tasks, recursively shaped the same way; absent until populated by `toTaskView`. */
   subtasks?: TaskView[];
 }
