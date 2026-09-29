@@ -2,7 +2,7 @@ import * as path from 'path';
 import { Task, TaskSnapshot, Verdict, QueuedMessage, RunnerId, flattenTasksWithParents, taskOrderLabel } from '../models/Task';
 import { IConfig } from '../interfaces/IConfig';
 import { INotification } from '../interfaces/INotification';
-import { ITerminalRunner, ITerminalSession } from '../interfaces/ITerminalRunner';
+import { isStructuredSession, type ITerminalRunner, type ITerminalSession, type RunnerTransport } from '../interfaces/ITerminalRunner';
 import { composeAugmentedPrompt, summarizeOutput } from './promptAugment';
 import { VerdictEngine } from './VerdictEngine';
 import { BufferedTaskOutputSource } from './BufferedTaskOutputSource';
@@ -27,6 +27,7 @@ import { classifyRunnerStop, keepsTerminalReadable, stopsRunner, LingeringRunner
 import { MessageQueue } from './MessageQueue';
 import { selectReadyTasks } from './readiness';
 import { resolveWorkspaceEnv, type WorkspaceEnv } from './workspaceEnv';
+import { routeTransport } from './TransportRouter';
 
 /**
  * The one notification channel out of the orchestrator. Everything that used
@@ -130,6 +131,8 @@ export interface TaskOrchestratorDeps {
   workspaceEnv: (cwd: string) => Promise<WorkspaceEnv>;
   /** Read live at each spawn, so a toggle takes effect on the next task. */
   tddEnabled: () => boolean;
+  /** Read once as a run opens, never per spawn (ADR-0018, S1). */
+  runnerTransport: () => RunnerTransport;
 }
 
 /**
@@ -148,6 +151,7 @@ export interface TaskOrchestratorOptions {
   workspaceRoot?: () => string;
   workspaceEnv?: (cwd: string) => Promise<WorkspaceEnv>;
   tddEnabled?: () => boolean;
+  runnerTransport?: () => RunnerTransport;
 }
 
 /**
@@ -208,6 +212,13 @@ export class TaskOrchestrator {
   private workspaceRootFn: () => string;
   private observers: OrchestratorObserver[] = [];
   private tddEnabled: () => boolean;
+  private readRunnerTransport: () => RunnerTransport;
+  /**
+   * The setting as the latest run copied it when it opened. Every spawn of
+   * that run uses this, so flipping the setting mid-run changes the next run
+   * only — the plan, not a live setting, says what runs (ADR-0001).
+   */
+  private planTransport: RunnerTransport | null = null;
 
   constructor(deps: TaskOrchestratorDeps) {
     this.config = deps.config;
@@ -221,6 +232,7 @@ export class TaskOrchestrator {
     this.workspaceRootFn = deps.workspaceRoot;
     this.workspaceEnv = deps.workspaceEnv;
     this.tddEnabled = deps.tddEnabled;
+    this.readRunnerTransport = deps.runnerTransport;
 
     this.store.onMutate = () => this.emit('onTaskChanged');
     this.verifier.onVerdict((taskId, verdict) => this.onVerdict(taskId, verdict));
@@ -256,6 +268,7 @@ export class TaskOrchestrator {
       notifications: options.notifications,
       workspaceRoot,
       listener: {
+        opened: () => { orchestrator.planTransport = orchestrator.readRunnerTransport(); },
         changed: () => orchestrator.emit('onIsolationChanged'),
         blocked: (repos) => orchestrator.emit('onIsolationBlocked', { reason: 'dirty', repos }),
         handoff: (handoff) => orchestrator.emit('onIsolationHandoff', handoff),
@@ -276,6 +289,7 @@ export class TaskOrchestrator {
       workspaceRoot,
       workspaceEnv: options.workspaceEnv ?? ((cwd) => resolveWorkspaceEnv(cwd)),
       tddEnabled: options.tddEnabled ?? (() => false),
+      runnerTransport: options.runnerTransport ?? (() => 'terminal'),
     });
     return orchestrator;
   }
@@ -449,6 +463,16 @@ export class TaskOrchestrator {
   /** What the plan persists of isolated execution; null when no run ever isolated. */
   get isolationRecord(): PlanIsolation | null {
     return this.runs.planIsolation;
+  }
+
+  /** The transport the plan's latest run copied from the setting; null before its first run. */
+  get runnerTransport(): RunnerTransport | null {
+    return this.planTransport;
+  }
+
+  /** Take over a saved plan's copied transport. The next run copies the setting afresh. */
+  adoptRunnerTransport(transport: RunnerTransport | null): void {
+    this.planTransport = transport;
   }
 
   queueMessage(text: string): void {
@@ -1034,6 +1058,7 @@ export class TaskOrchestrator {
       });
       this.lingering.close(task.id);
       const env = await this.envForTask(cwd);
+      const transport = this.planTransport ?? 'terminal';
       const session = await this.terminalRunner.spawn({
         taskId: task.id,
         runner: attempt.runner,
@@ -1047,6 +1072,7 @@ export class TaskOrchestrator {
         order: task.order,
         title: task.title,
         env,
+        transport,
       });
 
       // Stop/load/cancel can end the attempt while the async adapter is
@@ -1059,6 +1085,7 @@ export class TaskOrchestrator {
       }
       attempt.phase = 'running';
       attempt.session = session;
+      this.recordTransport(task, attempt, transport, session);
 
       // Attached before the verifier so the chunk that carries the marker is
       // captured before that chunk's verdict asks for the final text.
@@ -1089,6 +1116,25 @@ export class TaskOrchestrator {
       await this.tick();
       return false;
     }
+  }
+
+  /**
+   * Say on the task how this attempt is driven, when its plan asked for the
+   * structured transport; a terminal plan's tasks record nothing. A structured
+   * request that came back a terminal session is a fallback, and says why —
+   * a host without a router included — never a silent downgrade.
+   */
+  private recordTransport(task: Task, attempt: TaskAttempt, requested: RunnerTransport, session: ITerminalSession): void {
+    if (requested !== 'structured') {
+      this.store.setTaskTransport(task.id, undefined);
+      return;
+    }
+    if (isStructuredSession(session)) {
+      this.store.setTaskTransport(task.id, { kind: 'structured' });
+      return;
+    }
+    const fallback = routeTransport(requested, attempt.runner, this.registry).fallback ?? 'this surface cannot run structured tasks';
+    this.store.setTaskTransport(task.id, { kind: 'terminal', fallback });
   }
 
   /**
@@ -1144,20 +1190,31 @@ export class TaskOrchestrator {
    * stop(), and if that exit reaches VerdictEngine under the still-valid
    * generation it delivers a verdict that marks the task 'completed' for one
    * tick — long enough for the scheduler to start a dependent task. A verdict
-   * leaves the runner up so its terminal stays readable, and stop/load reset
-   * the whole verifier themselves.
+   * leaves a terminal runner up so its screen stays readable (a structured one
+   * ends), and stop/load reset the whole verifier themselves.
    */
   private endAttempt(taskId: string, reason: AttemptEnd): TaskAttempt | undefined {
     const attempt = this.attempts.get(taskId);
     this.attempts.delete(taskId);
     if (attempt) this.output.detach(taskId);
-    if (attempt?.session && keepsTerminalReadable(reason)) this.lingering.remember(taskId, attempt.session.id);
-    if (stopsRunner(reason)) {
+    const session = attempt?.session ?? null;
+    const structured = session !== null && isStructuredSession(session);
+    const transport: RunnerTransport = structured ? 'structured' : 'terminal';
+    if (structured) this.saveNativeSession(taskId, session.nativeSessionId());
+    if (session && keepsTerminalReadable(reason, transport)) this.lingering.remember(taskId, session.id);
+    if (stopsRunner(reason, transport)) {
       const task = this.store.get(taskId);
       if (task) this.verifier.clear(task);
-      if (attempt?.session) this.terminalRunner.stop(attempt.session.id);
+      if (session) this.terminalRunner.stop(session.id);
     }
     return attempt;
+  }
+
+  /** Kept on the task once the attempt ends, so a continue can resume it after a reload (ADR-0018, K1). */
+  private saveNativeSession(taskId: string, nativeSessionId: string | null): void {
+    const recorded = this.store.get(taskId)?.transport;
+    if (!nativeSessionId || recorded?.kind !== 'structured') return;
+    this.store.setTaskTransport(taskId, { ...recorded, nativeSessionId });
   }
 
   private endAllAttempts(reason: 'stop' | 'load'): TaskAttempt[] {

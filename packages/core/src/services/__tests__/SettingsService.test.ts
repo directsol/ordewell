@@ -38,6 +38,7 @@ describe('SettingsService', () => {
     expect(service.getAll()).toEqual({
       tdd: { enabled: true },
       verification: { enabled: false },
+      runnerTransport: 'terminal',
     });
   });
 
@@ -58,6 +59,7 @@ describe('SettingsService', () => {
     expect(s2.getAll()).toEqual({
       tdd: { enabled: false },
       verification: { enabled: true },
+      runnerTransport: 'terminal',
     });
   });
 
@@ -88,6 +90,7 @@ describe('SettingsService', () => {
     expect(raw).toEqual({
       tdd: { enabled: false },
       verification: { enabled: true },
+      runnerTransport: 'terminal',
     });
   });
 
@@ -226,6 +229,25 @@ describe('SettingsService', () => {
       expect(s2.getPlannerModel('claude-code')).toBeUndefined();
       expect(s2.getTdd()).toBe(false);
       expect(s2.getModelAllowlist('claude-code')).toEqual(['claude-b']);
+    });
+  });
+
+  describe('runnerTransport', () => {
+    it('defaults to the terminal transport', () => {
+      expect(service.getRunnerTransport()).toBe('terminal');
+    });
+
+    it('persists structured and reads it back in a new service', () => {
+      service.setRunnerTransport('structured');
+      expect(JSON.parse(fs.readFileSync(tempFile, 'utf-8')).runnerTransport).toBe('structured');
+      expect(new SettingsService(tempFile).getRunnerTransport()).toBe('structured');
+    });
+
+    it('reads an unknown value as terminal, keeping the rest of the file', () => {
+      fs.writeFileSync(tempFile, JSON.stringify({ tdd: { enabled: false }, runnerTransport: 'telepathy' }));
+      const s2 = new SettingsService(tempFile);
+      expect(s2.getRunnerTransport()).toBe('terminal');
+      expect(s2.getTdd()).toBe(false);
     });
   });
 

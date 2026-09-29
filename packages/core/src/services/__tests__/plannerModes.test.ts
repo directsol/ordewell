@@ -30,6 +30,7 @@ describe('mode toggle registry', () => {
   const settings: UserSettings = {
     tdd: { enabled: true },
     verification: { enabled: false },
+    runnerTransport: 'terminal',
   };
 
   it('reads every toggle off the settings file, under its runtime name', () => {
@@ -42,12 +43,13 @@ describe('mode toggle registry', () => {
     });
   });
 
-  it('carries the one field that is not a toggle alongside them', () => {
+  it('carries the fields that are not toggles alongside them', () => {
     // What a host actually needs. Stopping at the toggles left both hosts
     // spreading and appending `modelAllowlist` by hand — the same shape twice.
-    expect(sessionRuntimeSettings({ ...settings, modelAllowlist: { opencode: ['a/b'] } })).toEqual({
+    expect(sessionRuntimeSettings({ ...settings, modelAllowlist: { opencode: ['a/b'] }, runnerTransport: 'structured' })).toEqual({
       ...plannerRuntimeToggles(settings),
       modelAllowlist: { opencode: ['a/b'] },
+      runnerTransport: 'structured',
     });
   });
 

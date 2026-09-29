@@ -1,8 +1,8 @@
-import type { ConversationMessage, PlannerUsage, ResearchLogEntry, SessionMessage } from '@ordewell/core';
+import type { ConversationMessage, PlannerUsage, ResearchLogEntry, RunnerTransport, SessionMessage } from '@ordewell/core';
 import type { Key } from '../keys';
 import type {
   HandoffView, LandedTaskView, ModelView, ModeView, RewindTargetView, RunnerView, SessionView,
-  TaskIsolationView, TuiState,
+  TaskIsolationView, TaskTransportView, TuiState,
 } from '../state';
 import { say } from '../transcript';
 
@@ -12,6 +12,7 @@ export type Effect =
   | { type: 'startConversation'; goal: string; allowInit?: boolean }
   | { type: 'sendMessage'; sessionId: string; message: string }
   | { type: 'command'; name: string; action: 'on' | 'off' }
+  | { type: 'setTransport'; transport: RunnerTransport }
   | { type: 'setModel'; modelId: string }
   | { type: 'setPlanner'; provider: string }
   | { type: 'setPlannerEffort'; effort: string }
@@ -74,7 +75,7 @@ export type Action =
   | { type: 'sessionMessage'; message: SessionMessage; sessionId?: string }
   | { type: 'taskStarted'; taskId: string; title: string; runner?: string; sessionId?: string }
   | { type: 'taskStatus'; taskId: string; status: string; sessionId?: string }
-  | { type: 'tasksStatus'; updates: Record<string, { status: string; idleSince?: string | null; isolation?: TaskIsolationView }>; sessionId?: string }
+  | { type: 'tasksStatus'; updates: Record<string, { status: string; idleSince?: string | null; isolation?: TaskIsolationView; transport?: TaskTransportView }>; sessionId?: string }
   | { type: 'isolationBlocked'; message: string; repos?: string[]; sessionId?: string }
   | { type: 'isolationHandoff'; handoff: HandoffView; sessionId?: string }
   | { type: 'handoffDiff'; diff: string; sessionId?: string }

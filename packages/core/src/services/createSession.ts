@@ -29,7 +29,7 @@ import type { AiProvider, IConfig } from '../interfaces/IConfig';
 import type { IFileSystem } from '../interfaces/IFileSystem';
 import type { IWebFetcher } from '../interfaces/IWebFetcher';
 import type { INotification } from '../interfaces/INotification';
-import type { ITerminalRunner } from '../interfaces/ITerminalRunner';
+import type { ITerminalRunner, RunnerTransport } from '../interfaces/ITerminalRunner';
 import type { TaskOutputSource } from '../interfaces/TaskOutputSource';
 import type { IsolationMergeResult, IsolationView, IWorktreeIsolation } from '../interfaces/IWorktreeIsolation';
 import { migratePlanStateIsolation } from './isolationRecord';
@@ -67,6 +67,8 @@ export interface SessionRuntimeSettings {
   tddEnabled: boolean;
   verificationEnabled?: boolean;
   modelAllowlist?: Record<string, string[]>;
+  /** Read once as a run starts, never per spawn (ADR-0018, S1). Absent means terminal. */
+  runnerTransport?: RunnerTransport;
 }
 
 /**
@@ -77,7 +79,7 @@ export interface SessionRuntimeSettings {
  * is not a toggle.
  */
 export function sessionRuntimeSettings(settings: UserSettings): SessionRuntimeSettings {
-  return { ...plannerRuntimeToggles(settings), modelAllowlist: settings.modelAllowlist };
+  return { ...plannerRuntimeToggles(settings), modelAllowlist: settings.modelAllowlist, runnerTransport: settings.runnerTransport };
 }
 
 /**
@@ -251,6 +253,7 @@ export function createSession(deps: SessionDeps): Session {
     registry: deps.registry,
     workspaceRoot: deps.workspaceRoot,
     tddEnabled: () => deps.settings().tddEnabled,
+    runnerTransport: () => deps.settings().runnerTransport ?? 'terminal',
   });
   const usage = new PlannerUsageLedger();
   const events = new SessionEventRelay({ broadcast: deps.broadcast, onNotice: deps.onNotice, store, orchestrator, usage });
@@ -523,6 +526,7 @@ export class Session {
     this.events.flushSubagentRuns(this.plan);
     this.syncPlanTasks();
     this.plan.isolation = this.orchestrator.isolationRecord ?? undefined;
+    this.plan.runnerTransport = this.orchestrator.runnerTransport ?? undefined;
     this.plan.plannerUsage = this.usage.snapshot();
     this.plan.lastUpdated = new Date().toISOString();
     this.save(this.plan, this.goal, this.workspace, this.currentSessionId);
@@ -555,6 +559,7 @@ export class Session {
     this.store.clearLog();
     this.orchestrator.loadPlan([]);
     void this.orchestrator.adoptIsolation(null);
+    this.orchestrator.adoptRunnerTransport(null);
   }
 
   /**
@@ -1440,7 +1445,10 @@ export class Session {
     migratePlanStateIsolation(plan);
     // The run record is taken synchronously; only the orphan prune is awaited
     // in the background, and git serializes it ahead of any worktree a run adds.
-    if (adopting) void this.orchestrator.adoptIsolation(plan.isolation ?? null);
+    if (adopting) {
+      void this.orchestrator.adoptIsolation(plan.isolation ?? null);
+      this.orchestrator.adoptRunnerTransport(plan.runnerTransport ?? null);
+    }
     if (opts?.persist !== false) this.persist();
     // A reopened session shows its token line again without waiting for the
     // next turn: announce the totals the moment the plan is adopted.

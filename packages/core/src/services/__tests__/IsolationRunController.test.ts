@@ -7,6 +7,7 @@ import { fakeNotification } from './sessionTestKit';
 
 function setup(isolation = new FakeWorktreeIsolation()) {
   const listener: IsolationRunListener = {
+    opened: vi.fn(),
     changed: vi.fn(),
     blocked: vi.fn(),
     handoff: vi.fn(),

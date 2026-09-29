@@ -27,21 +27,28 @@ describe('classifyRunnerStop', () => {
 });
 
 describe('attempt-end disposition', () => {
-  it('keeps the terminal readable only on a verdict', () => {
-    const reasons: AttemptEnd[] = ['verdict', 'cancel', 'release', 'complete', 'retry', 'spawn-failed', 'stop', 'load'];
-    expect(reasons.filter(keepsTerminalReadable)).toEqual(['verdict']);
+  const reasons: AttemptEnd[] = ['verdict', 'cancel', 'release', 'complete', 'retry', 'spawn-failed', 'stop', 'load'];
+
+  it('keeps a terminal readable only on a verdict', () => {
+    expect(reasons.filter((r) => keepsTerminalReadable(r, 'terminal'))).toEqual(['verdict']);
   });
 
-  it('stops the runner for the reasons that end only that attempt', () => {
-    const reasons: AttemptEnd[] = ['verdict', 'cancel', 'release', 'complete', 'retry', 'spawn-failed', 'stop', 'load'];
-    expect(reasons.filter(stopsRunner)).toEqual(['cancel', 'release', 'complete', 'retry', 'spawn-failed']);
+  it('stops a terminal runner for the reasons that end only that attempt', () => {
+    expect(reasons.filter((r) => stopsRunner(r, 'terminal'))).toEqual(['cancel', 'release', 'complete', 'retry', 'spawn-failed']);
+  });
+
+  it('never keeps a structured runner, and stops it on its verdict too', () => {
+    expect(reasons.filter((r) => keepsTerminalReadable(r, 'structured'))).toEqual([]);
+    expect(reasons.filter((r) => stopsRunner(r, 'structured'))).toEqual(['verdict', 'cancel', 'release', 'complete', 'retry', 'spawn-failed']);
   });
 
   it('leaves stop and load to the whole-run reset', () => {
-    expect(keepsTerminalReadable('stop')).toBe(false);
-    expect(stopsRunner('stop')).toBe(false);
-    expect(keepsTerminalReadable('load')).toBe(false);
-    expect(stopsRunner('load')).toBe(false);
+    for (const transport of ['terminal', 'structured'] as const) {
+      expect(keepsTerminalReadable('stop', transport)).toBe(false);
+      expect(stopsRunner('stop', transport)).toBe(false);
+      expect(keepsTerminalReadable('load', transport)).toBe(false);
+      expect(stopsRunner('load', transport)).toBe(false);
+    }
   });
 });
 

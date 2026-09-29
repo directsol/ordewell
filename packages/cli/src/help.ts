@@ -47,6 +47,7 @@ Planner, models and runners:
   ordewell runners [<id> on|off]  Enable or disable runners (claude-code, opencode, codex)
   ordewell allowlist set|clear|show       Limit which models a runner may use
   ordewell auto [on|off]          Autonomous permission mode for new sessions
+  ordewell transport [terminal|structured]   Experimental: run Claude Code tasks over its protocol, from the next run
   ordewell parallel [<n>]         How many AI tasks run at once (default 3; applies to a live run)
   ordewell refresh                Re-discover runners and model catalogs
   ordewell models                 List every provider's catalog (works without a server)

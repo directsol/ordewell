@@ -1,5 +1,5 @@
 import {
-  ALL_PROVIDERS, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, PROVIDER_PRIORITY, parseMaxParallel, runnerForProvider, type AiProvider,
+  ALL_PROVIDERS, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, PROVIDER_PRIORITY, isRunnerTransport, parseMaxParallel, runnerForProvider, type AiProvider,
 } from '@ordewell/core';
 import { handoffCommand } from '../handoff';
 import { findCommand, type ParsedCommand } from '../slash';
@@ -7,7 +7,7 @@ import { findTask, plannerInFlight, SKILL_IDS, type PickerItem, type SkillId, ty
 import { modelsForRunner } from '../taskAssignment';
 import { say } from '../transcript';
 import { DEFAULT_EFFORT, picker, pickerItemsFor, plannerEffortItems, plannerItems, providerErrorHint } from './pickers';
-import { taskActionEffect } from './planPane';
+import { openTerminal, taskActionEffect } from './planPane';
 import {
   addTask, openTaskDepsPicker, taskCommand, taskEffortCommand, taskModeCommand, taskModelCommand, taskRunnerCommand,
 } from './taskEdits';
@@ -64,6 +64,8 @@ export function runCommand(state: TuiState, { name, args }: ParsedCommand): Step
       return runners(state, args);
     case 'auto':
       return setAutonomous(state, args[0]);
+    case 'transport':
+      return setTransport(state, args[0]);
     case 'parallel':
       return setMaxParallel(state, args[0]);
     case 'mouse':
@@ -104,9 +106,7 @@ export function runCommand(state: TuiState, { name, args }: ParsedCommand): Step
         step(state, [{ type: 'removeTask', sessionId, taskId }]),
       );
     case 'terminal':
-      return taskCommand(state, args[0], (sessionId, taskId) =>
-        step(state, [{ type: 'openTaskTerminal', sessionId, taskId }]),
-      );
+      return taskCommand(state, args[0], (sessionId, taskId) => openTerminal(state, sessionId, taskId));
     case 'task-runner':
       return taskRunnerCommand(state, args);
     case 'task-model':
@@ -401,6 +401,13 @@ function setAutonomous(state: TuiState, arg: string | undefined): Step {
   // Updated here, not from the effect: nothing round-trips this setting back
   // (it lives in .env), and a stale flag would freeze the toggle and the badge.
   return step({ ...state, autonomous: enabled }, [{ type: 'setAutonomous', enabled }]);
+}
+
+/** Like the toggles, a bare `/transport` flips it; the daemon says what it became. */
+function setTransport(state: TuiState, arg: string | undefined): Step {
+  const value = arg?.toLowerCase() ?? (state.runnerTransport === 'structured' ? 'terminal' : 'structured');
+  if (!isRunnerTransport(value)) return fail(state, 'Usage: /transport [terminal|structured]');
+  return step(state, [{ type: 'setTransport', transport: value }]);
 }
 
 /**

@@ -198,6 +198,24 @@ describe('chat plan flow', () => {
     );
   });
 
+  it('renders the experimental structured transport pill and sets it via postMessage', () => {
+    api.postMessage.mockClear();
+
+    send({ type: 'runnerTransport', transport: 'terminal' });
+    const pill = () => Array.from(document.querySelectorAll('.skill-toggle-pill')).find(
+      (b) => b.textContent?.includes('Structured'),
+    ) as HTMLButtonElement;
+    expect(pill().textContent).toContain('experimental');
+    expect(pill().classList.contains('off')).toBeTruthy();
+
+    act(() => { fireEvent.click(pill()); });
+    expect(api.postMessage).toHaveBeenCalledWith({ type: 'setRunnerTransport', transport: 'structured' });
+    expect(pill().classList.contains('on')).toBeTruthy();
+
+    send({ type: 'runnerTransport', transport: 'terminal' });
+    expect(pill().classList.contains('off')).toBeTruthy();
+  });
+
   it('renders a reply sent outside a turn (a PRD) as a planner chat message', () => {
     host.session(reply('## PRD\n\nAs a user, I want to log in', undefined));
     const contentEl = document.querySelector('.chat-msg-planner .chat-msg-content');

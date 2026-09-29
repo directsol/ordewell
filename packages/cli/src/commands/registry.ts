@@ -9,6 +9,7 @@ import { handlePlugins } from './plugins';
 import { handleTdd } from './tdd';
 import { handleAllowlist } from './allowlist';
 import { handleVerify } from './verify';
+import { handleTransport } from './transport';
 import { handleMarkComplete, handleSkip, handleUncomplete } from './mark-complete';
 import { handleRunTask, handleForceStart, handleRetry, handleCancel } from './task-control';
 import { handleAddTask } from './add-task';
@@ -53,6 +54,7 @@ export const COMMANDS: Record<string, (args: string[]) => Promise<void> | void> 
   key: handleKey,
   runners: handleRunners,
   auto: handleAuto,
+  transport: handleTransport,
   refresh: handleRefresh,
   setup: handleSetup,
   plugins: handlePlugins,

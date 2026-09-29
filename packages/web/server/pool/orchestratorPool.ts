@@ -35,6 +35,10 @@ import {
   PROVIDER_CREDENTIAL_ENV,
   type AiProvider,
   type PlannerModelCandidate,
+  isRunnerTransport,
+  HeadlessRunner,
+  StructuredRunner,
+  TransportRouter,
 } from '@ordewell/core';
 import { WebConfig } from '../adapters/WebConfig';
 import { scanWorkspaces as scanWorkspacesImpl } from '../utils/workspaceScanner';
@@ -58,6 +62,11 @@ export interface OrchestratorPoolDeps {
    */
   runner?: ITerminalRunner;
   /**
+   * Where a task on the structured transport runs (ADR-0018). Shared like
+   * `runner`, and defaulted to a real one; tests inject a fake.
+   */
+  structuredRunner?: ITerminalRunner;
+  /**
    * Overrides the pool's own `ModelResolver`. Left undefined, behavior is
    * unchanged; tests inject one built with fake exec/fetch impls so a
    * planner-switch catalog lookup can be seeded without spawning real CLIs.
@@ -79,9 +88,11 @@ export class OrchestratorPool {
   private settingsService = new SettingsService();
   private plannerModelMemory = new PlannerModelMemory(this.settingsService);
   private sharedRunner?: ITerminalRunner;
+  private structuredRunner: ITerminalRunner;
 
   constructor(deps: OrchestratorPoolDeps = {}) {
     this.sharedRunner = deps.runner;
+    this.structuredRunner = deps.structuredRunner ?? new StructuredRunner();
     this.modelResolver = deps.modelResolver ?? new ModelResolver(this.registry, new WebConfig());
   }
 
@@ -158,7 +169,10 @@ export class OrchestratorPool {
     });
     const fsAdapter = new PoolFileSystem(workspace);
     const broadcast = (msg: SessionMessage) => this.broadcast(sessionId, msg);
-    const runner = new PoolAwareRunner(sessionId, broadcast, this.sharedRunner);
+    // The router sits under the per-plan wrapper, so a plan's /stop still
+    // reaches only its own tasks, on either transport.
+    const router = new TransportRouter({ terminal: this.sharedRunner ?? new HeadlessRunner(), structured: this.structuredRunner });
+    const runner = new PoolAwareRunner(sessionId, broadcast, router);
     return createSession({
       config,
       notifications: { info() {}, warn() {}, error() {}, async confirm() { return undefined; } },
@@ -218,6 +232,8 @@ export class OrchestratorPool {
       // The model remembered per planner backend (this task), so a surface can
       // render what's remembered without a second round-trip.
       plannerModels: userSettings.plannerModels,
+      // Experimental (ADR-0018); a run copies it when it starts.
+      runnerTransport: userSettings.runnerTransport,
     };
   }
 
@@ -280,6 +296,9 @@ export class OrchestratorPool {
     }
     if (changes.verification && typeof (changes.verification as Record<string, unknown>).enabled === 'boolean') {
       this.settingsService.setVerification((changes.verification as Record<string, unknown>).enabled as boolean);
+    }
+    if (isRunnerTransport(changes.runnerTransport)) {
+      this.settingsService.setRunnerTransport(changes.runnerTransport);
     }
     if (envChanges) {
       let touched = false;

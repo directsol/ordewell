@@ -2,13 +2,12 @@ import * as vscode from 'vscode';
 import {
   Session, LegacyPlanState, Task, flattenTasks, RunnerId, DiscoveredModel, enabledRunners,
   saveState, clearState, ModelResolver, RunnerRegistry, isCliProvider, taskStartedNotice,
-  createEmptyPlan, type INotification,
+  createEmptyPlan, type INotification, type ITerminalRunner,
 } from '@ordewell/core';
 import type { TaskDraft, TaskEdit } from '../shared/protocol';
 import type { ChatViewProvider } from '../providers/ChatViewProvider';
 import { VsCodeConfig } from '../adapters/VsCodeConfig';
 import { VsCodeFileSystem } from '../adapters/VsCodeFileSystem';
-import { VsCodeTerminalRunner } from '../adapters/VsCodeTerminalRunner';
 import { handleIsolationBlocked, handleIsolationHandoff } from './isolation';
 import { removalPrompt, taskFromDraft } from './taskEdit';
 
@@ -19,7 +18,7 @@ export interface PlanManagerDeps {
   pluginRegistry: RunnerRegistry;
   config: VsCodeConfig;
   fsAdapter: VsCodeFileSystem;
-  terminalRunner: VsCodeTerminalRunner;
+  terminalRunner: ITerminalRunner;
   notifications: INotification;
   settingsService: { getTdd(): boolean; };
   getCurrentPlan: () => LegacyPlanState;

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { AiProvider, LegacyPlanState, DiscoveredModel, RunnerId, TaskIsolation, IsolationHandoff, IsolationMergeResult } from '@ordewell/core';
+import type { AiProvider, LegacyPlanState, DiscoveredModel, RunnerId, TaskIsolation, IsolationHandoff, IsolationMergeResult, RunnerTransport } from '@ordewell/core';
 import { ConversationViewHost, type SavedConversation } from '../ConversationViewHost';
 import type { ChatState, HostToWebview, ModelOption, PendingPlanEdit, PlannerBackend, RunnerMeta, RunnerModeMeta, WebviewToHost } from '../shared/protocol';
 
@@ -59,6 +59,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   setRunners(runners: RunnerMeta[]): void { this.postMessage({ type: 'setRunners', runners }); }
   setSkillToggles(tdd: boolean, verify: boolean, unavailable: string[] = []): void {
     this.postMessage({ type: 'setSkillToggles', toggles: { tdd, verify }, unavailable });
+  }
+  setRunnerTransport(transport: RunnerTransport): void {
+    this.postMessage({ type: 'runnerTransport', transport });
   }
   setSkills(skills: { name: string; description: string }[]): void {
     this.postMessage({ type: 'setSkills', skills });

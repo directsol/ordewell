@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 import {
   createTask, RunnerRegistry,
   type AiProvider, type DiscoveredModel, type LegacyPlanState,
-  type ModelResolver, type PlannerModelMemory, type RunnerInstallation,
+  type ModelResolver, type PlannerModelMemory, type RunnerInstallation, type RunnerTransport,
   type Session, type SettingsService,
 } from '@ordewell/core';
 import { createExtension, type ExtensionServices } from '../ExtensionHost';
@@ -51,6 +51,7 @@ function fakeChat() {
     planGenerated: vi.fn(),
     planApproved: vi.fn(),
     setSkillToggles: vi.fn(),
+    setRunnerTransport: vi.fn(),
     setSkills: vi.fn(),
     setModels: vi.fn(),
     setModelsByRunner: vi.fn(),
@@ -191,11 +192,14 @@ function fakeRunnerInstallation(installed: string[]) {
 function fakeSettings() {
   let tdd = false;
   let verification = false;
+  let runnerTransport: RunnerTransport = 'terminal';
   return {
     getTdd: vi.fn(() => tdd),
     setTdd: vi.fn((v: boolean) => { tdd = v; }),
     getVerification: vi.fn(() => verification),
     setVerification: vi.fn((v: boolean) => { verification = v; }),
+    getRunnerTransport: vi.fn(() => runnerTransport),
+    setRunnerTransport: vi.fn((v: RunnerTransport) => { runnerTransport = v; }),
     getAll: vi.fn(() => ({})),
   };
 }
@@ -282,6 +286,7 @@ describe('the extension host wires one state, one deps bag and one lifecycle', (
       tasks: [expect.objectContaining({ id: 't1' })],
     }));
     expect(h.chat.provider.setGoal).toHaveBeenCalledWith('build a parser');
+    expect(h.chat.provider.setRunnerTransport).toHaveBeenCalledWith('terminal');
     await vi.waitFor(() => expect(h.chat.provider.setModels).toHaveBeenCalledWith(models));
     await vi.waitFor(() => expect(h.chat.provider.setPlannerBackends).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ id: 'claude-code', usable: true })]),

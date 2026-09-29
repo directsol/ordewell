@@ -3,7 +3,7 @@ import { createApp, attachWsHandler } from './app';
 import { createRequestListener } from './nodeAdapter';
 import { OrchestratorPool } from './pool/orchestratorPool';
 import { createServer } from 'http';
-import { clearDaemonToken, hasTmux, mintDaemonToken, TmuxRunner } from '@ordewell/core';
+import { clearDaemonToken, hasTmux, mintDaemonToken, StructuredRunner, TmuxRunner } from '@ordewell/core';
 
 const args = process.argv.slice(2);
 let port = 3742;
@@ -40,7 +40,9 @@ if (tmuxRunner) {
 const { token, file: tokenFile } = mintDaemonToken(port);
 const admission = { port, token, tokenFile };
 
-const pool = new OrchestratorPool({ runner: tmuxRunner });
+// Tasks of a plan run on the structured transport (ADR-0018) are plain child
+// processes: no tmux, so one runner serves every plan whatever the host has.
+const pool = new OrchestratorPool({ runner: tmuxRunner, structuredRunner: new StructuredRunner() });
 const app = createApp(pool, admission);
 
 // Warm the model caches at startup (same as the VS Code extension's activation

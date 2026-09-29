@@ -563,9 +563,12 @@ function taskLines(state: TuiState, row: PlanRow, index: number, cols: number): 
   const bodyPad = parent ? '      ' : '    ';
   // "working" over an agent that has printed nothing for a minute hid the one
   // case that needs the user: an agent stopped at a question in its terminal.
-  const activity = idle ? 'quiet — t opens its terminal' : running ? 'working' : '';
-  const meta = [activity, runner, model].filter(Boolean).join(' · ');
+  const structured = task.transport?.kind === 'structured';
+  const activity = idle ? (structured ? 'quiet' : 'quiet — t opens its terminal') : running ? 'working' : '';
+  const meta = [activity, runner, structured ? 'structured' : '', model].filter(Boolean).join(' · ');
   if (meta) lines.push(style.grey(truncate(`${bodyPad}${meta}`, cols)));
+  // Asked for structured and did not get it: said on the row, never silently.
+  if (task.transport?.fallback) lines.push(style.yellow(truncate(`${bodyPad}terminal: ${task.transport.fallback}`, cols)));
   if (effort || mode) lines.push(style.grey(truncate(`${bodyPad}${[effort, mode].filter(Boolean).join(' · ')}`, cols)));
   // The one isolation state that needs the user; every other stays out of the
   // row and shows only in the expanded detail below.

@@ -189,7 +189,9 @@ function renderSkills(state: TuiState, cols: number): string {
     state.skills[id] ? style.green(`● ${id}`) : style.grey(`○ ${id}`),
   );
   const auto = state.autonomous ? style.yellow('● auto') : style.grey('○ auto');
-  return truncate([...badges, auto].join(' '), cols);
+  // Experimental and off by default, so only a plan that opted in shows it.
+  const structured = state.runnerTransport === 'structured' ? [style.yellow('● structured')] : [];
+  return truncate([...badges, auto, ...structured].join(' '), cols);
 }
 
 /**

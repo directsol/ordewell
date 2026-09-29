@@ -7,13 +7,13 @@ import {
   listSessions, loadSession,
   SettingsService,
   type AiProvider,
+  type ITerminalRunner,
 } from '@ordewell/core';
 import type { ChatViewProvider } from '../providers/ChatViewProvider';
 import { replayIsolation } from '../plan/isolation';
 import { forkConversation, rewindConversation, compactConversation } from '../plan/conversation';
 import { VsCodeConfig } from '../adapters/VsCodeConfig';
 import { VsCodeFileSystem } from '../adapters/VsCodeFileSystem';
-import { VsCodeTerminalRunner } from '../adapters/VsCodeTerminalRunner';
 import { SecretStore, type ApiProvider } from '../adapters/SecretStore';
 import { configureModelAllowlist } from './configureModelAllowlist';
 import { handleNewSession, plannerPreflightError } from '../plan/PlanManager';
@@ -25,7 +25,7 @@ export interface CommandDeps {
   modelResolver: ModelResolver;
   config: VsCodeConfig;
   fsAdapter: VsCodeFileSystem;
-  terminalRunner: VsCodeTerminalRunner;
+  terminalRunner: ITerminalRunner;
   settingsService: SettingsService;
   secretStore: SecretStore;
   getCurrentPlan: () => LegacyPlanState;

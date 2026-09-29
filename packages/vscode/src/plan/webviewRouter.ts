@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { RunnerId } from '@ordewell/core';
+import type { RunnerId, RunnerTransport } from '@ordewell/core';
 import type { WebviewToHost } from '../shared/protocol';
 import { isKnownSlashCommand } from '../commands/SlashParser';
 import { handleIsolationAction } from './isolation';
@@ -16,6 +16,7 @@ export interface ExtensionHandlers {
   setPlanner(provider: string): Promise<void>;
   setPlannerModel(modelId: string, effort?: string): Promise<void>;
   toggleSkill(skillId: string, enabled: boolean): void;
+  setRunnerTransport(transport: RunnerTransport): void;
 }
 
 export interface WebviewRouterDeps extends PlanManagerDeps {
@@ -99,6 +100,9 @@ export async function routeWebviewMessage(msg: WebviewToHost, deps: WebviewRoute
       return;
     case 'toggleSkill':
       deps.extension.toggleSkill(msg.skillId, msg.enabled);
+      return;
+    case 'setRunnerTransport':
+      deps.extension.setRunnerTransport(msg.transport);
       return;
     case 'setPlanner':
       await deps.extension.setPlanner(msg.provider);

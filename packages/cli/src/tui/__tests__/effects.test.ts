@@ -847,6 +847,16 @@ describe('skills and settings', () => {
     expect(h.actions).toContainEqual({ type: 'settingsLoaded', settings: { tdd: { enabled: true } } });
   });
 
+  it('sets the runner transport through the daemon and says when it applies', async () => {
+    const h = harness();
+    h.api.sendCommand.mockResolvedValueOnce({ ok: true, settings: { runnerTransport: 'structured' } });
+    await runEffect({ type: 'setTransport', transport: 'structured' }, h.deps);
+
+    expect(h.api.sendCommand).toHaveBeenCalledWith('transport', { action: 'structured' });
+    expect(h.actions).toContainEqual({ type: 'settingsLoaded', settings: { runnerTransport: 'structured' } });
+    expect(h.actions).toContainEqual({ type: 'notice', message: 'Runner transport is structured (experimental) — it applies from the next run.' });
+  });
+
   it('persists the orchestrator model to .env as well as the running daemon', async () => {
     const h = harness();
     await runEffect({ type: 'setModel', modelId: 'a/b' }, h.deps);
