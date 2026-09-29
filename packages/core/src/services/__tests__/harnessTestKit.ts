@@ -18,6 +18,8 @@ import type { AgentAdapterFactory, AgentEvent } from '../harness/AgentAdapter';
 export interface FakeAgentProcess extends ChildProcess {
   /** Everything the adapter wrote to stdin, one entry per write. */
   readonly written: string[];
+  /** Whether the adapter closed stdin — what makes a real CLI waiting for input exit. */
+  readonly stdinEnded: boolean;
   /** Push a chunk onto the fake stdout, as the real CLI would. */
   emitStdout(chunk: string): void;
   emitStderr(chunk: string): void;
@@ -60,12 +62,14 @@ function makeProcess(): FakeAgentProcess {
   const stderr = new EventEmitter();
   const written: string[] = [];
   let killed = false;
+  let stdinEnded = false;
 
   Object.defineProperties(proc, {
     stdout: { value: stdout, writable: false },
     stderr: { value: stderr, writable: false },
     written: { get: () => written },
     killed: { get: () => killed },
+    stdinEnded: { get: () => stdinEnded },
     stdin: {
       value: {
         write(chunk: string) {
@@ -76,7 +80,7 @@ function makeProcess(): FakeAgentProcess {
           queueMicrotask(() => proc.emit('__written', chunk));
           return true;
         },
-        end() { /* no-op */ },
+        end() { stdinEnded = true; },
       },
       writable: false,
     },

@@ -89,6 +89,54 @@ describe('task control commands', () => {
     srv.close();
   });
 
+  it('continue posts the message to the resolved task\'s continue route (ADR-0018, K1)', async () => {
+    let body = '';
+    const hits: string[] = [];
+    const srv = await startServer((req, res) => {
+      req.on('data', (c) => { body += c.toString(); });
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (req.url?.includes('/sessions/')) return res.end(JSON.stringify(PLAN));
+        hits.push(`${req.method} ${req.url}`);
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    const { handleContinue } = await import('../task-control');
+    const { stdout } = await capture(() =>
+      handleContinue(['--session-id', 'session-1', '3', 'also', 'handle', 'arrays'], new ApiClient(srv.port)),
+    );
+    expect(hits).toEqual(['POST /api/plans/session-1/tasks/task-abc-123/continue']);
+    expect(JSON.parse(body)).toEqual({ text: 'also handle arrays' });
+    expect(stdout).toContain('Task continued.');
+    srv.close();
+  });
+
+  it('continue without a message prints its usage', async () => {
+    const { handleContinue } = await import('../task-control');
+    const { stderr, exitCode } = await capture(() => handleContinue(['--session-id', 'session-1', '3']));
+    expect(stderr).toContain('Usage: ordewell continue');
+    expect(exitCode).toBe(1);
+  });
+
+  it('continue reports the daemon\'s refusal', async () => {
+    const srv = await startServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.setHeader('Content-Type', 'application/json');
+        if (req.url?.includes('/sessions/')) return res.end(JSON.stringify(PLAN));
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'Task "Third" cannot be continued: it ran in a terminal, so there is no saved session to resume. Use Retry instead.' }));
+      });
+    });
+    const { handleContinue } = await import('../task-control');
+    const { stderr, exitCode } = await capture(() =>
+      handleContinue(['--session-id', 'session-1', '3', 'go on'], new ApiClient(srv.port)),
+    );
+    expect(stderr).toContain('Failed to continue task: Task "Third" cannot be continued');
+    expect(exitCode).toBe(1);
+    srv.close();
+  });
+
   it('remove-task deletes the resolved task', async () => {
     const hits: string[] = [];
     const srv = await serverRecordingHits(hits);

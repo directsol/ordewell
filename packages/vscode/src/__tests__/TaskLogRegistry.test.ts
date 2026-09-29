@@ -25,6 +25,7 @@ function harness(attempts: Record<number, TaskLogEvent[]> = { 1: attemptOne }) {
     sendTaskMessage: vi.fn(() => 'm1'),
     removeQueuedTaskMessage: vi.fn(() => true),
     interruptTask: vi.fn(async () => {}),
+    continueTask: vi.fn(async () => {}),
     pending: [] as PendingApproval[],
     outstandingApprovals: vi.fn((): PendingApproval[] => session.pending),
     resolveApproval: vi.fn(() => true),
@@ -73,7 +74,7 @@ describe('the task-log registry (ADR-0018, V1)', () => {
       extensionUri: vscode.Uri.file('/ext'),
       session: () => ({
         taskLogAttempts: () => [], taskLog: () => [], sendTaskMessage: () => 'm', removeQueuedTaskMessage: () => false, interruptTask: async () => {},
-        outstandingApprovals: () => [], resolveApproval: () => false,
+        continueTask: async () => {}, outstandingApprovals: () => [], resolveApproval: () => false,
       }),
       getTask: () => undefined,
       log: vi.fn(),
@@ -171,6 +172,47 @@ describe('the task-log registry (ADR-0018, V1)', () => {
 
     const status = posted(__panels[0]).find((m) => m.type === 'status');
     expect(status).toMatchObject({ type: 'status', status: { planStatus: 'awaiting_user', awaitingReason: 'input' } });
+  });
+
+  it('offers Continue only for a finished structured task with a saved session (ADR-0018, K1)', () => {
+    const h = harness();
+    h.registry.open('t1');
+    __panels[0].__receive({ type: 'ready' });
+    expect(posted(__panels[0])[0]).toMatchObject({ type: 'init', status: { continuable: false } });
+    __panels[0].webview.postMessage.mockClear();
+
+    h.task.status = 'completed';
+    h.task.transport = { kind: 'structured', nativeSessionId: 'sess-1' };
+    h.registry.receive({ type: 'status_update', tasks: [] });
+
+    expect(posted(__panels[0]).find((m) => m.type === 'status')).toMatchObject({ status: { continuable: true } });
+  });
+
+  it('continues the task through the Session and follows the new attempt, even from an earlier one', async () => {
+    const h = harness({ 1: attemptOne, 2: attemptTwo });
+    h.task.status = 'completed';
+    h.task.transport = { kind: 'structured', nativeSessionId: 'sess-1' };
+    h.registry.open('t1');
+    __panels[0].__receive({ type: 'ready' });
+    __panels[0].__receive({ type: 'selectAttempt', attempt: 1 });
+
+    __panels[0].__receive({ type: 'continueTask', text: 'also handle arrays' });
+    await vi.waitFor(() => expect(h.session.continueTask).toHaveBeenCalledWith('t1', 'also handle arrays'));
+
+    __panels[0].webview.postMessage.mockClear();
+    h.registry.receive({ type: 'task_log', taskId: 't1', attempt: 3, events: [{ type: 'turn_start', message: 'also handle arrays' }] });
+    expect(posted(__panels[0]).at(-1)).toMatchObject({ type: 'init', status: { attempt: 3, attempts: [1, 2, 3] } });
+  });
+
+  it('shows the Session’s refusal of a continue', async () => {
+    const h = harness();
+    h.session.continueTask.mockImplementation(async () => { throw new Error('Task "Parse JSON" cannot be continued: it ran in a terminal.'); });
+    h.registry.open('t1');
+    __panels[0].__receive({ type: 'ready' });
+
+    __panels[0].__receive({ type: 'continueTask', text: 'more' });
+
+    await vi.waitFor(() => expect(posted(__panels[0])).toContainEqual({ type: 'showError', error: 'Task "Parse JSON" cannot be continued: it ran in a terminal.' }));
   });
 
   it('says the task waits for approval while its runner has a request open, and counts only its own', () => {

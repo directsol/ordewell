@@ -111,6 +111,57 @@ describe('task mode support', () => {
 });
 
 describe('ClaudeCodeAdapter in task mode', () => {
+  it('reports a resume the CLI cannot find as a failed turn in its own words, and lets the process go (ADR-0018, K1)', async () => {
+    const { spawned, processDeps } = deps([]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart({ resumeSessionId: '0d6c1a52-3b7e-4f7e-9d1a-5b0c2e4f8a11' }));
+    const proc = spawned.processes[0];
+    const events: AgentEvent[] = [];
+    const turn = adapter.send('also handle arrays', (e) => events.push(e));
+    // Recorded from `claude` 2.1.284: the refusal arrives on its own, before any `init`.
+    proc.emitStdout(fixture('claude-code', 'task-resume-not-found'));
+    await turn;
+
+    expect(events).toEqual([{ type: 'error', message: 'No conversation found with session ID: 0d6c1a52-3b7e-4f7e-9d1a-5b0c2e4f8a11' }]);
+    // The CLI waits on stdin after refusing; closing it is what lets it exit.
+    expect(proc.stdinEnded).toBe(true);
+    // No session was taken up, so none is announced for a later continue.
+    expect(adapter.nativeSessionId()).toBeNull();
+    adapter.dispose();
+  });
+
+  it('refused before any turn opens, the next turn reports the CLI\'s last words instead of hanging', async () => {
+    const { spawned, processDeps } = deps([]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart({ resumeSessionId: '0d6c1a52-3b7e-4f7e-9d1a-5b0c2e4f8a11' }));
+    const proc = spawned.processes[0];
+    proc.emitStderr('No conversation found with session ID: 0d6c1a52-3b7e-4f7e-9d1a-5b0c2e4f8a11\n');
+    proc.emitStdout(fixture('claude-code', 'task-resume-not-found'));
+    expect(proc.stdinEnded).toBe(true);
+    proc.exit(1);
+
+    const events: AgentEvent[] = [];
+    await adapter.send('also handle arrays', (e) => events.push(e));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'error', message: expect.stringContaining('No conversation found with session ID') });
+    expect(adapter.nativeSessionId()).toBeNull();
+    adapter.dispose();
+  });
+
+  it('takes a resumed session up once the CLI announces it', async () => {
+    const { spawned, processDeps } = deps([fixture('claude-code', 'task-marker')]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart({ resumeSessionId: 'sess-task-marker' }));
+    const events: AgentEvent[] = [];
+    await adapter.send('go on', (e) => events.push(e));
+
+    expect(events.at(-1)).toEqual({ type: 'turn_end' });
+    expect(spawned.processes[0].stdinEnded).toBe(false);
+    expect(adapter.nativeSessionId()).toBe('sess-task-marker');
+    adapter.dispose();
+  });
+
   it('leaves a tool request open for someone to answer, and passes the whole request on', async () => {
     const { spawned, processDeps } = deps([fixture('claude-code', 'permission-task')]);
     const adapter = new ClaudeCodeAdapter(processDeps);

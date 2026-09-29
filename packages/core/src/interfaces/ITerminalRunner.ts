@@ -133,6 +133,12 @@ export interface ITerminalRunner {
      * task whether the runner can honour it; any other runner ignores it.
      */
     transport?: RunnerTransport;
+    /**
+     * The runner's own session to continue in (ADR-0018, K1). Only the
+     * structured transport can honour it; a terminal session comes back fresh,
+     * which is why a continue refuses one.
+     */
+    resumeSessionId?: string;
   }): Promise<ITerminalSession>;
 
   stop(sessionId: string): void;

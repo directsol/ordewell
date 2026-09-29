@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createTask, resolveOrderLabel } from '../../models/Task';
-import { augmentPromptWithPriorOutputs, composeAugmentedPrompt, renderPlanMap, summarizeOutput } from '../promptAugment';
+import { augmentPromptWithPriorOutputs, composeAugmentedPrompt, composeContinuationPrompt, renderPlanMap, summarizeOutput } from '../promptAugment';
 
 describe('summarizeOutput', () => {
   it('clips output to last 500 chars', () => {
@@ -401,5 +401,38 @@ describe('composeAugmentedPrompt', () => {
     expect(hitlIdx).toBeGreaterThan(tddIdx);
     // Both before the base prompt
     expect(out.indexOf('do work')).toBeGreaterThan(hitlIdx);
+  });
+});
+
+describe('composeContinuationPrompt (ADR-0018, K1)', () => {
+  const task = createTask({ id: 't1', order: 1, title: 'Parse JSON', prompt: 'ORIGINAL PROMPT BODY', completionMarker: 'mk-1' });
+
+  it('leads with the user\'s message and ends with the task\'s own done marker, in two halves', () => {
+    const prompt = composeContinuationPrompt(task, '  also handle arrays \n');
+
+    expect(prompt.startsWith('also handle arrays\n')).toBe(true);
+    expect(prompt).toContain('continuing this task in the same session');
+    expect(prompt).toContain('recreated from the integration branch');
+    expect(prompt.endsWith('`<<<ORDEWELL_` immediately followed by `DONE_mk-1>>>` — joined into a single unbroken token, with no space, quote, or any other character between the two parts.')).toBe(true);
+    expect(prompt).not.toContain('<<<ORDEWELL_DONE_mk-1>>>');
+  });
+
+  it('does not resend the original prompt, the plan map or the prior outputs the session already holds', () => {
+    const dep = createTask({ id: 't0', order: 0, title: 'Setup', status: 'completed', outputSummary: { reviewReason: 'ok', logTail: 'SETUP OUTPUT', capturedAt: '' } });
+    const prompt = composeContinuationPrompt({ ...task, dependencies: ['t0'] }, 'go on');
+
+    expect(prompt).not.toContain('ORIGINAL PROMPT BODY');
+    expect(prompt).not.toContain('SETUP OUTPUT');
+    expect(prompt).not.toContain(dep.title);
+  });
+
+  it('reminds a HITL task of the checkpoint protocol, without a literal checkpoint marker', () => {
+    const plain = composeContinuationPrompt(task, 'go on');
+    const hitl = composeContinuationPrompt({ ...task, autonomy: 'HITL' }, 'go on');
+
+    expect(plain).not.toContain('CHECKPOINT');
+    expect(hitl).toContain('`<<<ORDEWELL_` immediately followed by `CHECKPOINT:`');
+    expect(hitl).toContain('ORDEWELL_CONTINUE or ORDEWELL_REJECT');
+    expect(hitl).not.toContain('<<<ORDEWELL_CHECKPOINT');
   });
 });

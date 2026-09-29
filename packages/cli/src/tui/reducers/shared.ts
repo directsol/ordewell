@@ -13,6 +13,7 @@ export interface TaskStatusUpdate {
   isolation?: TaskIsolationView;
   transport?: TaskTransportView;
   awaitingReason?: AwaitingReason;
+  continuable?: boolean;
   awaitingApproval?: number;
 }
 
@@ -76,6 +77,8 @@ export type Effect =
   /** Takes back one queued message before it is delivered. */
   | { type: 'removeTaskMessage'; sessionId: string; taskId: string; messageId: string }
   | { type: 'interruptTask'; sessionId: string; taskId: string }
+  /** Continue a finished structured task in its saved session, with `text` as its next turn (ADR-0018, K1). */
+  | { type: 'continueTask'; sessionId: string; taskId: string; text: string; watch?: boolean }
   | { type: 'respondApproval'; sessionId: string; approvalId: string; granted: boolean }
   /** A task runner's tool request, answered from its task view (ADR-0018, A1). */
   | { type: 'answerTaskApproval'; sessionId: string; approvalId: string; answer: ApprovalDecision }

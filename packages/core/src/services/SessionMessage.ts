@@ -5,6 +5,7 @@ import type { ApprovalKind } from '../interfaces/IApproval';
 import type { ApprovalSource } from './ApprovalPolicy';
 import type { IsolationHandoff, IsolationMergeResult, TaskIsolation } from '../interfaces/IWorktreeIsolation';
 import type { QueuedTaskMessage } from '../interfaces/ITerminalRunner';
+import { canContinue } from './continuation';
 
 export type SerializedTaskStatus = {
   id: string;
@@ -20,6 +21,8 @@ export type SerializedTaskStatus = {
   awaitingReason?: AwaitingReason;
   /** Messages waiting for a structured task's turn to end, oldest first; absent when there are none. */
   queued?: QueuedTaskMessage[];
+  /** Set when the task can be continued in its saved runner session (ADR-0018, K1); the id itself stays in the daemon. */
+  continuable?: true;
   /**
    * How many of a structured task's runner requests wait for an answer
    * (ADR-0018, A1) — "waiting for approval", which leaves `status` alone.
@@ -264,6 +267,7 @@ export function serializeTaskStatus(
     ...(t.transport ? { transport: t.transport.fallback ? { kind: t.transport.kind, fallback: t.transport.fallback } : { kind: t.transport.kind } } : {}),
     ...(t.status === 'awaiting_user' && t.awaitingReason ? { awaitingReason: t.awaitingReason } : {}),
     ...(queued.length > 0 ? { queued: queued.map((m) => ({ ...m })) } : {}),
+    ...(canContinue(t) ? { continuable: true as const } : {}),
     ...(awaitingApproval > 0 ? { awaitingApproval } : {}),
   };
 }

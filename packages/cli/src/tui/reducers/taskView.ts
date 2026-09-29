@@ -39,6 +39,20 @@ export function openTaskTerminalOrView(state: TuiState, sessionId: string, taskI
   return step(state, [{ type: 'openTaskTerminal', sessionId, taskId }]);
 }
 
+/**
+ * Continue a task with `text`, opening its view if another pane is showing.
+ * The view follows the new attempt; earlier ones stay reachable with alt←.
+ */
+export function continueTaskStep(state: TuiState, sessionId: string, taskId: string, text: string): Step {
+  const opened = state.taskView?.taskId === taskId
+    ? step({ ...state, taskView: { ...state.taskView, followLatest: true } })
+    : openTaskView(state, sessionId, taskId);
+  // Like a retry, it spawns a runner, so a TUI not already watching a run
+  // holds the execution stream open to see it (see `taskActionEffect`).
+  const watch = state.status !== 'executing';
+  return step(opened.state, [...opened.effects, { type: 'continueTask', sessionId, taskId, text, ...(watch ? { watch: true } : {}) }]);
+}
+
 function clampQueueIndex(tv: TaskLogState): TaskLogState {
   const max = Math.max(0, tv.view.queued.length - 1);
   return tv.queuedIndex <= max ? tv : { ...tv, queuedIndex: max };

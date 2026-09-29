@@ -14,7 +14,7 @@ function send(msg: HostToTaskLog): void {
 function status(overrides: Partial<TaskLogStatus> = {}): TaskLogStatus {
   return {
     taskId: 't1', order: 2, title: 'Parse JSON', runner: 'claude-code',
-    planStatus: 'in_progress', awaitingApproval: 0, working: false, queued: [], attempts: [1], attempt: 1,
+    planStatus: 'in_progress', awaitingApproval: 0, working: false, queued: [], attempts: [1], attempt: 1, continuable: false,
     ...overrides,
   };
 }
@@ -98,6 +98,18 @@ describe('the task log tab (ADR-0018, V1)', () => {
     send({ type: 'showError', error: 'Task is not running.' });
 
     expect(screen.getByText('Task is not running.')).toBeTruthy();
+  });
+
+  it('turns the message box into Continue for a finished task that can be continued (ADR-0018, K1)', () => {
+    render(<TaskLogApp />);
+    init({ planStatus: 'completed', continuable: true });
+
+    const input = screen.getByPlaceholderText(/Continue the task/);
+    act(() => { fireEvent.change(input, { target: { value: 'also handle arrays' } }); });
+    act(() => { fireEvent.click(screen.getByText('Continue')); });
+
+    expect(api.postMessage).toHaveBeenCalledWith({ type: 'continueTask', text: 'also handle arrays' });
+    expect(screen.queryByText('Send')).toBeNull();
   });
 
   describe('a runner\'s tool request (ADR-0018, A1)', () => {

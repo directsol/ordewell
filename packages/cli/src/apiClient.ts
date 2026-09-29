@@ -330,6 +330,15 @@ export class ApiClient {
     return res.data;
   }
 
+  /** Continue a finished structured task in its saved session, with `text` as its next turn. */
+  async continueTask(sessionId: string, taskId: string, text: string): Promise<{ ok: boolean }> {
+    const res = await this.httpRequest<{ ok: boolean } & ErrorResponse>('POST', `/api/plans/${sessionId}/tasks/${taskId}/continue`, { text });
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Continue failed');
+    }
+    return res.data;
+  }
+
   /** `removed` is false once the message was already delivered. */
   async removeQueuedTaskMessage(sessionId: string, taskId: string, messageId: string): Promise<{ removed: boolean }> {
     const res = await this.httpRequest<{ removed: boolean } & ErrorResponse>(

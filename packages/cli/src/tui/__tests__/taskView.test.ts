@@ -4,6 +4,7 @@ import { width } from '../ansi';
 import { initialState, reduce } from '../reducer';
 import { render } from '../render';
 import type { TaskLogState, TaskView, TuiState } from '../state';
+import { messagesOf } from './chat';
 
 function run(text: string, overrides: Partial<TuiState> = {}) {
   const base = initialState(overrides);
@@ -292,5 +293,60 @@ describe('the task view draws as a runner, not the planner', () => {
         expect(width(line)).toBeLessThanOrEqual(cols);
       }
     }
+  });
+});
+
+describe('continuing a finished task (ADR-0018, K1)', () => {
+  const finished = (over: Partial<TaskView> = {}) =>
+    opened({ focus: 'chat', tasks: [task({ status: 'completed', transport: { kind: 'structured' }, continuable: true, ...over })] });
+
+  it('labels the composer as a continue', () => {
+    expect(plain(finished())).toContain('→ Continue task 1');
+    expect(plain(opened())).not.toContain('Continue task');
+    expect(plain(finished({ continuable: false }))).not.toContain('Continue task');
+  });
+
+  it('submitting continues the task, following the new attempt, instead of messaging a turn', () => {
+    const pinned = { ...finished(), taskView: loaded({ attempts: [1, 2], attempt: 1, followLatest: false }) };
+    const { state, effects } = run('also handle arrays', pinned);
+
+    expect(effects).toEqual([{ type: 'continueTask', sessionId: 's1', taskId: 't1', text: 'also handle arrays', watch: true }]);
+    expect(state.taskView?.followLatest).toBe(true);
+    expect(state.editor.text).toBe('');
+  });
+
+  it('does not watch a second stream while a run is already executing', () => {
+    const { effects } = run('go on', { ...finished(), status: 'executing' });
+    expect(effects).toEqual([{ type: 'continueTask', sessionId: 's1', taskId: 't1', text: 'go on' }]);
+  });
+
+  it('a started continue is messaged, not continued twice, even before the flag clears', () => {
+    const { effects } = run('use Postgres', finished({ status: 'in_progress' }));
+    expect(effects).toEqual([{ type: 'sendTaskMessage', sessionId: 's1', taskId: 't1', text: 'use Postgres' }]);
+  });
+
+  it('/continue <id> <message> opens the task\'s view and continues it', () => {
+    const planner = initialState({ sessionId: 's1', focus: 'chat', tasks: [task({ status: 'failed', transport: { kind: 'structured' }, continuable: true })] });
+    const { state, effects } = run('/continue 1 the tests need Node 22', planner);
+
+    expect(state.taskView?.taskId).toBe('t1');
+    expect(effects).toEqual([
+      { type: 'openTaskLog', sessionId: 's1', taskId: 't1' },
+      { type: 'continueTask', sessionId: 's1', taskId: 't1', text: 'the tests need Node 22', watch: true },
+    ]);
+  });
+
+  it('/continue without a message says how to use it', () => {
+    const { state, effects } = run('/continue 1', finished());
+    expect(effects).toEqual([]);
+    expect(messagesOf(state).at(-1)?.text).toBe('Usage: /continue <id> <message>');
+  });
+
+  it('keeps the continuable flag in step with the daemon\'s status', () => {
+    const base = initialState({ sessionId: 's1', tasks: [task({ status: 'completed', transport: { kind: 'structured' } })] });
+    const on = reduce(base, { type: 'tasksStatus', sessionId: 's1', updates: { t1: { status: 'completed', transport: { kind: 'structured' }, continuable: true } } }).state;
+    expect(on.tasks[0].continuable).toBe(true);
+    const off = reduce(on, { type: 'tasksStatus', sessionId: 's1', updates: { t1: { status: 'in_progress', transport: { kind: 'structured' } } } }).state;
+    expect(off.tasks[0].continuable).toBe(false);
   });
 });

@@ -27,6 +27,7 @@ function harness(api: Partial<OrdewellApi> = {}, over: Partial<EffectDeps> = {})
       sendTaskMessage: vi.fn().mockResolvedValue({ id: 'm1' }),
       removeQueuedTaskMessage: vi.fn().mockResolvedValue({ removed: true }),
       interruptTask: vi.fn().mockResolvedValue({ ok: true }),
+      continueTask: vi.fn().mockResolvedValue({ ok: true }),
       addTask: vi.fn().mockResolvedValue({ ok: true }),
       updateTask: vi.fn().mockResolvedValue({ ok: true }),
       removeTask: vi.fn().mockResolvedValue({ ok: true }),
@@ -1756,6 +1757,31 @@ describe('a structured task\'s log, messages and interrupt', () => {
     await runEffect({ type: 'removeTaskMessage', sessionId: 's1', taskId: 't1', messageId: 'm1' }, h.deps);
 
     expect(messageOf(h.actions, 'notice')).toMatch(/already delivered/);
+  });
+
+  it('continues a finished task, holding the execution stream open when asked to watch (ADR-0018, K1)', async () => {
+    const order: string[] = [];
+    const continueTask = vi.fn().mockImplementation(async () => { order.push('continueTask'); return { ok: true }; });
+    const streamExecution = vi.fn().mockImplementation((_id: string, _cb: (e: unknown) => void, onReady?: (error?: Error) => void) => {
+      order.push('streamExecution');
+      onReady?.();
+      return Promise.resolve();
+    });
+    const h = harness({ continueTask, streamExecution } as Partial<OrdewellApi>);
+
+    await runEffect({ type: 'continueTask', sessionId: 's1', taskId: 't1', text: 'also handle arrays', watch: true }, h.deps);
+
+    expect(continueTask).toHaveBeenCalledWith('s1', 't1', 'also handle arrays');
+    expect(order).toEqual(['streamExecution', 'continueTask']);
+  });
+
+  it('continues without a second stream while a run is already watched', async () => {
+    const h = harness();
+
+    await runEffect({ type: 'continueTask', sessionId: 's1', taskId: 't1', text: 'go on' }, h.deps);
+
+    expect(h.deps.api.continueTask).toHaveBeenCalledWith('s1', 't1', 'go on');
+    expect(h.deps.api.streamExecution).not.toHaveBeenCalled();
   });
 
   it('interrupts the task and says so', async () => {

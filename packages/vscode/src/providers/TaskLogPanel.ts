@@ -1,12 +1,12 @@
 import * as vscode from 'vscode';
-import type { ApprovalAnswer, DisplayBlock, PendingApproval, SessionMessage, Task, TaskLogEvent } from '@ordewell/core';
+import { canContinue, type ApprovalAnswer, type DisplayBlock, type PendingApproval, type SessionMessage, type Task, type TaskLogEvent } from '@ordewell/core';
 import { EMPTY_TASK_LOG, reduceTaskLog, replayTaskLog, type TaskLogView } from '@ordewell/core/plan-utils';
 import { diffConversation } from '../shared/conversationPatch';
 import { renderWebviewHtml } from './webviewHtml';
 import type { HostToTaskLog, TaskLogStatus, TaskLogToHost } from '../shared/taskLogProtocol';
 
 /**
- * The Session calls a task-log panel makes (ADR-0018, M1, A1). Narrowed to
+ * The Session calls a task-log panel makes (ADR-0018, M1, A1, K1). Narrowed to
  * the ones the panel owns, so its test needs no Session — the concrete
  * Session satisfies this structurally.
  */
@@ -16,6 +16,7 @@ export interface TaskLogSession {
   sendTaskMessage(taskId: string, text: string): string;
   removeQueuedTaskMessage(taskId: string, id: string): boolean;
   interruptTask(taskId: string): Promise<void>;
+  continueTask(taskId: string, message: string): Promise<void>;
   outstandingApprovals(): PendingApproval[];
   resolveApproval(id: string, answer: ApprovalAnswer): boolean;
 }
@@ -118,6 +119,11 @@ export class TaskLogPanel {
       case 'interruptTask':
         this.controlAsync(() => this.deps.session.interruptTask(this.taskId));
         return;
+      case 'continueTask':
+        // The continue is a new attempt: show it, even from an earlier one.
+        this.followLive = true;
+        this.controlAsync(() => this.deps.session.continueTask(this.taskId, msg.text));
+        return;
       // The card settles when the task log reports the answer.
       case 'answerApproval':
         this.control(() => {
@@ -205,6 +211,7 @@ export class TaskLogPanel {
       queued: this.view.queued,
       attempts: this.attempts,
       attempt: this.attempt,
+      continuable: task ? canContinue(task) : false,
     };
   }
 

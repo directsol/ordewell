@@ -27,10 +27,6 @@ export interface StructuredRunnerDeps {
   interruptGraceMs?: number;
 }
 
-export type StructuredSpawnOptions = RunnerSpawnOptions & {
-  /** The runner's own session to continue in (ADR-0018, K1). */
-  resumeSessionId?: string;
-};
 
 /** The argument that says what a tool call is about: the command, the file, the pattern. */
 const KEY_ARGS: Partial<Record<ResearchToolType, string>> = {
@@ -288,7 +284,9 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
    * session id after an abort.
    */
   private async restartInterrupted(turn: NonNullable<StructuredSession['turn']>): Promise<void> {
-    const resumeSessionId = this.nativeSessionId() ?? undefined;
+    // A continue interrupted before its runner took the session up still
+    // resumes that session, never a fresh one.
+    const resumeSessionId = this.nativeSessionId() ?? this.launch.startOptions.resumeSessionId;
     this.generation += 1;
     turn.abort.abort();
     if (this.adapter) this.withdrawPermissions(this.adapter);
@@ -419,7 +417,7 @@ export class StructuredRunner extends AbstractRunner<StructuredSession> {
     this.interruptGraceMs = deps.interruptGraceMs ?? DEFAULT_INTERRUPT_GRACE_MS;
   }
 
-  async spawn(opts: StructuredSpawnOptions): Promise<ITerminalSession> {
+  async spawn(opts: RunnerSpawnOptions): Promise<ITerminalSession> {
     const manifest = opts.registry?.get(opts.runner)?.manifest;
     if (!manifest) throw new Error(`No runner manifest is registered for "${opts.runner}".`);
 
