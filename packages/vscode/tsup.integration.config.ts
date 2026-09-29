@@ -12,4 +12,13 @@ export default defineConfig({
   clean: true,
   splitting: false,
   sourcemap: false,
+  treeshake: true,
+  esbuildOptions(options) {
+    options.logOverride = {
+      ...(options.logOverride ?? {}),
+      // Same as tsup.config.ts: @ordewell/core is `sideEffects: false`, so
+      // dropping its split chunks' bare imports is safe, not worth a warning.
+      'ignored-bare-import': 'silent',
+    };
+  },
 });

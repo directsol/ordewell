@@ -14,6 +14,35 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
   now builds a real VS Code, drives the extension against a synthetic runner,
   and prints each package's statement/branch/function coverage in the job's
   summary — report-only, so it never fails a build on a percentage.
+- **An experimental *structured* transport for Claude Code tasks.** Turn it on
+  with `/transport structured` (or `ordewell transport structured`); the next
+  run drives each Claude Code task through its own protocol instead of a tmux
+  screen and keyboard, so "running", "waiting for approval" and "waiting for
+  input" are read from the runner rather than guessed from silence. Off by
+  default, and copied onto the plan when a run starts, so a change applies from
+  the next run. A task whose runner has no structured connector yet (Codex,
+  OpenCode) still runs on the terminal transport, with the fallback and its
+  reason shown on the task — never a silent downgrade.
+- **A task log for structured tasks, in the TUI and VS Code.** `t` or
+  `/terminal` on a structured task swaps the TUI's chat pane to its log; VS Code
+  opens the same log in an editor tab on demand from the task's "Open log". The
+  log streams live and is saved one file per attempt, so reopening a session, or
+  restarting the daemon, rebuilds the same view.
+- **Runner approvals as cards in the task log.** When a task's runner asks to
+  use a tool its mode does not cover, the request appears inline and waits — with
+  *Allow*, *Allow for this task* where the runner offers its own session-scoped
+  grant, and *Deny* with an optional note the agent reads. A task with a pending
+  request shows a waiting badge and stays in progress; cancelling, stopping or
+  retrying denies whatever is still open.
+- **Talking to a running structured task.** A message sent to a task is queued
+  and delivered when its turn ends, and can be taken back before it goes; a turn
+  can be interrupted mid-flight. A turn that ends without the completion marker
+  leaves the task waiting for input (or at a checkpoint) with no verdict
+  invented, and a reply resumes it.
+- **Continue a finished structured task.** A completed or failed structured task
+  can be continued in its saved Claude session, with the message as the next
+  turn; the continued attempt is verified and landed like any other. It is not
+  offered for a conflicted task.
 
 ### Changed
 

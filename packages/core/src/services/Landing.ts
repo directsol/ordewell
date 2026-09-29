@@ -3,7 +3,8 @@ import type { IConfig } from '../interfaces/IConfig';
 import type { IsolationOutcome, IsolationRun, RepairEvidence } from '../interfaces/IWorktreeIsolation';
 import type { PlanStore } from './PlanStore';
 import type { IsolationRunController } from './IsolationRunController';
-import { capConflictFiles, changedReposOf, integrationBranchNameOf, SELF_REPO } from './isolationRecord';
+import { changedReposOf, integrationBranchNameOf, SELF_REPO } from './isolationRecord';
+import { capConflictFiles } from './conflictFiles';
 import { buildConflictRepairPrompt, buildConflictResolutionPrompt } from './PlanPrompts';
 
 /** Which repair of a task an attempt is, of the most `conflictRepairAttempts` allows. */

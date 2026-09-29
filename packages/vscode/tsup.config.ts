@@ -21,4 +21,14 @@ export default defineConfig({
   splitting: false,
   sourcemap: true,
   treeshake: true,
+  esbuildOptions(options) {
+    options.logOverride = {
+      ...(options.logOverride ?? {}),
+      // @ordewell/core declares `sideEffects: false`, so esbuild is right to
+      // drop the bare chunk imports tsup emits into its split entry points —
+      // this only stops esbuild warning about a drop it is already certain is
+      // safe. A real side effect would still fail the integration test.
+      'ignored-bare-import': 'silent',
+    };
+  },
 });

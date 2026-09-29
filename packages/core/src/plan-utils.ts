@@ -8,7 +8,7 @@ export { canMergeTasks, canSplitTask, canSetDependencies, dependencyCandidates, 
 export type { TaskRef } from './services/TaskOps';
 export { summarizeToolCall } from './services/researchStepSummary';
 export { truncateCheckpointSummary, CHECKPOINT_TRUNCATE_LENGTH } from './services/SessionMessage';
-export { capConflictFiles } from './services/isolationRecord';
+export { capConflictFiles } from './services/conflictFiles';
 // The shared conversation view (#51) is pure too, so every surface — a webview
 // included — draws from the same reducer.
 export * from './conversation';
