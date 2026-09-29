@@ -16,7 +16,7 @@ import { fakeSpawn } from '../../__tests__/harnessTestKit';
 const noFetch = (async () => { throw new Error('no HTTP in this test'); }) as unknown as typeof fetch;
 
 function startOptions(cwd: string): AgentStartOptions {
-  return { cwd, systemPrompt: 'plan read-only' };
+  return { kind: 'planner', cwd, systemPrompt: 'plan read-only' };
 }
 
 describe('StdioAgentAdapter (via ClaudeCodeAdapter) — spawn preflight', () => {

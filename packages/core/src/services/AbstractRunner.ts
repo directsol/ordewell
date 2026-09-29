@@ -1,6 +1,9 @@
 import { EventEmitter } from 'events';
 import { ITerminalRunner, ITerminalSession } from '../interfaces/ITerminalRunner';
 
+/** One source for the spawn options, so a runner built on this base cannot drift from the interface. */
+export type RunnerSpawnOptions = Parameters<ITerminalRunner['spawn']>[0];
+
 export abstract class AbstractTerminalSession implements ITerminalSession {
   public id: string;
   public taskId: string;
@@ -59,15 +62,5 @@ export abstract class AbstractRunner<S extends ITerminalSession> implements ITer
     });
   }
 
-  abstract spawn(opts: {
-    taskId: string;
-    runner: string;
-    prompt: string;
-    modelId?: string;
-    thinkingEffort?: string;
-    mode?: string;
-    headless?: boolean;
-    cwd: string;
-    registry?: import('../plugins/RunnerRegistry').RunnerRegistry;
-  }): Promise<ITerminalSession>;
+  abstract spawn(opts: RunnerSpawnOptions): Promise<ITerminalSession>;
 }

@@ -1,6 +1,6 @@
 import type { SubagentOutcome } from '../../models/Task';
 import { partedPromptUsage, type UsageRecord } from '../../models/Usage';
-import type { AgentEvent, AgentStartOptions } from './AgentAdapter';
+import type { AgentEvent, AgentStartOptions, TaskModeAgentAdapter, TaskStartOptions } from './AgentAdapter';
 import { StdioAgentAdapter, type SpawnSpec } from './StdioAgentAdapter';
 
 /**
@@ -9,6 +9,19 @@ import { StdioAgentAdapter, type SpawnSpec } from './StdioAgentAdapter';
  * permission-mode change cannot quietly hand the planner a `Write` (T1).
  */
 const DISALLOWED_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'KillShell'];
+
+/**
+ * The flags that make Claude Code speak its bidirectional protocol, the same
+ * for a planner and a task. `--verbose` because stream-json output is rejected
+ * without it.
+ */
+const PROTOCOL_ARGS = [
+  '-p',
+  '--input-format', 'stream-json',
+  '--output-format', 'stream-json',
+  '--verbose',
+  '--include-partial-messages',
+];
 
 /**
  * How Claude Code reports an `Agent` call it decided to run in the background.
@@ -54,7 +67,9 @@ interface ClaudeLine {
   result?: string;
   is_error?: boolean;
   request_id?: string;
-  request?: { subtype?: string; tool_name?: string; input?: Record<string, unknown> };
+  request?: { subtype?: string; tool_name?: string; input?: Record<string, unknown>; permission_suggestions?: unknown[]; tool_use_id?: string };
+  /** `control_response`: the answer to a request Ordewell sent, such as an interrupt. */
+  response?: { subtype?: string; request_id?: string; error?: string };
   message?: { id?: string; model?: string; usage?: ClaudeUsage; content?: ClaudeBlock[] | string };
   /** Non-null on every line produced inside a subagent the planner spawned. */
   parent_tool_use_id?: string | null;
@@ -126,8 +141,14 @@ function flattenContent(content: unknown): string {
  * same way. It is the richest of the three streams — partial messages and
  * separate thinking blocks — which is why this agent went first.
  */
-export class ClaudeCodeAdapter extends StdioAgentAdapter {
+export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgentAdapter {
   readonly agentId = 'claude-code';
+
+  private interruptCount = 0;
+  /** Interrupts sent and not yet acknowledged, by request id. */
+  private readonly pendingControl = new Map<string, (ok: boolean) => void>();
+  /** An interrupt was sent during the current turn, so an aborted result is that interrupt, not a failure. */
+  private interruptRequested = false;
 
   /** Whether this turn has already emitted reply text — see {@link handleLine}. */
   private turnHasText = false;
@@ -150,13 +171,9 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
   private readonly countedSubagentMessages = new Set<string>();
 
   protected spawnSpec(opts: AgentStartOptions): SpawnSpec {
+    if (opts.kind === 'task') return this.taskSpawnSpec(opts);
     const args = [
-      '-p',
-      '--input-format', 'stream-json',
-      '--output-format', 'stream-json',
-      // stream-json output is rejected without it.
-      '--verbose',
-      '--include-partial-messages',
+      ...PROTOCOL_ARGS,
       // The read-only guarantee, enforced at spawn rather than by prompt.
       '--permission-mode', 'plan',
       '--disallowedTools', DISALLOWED_TOOLS.join(','),
@@ -175,8 +192,57 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
     return { command: 'claude', args };
   }
 
+  /**
+   * A task's run: the manifest decides what its mode and effort mean
+   * (ADR-0001), and this adds only the protocol around them. No tool list and
+   * no system prompt — the task's prompt is its first turn, as on the terminal
+   * transport. `--permission-prompt-tool stdio` routes the questions the mode
+   * leaves open to the control channel, where the adapter must answer them;
+   * without it `-p` refuses them silently and nothing can ever surface one.
+   */
+  private taskSpawnSpec(opts: TaskStartOptions): SpawnSpec {
+    const args = [
+      ...PROTOCOL_ARGS,
+      '--permission-prompt-tool', 'stdio',
+      '--permission-mode', opts.flags.permissionMode,
+      ...opts.flags.effortArgs,
+    ];
+    if (opts.model) args.push('--model', opts.model);
+    if (opts.resumeSessionId) {
+      args.push('--resume', opts.resumeSessionId);
+      this.reportedCostUsd = undefined;
+    }
+    return { command: 'claude', args };
+  }
+
+  /**
+   * Claude Code's soft interrupt: the turn stops, the process and its session
+   * stay. The CLI acknowledges on the control channel, then closes the turn
+   * with an `error_during_execution` result, which {@link handleLine} reports
+   * as an interrupted `turn_end`.
+   */
+  interrupt(timeoutMs: number): Promise<boolean> {
+    if (!this.process) return Promise.resolve(false);
+    this.interruptCount += 1;
+    const requestId = `ordewell-interrupt-${this.interruptCount}`;
+    this.interruptRequested = true;
+    return new Promise<boolean>((resolve) => {
+      const settle = (ok: boolean) => {
+        if (!this.pendingControl.delete(requestId)) return;
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => settle(false), timeoutMs);
+      timer.unref?.();
+      this.pendingControl.set(requestId, settle);
+      void this.processEnded.then(() => settle(false));
+      this.writeLine({ type: 'control_request', request_id: requestId, request: { subtype: 'interrupt' } });
+    });
+  }
+
   protected turnPayload(message: string): string {
     this.turnHasText = false;
+    this.interruptRequested = false;
     return `${JSON.stringify({
       type: 'user',
       message: { role: 'user', content: [{ type: 'text', text: message }] },
@@ -200,6 +266,8 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
       // The control channel: Claude asks whether a tool may run when its mode
       // cannot decide alone. A read-only planner answers "deny", every time —
       // and must answer, because an unacknowledged request stalls the turn.
+      // A task denies too until approvals reach a person (#56), but the whole
+      // request is passed on so that answer can be someone's to give.
       case 'control_request': {
         if (msg.request?.subtype !== 'can_use_tool') return;
         this.writeLine({
@@ -207,15 +275,32 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
           response: {
             subtype: 'success',
             request_id: msg.request_id,
-            response: { behavior: 'deny', message: 'The Ordewell planner is read-only. Mutation belongs to the runners that execute the plan.' },
+            response: {
+              behavior: 'deny',
+              message: this.role === 'task'
+                ? 'Ordewell cannot ask anyone to approve this yet, so it is denied. Continue without it, or say what you need.'
+                : 'The Ordewell planner is read-only. Mutation belongs to the runners that execute the plan.',
+            },
           },
         });
+        const input = msg.request?.input ?? {};
         emit({
           type: 'permission_request',
           id: msg.request_id ?? '',
           name: msg.request?.tool_name ?? 'unknown',
-          detail: JSON.stringify(msg.request?.input ?? {}),
+          detail: JSON.stringify(input),
+          ...(this.role === 'task' ? {
+            input,
+            suggestions: msg.request?.permission_suggestions ?? [],
+            ...(msg.request?.tool_use_id ? { toolUseId: msg.request.tool_use_id } : {}),
+          } : {}),
         });
+        return;
+      }
+
+      case 'control_response': {
+        const requestId = msg.response?.request_id;
+        if (requestId) this.pendingControl.get(requestId)?.(msg.response?.subtype === 'success');
         return;
       }
 
@@ -272,7 +357,10 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter {
         // text (which carries the plan JSON) already arrived as assistant
         // blocks, so this only settles the turn.
         this.reportSessionCost(msg, emit);
-        if (msg.is_error || (msg.subtype && msg.subtype !== 'success')) {
+        if (this.interruptRequested && (msg.is_error || msg.subtype !== 'success')) {
+          this.interruptRequested = false;
+          emit({ type: 'turn_end', interrupted: true });
+        } else if (msg.is_error || (msg.subtype && msg.subtype !== 'success')) {
           emit({ type: 'error', message: msg.result?.trim() || `Claude Code ended the turn: ${msg.subtype ?? 'error'}` });
         } else {
           emit({ type: 'turn_end' });

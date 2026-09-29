@@ -1,8 +1,8 @@
 import { spawn as nodeSpawn, execSync, ChildProcess } from 'child_process';
 import type { Writable } from 'stream';
-import { ITerminalRunner, ITerminalSession } from '../interfaces/ITerminalRunner';
+import { ITerminalSession } from '../interfaces/ITerminalRunner';
 import { buildRunnerInvocation } from './buildRunnerArgs';
-import { AbstractTerminalSession, AbstractRunner } from './AbstractRunner';
+import { AbstractTerminalSession, AbstractRunner, type RunnerSpawnOptions } from './AbstractRunner';
 import { augmentedPath, withPath } from '../utils/shellPath';
 import { stripAnsi, wrapWithPty, type PtyWrapOptions } from '../utils/shell';
 import { planDirectLaunch, type LaunchDeps, type LaunchPlan } from '../utils/launch';
@@ -118,7 +118,7 @@ export class HeadlessSession extends AbstractTerminalSession {
   }
 }
 
-export type RunnerSpawnOptions = Parameters<ITerminalRunner['spawn']>[0];
+export type { RunnerSpawnOptions };
 
 /** Everything needed to start one runner process, resolved before any child exists. */
 export interface PreparedLaunch {

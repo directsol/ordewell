@@ -71,6 +71,8 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
   /** The environment the agent was spawned under, for any side process a handshake needs. */
   protected spawnEnv: NodeJS.ProcessEnv = {};
   private markEnded: (() => void) | null = null;
+  /** What this process is to the user — a planner or a task's runner — for the words a failure is reported in. */
+  protected role: 'planner' | 'task' = 'planner';
 
   constructor(protected deps: AgentProcessDeps) {}
 
@@ -90,6 +92,7 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
   protected async handshake(_opts: AgentStartOptions): Promise<void> {}
 
   async start(opts: AgentStartOptions): Promise<void> {
+    this.role = opts.kind;
     // Checked before anything else: a workspace deleted out from under a
     // stale `process.cwd()` otherwise surfaces as `spawn`'s ENOENT, which
     // reads as a missing agent binary rather than a missing directory.
@@ -153,7 +156,7 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
   }
 
   async send(message: string, onEvent: (event: AgentEvent) => void, signal?: AbortSignal, onActivity?: () => void): Promise<void> {
-    if (!this.process) throw new Error(`${this.agentId} planner session is not started`);
+    if (!this.process) throw new Error(`${this.agentId} ${this.role} session is not started`);
     if (this.exited) {
       onEvent({ type: 'error', message: this.exitMessage() });
       return;
@@ -218,6 +221,12 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
 
   nativeSessionId(): string | null { return this.sessionId; }
 
+  onProcessExit(listener: (code: number) => void): void {
+    const fire = () => listener(this.exited?.code ?? -1);
+    if (this.exited) queueMicrotask(fire);
+    else void this.processEnded.then(fire);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -241,7 +250,7 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
       ? `was killed (${this.exited.signal})`
       : `exited with code ${this.exited?.code ?? 'unknown'}`;
     const tail = this.stderrTail.trim();
-    return `The ${this.agentId} planner ${how}.${tail ? `\n\n${tail}` : ''}`;
+    return `The ${this.agentId} ${this.role === 'task' ? 'task runner' : 'planner'} ${how}.${tail ? `\n\n${tail}` : ''}`;
   }
 
   /** Parse a protocol line, ignoring the non-JSON banners some CLIs print. */

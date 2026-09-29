@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentStartOptions } from './AgentAdapter';
+import { plannerOnly, type AgentEvent, type AgentStartOptions, type PlannerStartOptions } from './AgentAdapter';
 import type { SubagentOutcome } from '../../models/Task';
 import type { UsageRecord } from '../../models/Usage';
 import { StdioAgentAdapter, type SpawnSpec } from './StdioAgentAdapter';
@@ -150,7 +150,7 @@ export class CodexAdapter extends StdioAgentAdapter {
   private nextRequestId = 100;
   private settleHandshake: ((ok: boolean) => void) | null = null;
   private handshakeError: string | null = null;
-  private startOpts: AgentStartOptions | null = null;
+  private startOpts: PlannerStartOptions | null = null;
   /** Whether this turn has already emitted prose — see the `agentMessage` case. */
   private turnHasText = false;
   private resumeAttempted = false;
@@ -163,8 +163,14 @@ export class CodexAdapter extends StdioAgentAdapter {
    */
   private readonly subagents = new Map<string, { model?: string }>();
 
+  /** Codex only plans for now (#54): its tasks stay on the terminal transport. */
+  async start(opts: AgentStartOptions): Promise<void> {
+    plannerOnly(this.agentId, opts);
+    await super.start(opts);
+  }
+
   protected spawnSpec(opts: AgentStartOptions): SpawnSpec {
-    this.startOpts = opts;
+    this.startOpts = plannerOnly(this.agentId, opts);
     return { command: 'codex', args: ['app-server'] };
   }
 
