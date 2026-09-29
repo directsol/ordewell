@@ -26,3 +26,10 @@ Tasks run in a **tmux window** instead of a piped subprocess (`TmuxRunner`, alon
 - **A pty-multiplexer built into the TUI's own render loop (M2).** Rejected: the TUI's whole render model is pure `render(state) → string[]`, home-and-overwrite (ADR-0006); attaching a live runner needs raw ANSI passthrough, a fundamentally different mode. Doing this over the daemon's WebSocket (since a runner may not be spawned from the same process as any given TUI client) would also mean building bidirectional binary streaming plus resize propagation from scratch — reimplementing tmux, worse.
 - **Capture-pane polling with prefix-diffing (M3).** Rejected in favor of `pipe-pane` + file tailing (T2): diffing periodic snapshots needs a resync heuristic whenever the pane's scrollback is exceeded between polls, which can re-emit already-seen content and double-count a checkpoint marker. `pipe-pane` gives an exact append-only byte stream tmux is already designed to produce.
 - **Spawn a real OS terminal emulator as the *only* transport (M4, no tmux underneath).** Rejected: it would only work with a local GUI, failing silently on every SSH/headless box — which is a large fraction of where a terminal-based TUI actually runs. tmux underneath means the daemon-side execution and the checkpoint/verdict machinery keep working identically whether or not a GUI is ever attached; opening a terminal is a pure convenience on top, not a requirement for the pipeline to run.
+
+## Amendment (2026-09-29) — the transport is now a choice
+
+T5's "no new setting" no longer holds for the *transport* choice:
+[ADR-0018](0018-structured-runner-transport.md) adds an opt-in
+`runnerTransport: terminal | structured`. Within the terminal transport nothing
+changes — tmux stays automatic, gated by `hasTmux()`.

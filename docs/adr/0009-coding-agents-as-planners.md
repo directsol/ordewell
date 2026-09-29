@@ -246,3 +246,11 @@ server advertises, and a part of any other message is the user's own words —
 not every text part is treated as the assistant's. The framing above — the settled response is authoritative, the
 stream feeds display — still holds; only the "tool activity only" scope
 changed.
+
+## Amendment (2026-09-29) — adapters gain a task mode
+
+"Every adapter spawns read-only" becomes "the *planner* path always spawns
+read-only". Adapters gain an explicit start switch for a task mode
+([ADR-0018](0018-structured-runner-transport.md)), whose permission mode and
+effort come from the runner manifest, not from the adapter. The planner path
+never passes the task switch, and tests assert it.

@@ -178,3 +178,12 @@ Closed as follows, under the file's existing rule: when unsure, refuse.
 The residual is the one `ask` always had: an approved `xargs grep` reads
 whatever files its input lists, outside the workspace included, because the
 arguments are not visible to confinement. That is why it prompts.
+
+## Amendment (2026-09-29) — the seam also carries runner tool requests
+
+The approval seam (`IApproval` / `PendingApprovals` / `resolveApproval`) now
+also carries a task runner's tool requests under the structured transport, as
+kind `runner_tool` ([ADR-0018](0018-structured-runner-transport.md)). They have
+no timeout: T5's five-minute auto-deny is the planner's, where an unanswered
+prompt would hang a research loop; a task's request waits for a person. The
+planner's envelope is unchanged.
