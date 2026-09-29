@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import TaskCard from '../TaskCard';
 import SubTaskCard from '../SubTaskCard';
 import type { Task } from '@ordewell/core';
@@ -42,5 +42,20 @@ describe('what an awaiting task waits on (ADR-0018, W1)', () => {
     const parent = makeTask({ id: 'p1', status: 'in_progress' });
     render(<SubTaskCard task={makeTask({ id: 's1', awaitingReason: 'checkpoint' })} parentTask={parent} models={[]} isExecuting />);
     expect(screen.getByText('Checkpoint', { selector: '.task-status-badge' })).toBeTruthy();
+  });
+
+  it('badges a task whose runner waits on an approval, and the badge opens its log (A1)', () => {
+    const opened: string[] = [];
+    render(<TaskCard task={makeTask({ status: 'in_progress', transport: { kind: 'structured' } })} models={[]} isExecuting
+      awaitingApproval={1} onOpenLog={(id) => opened.push(id)} />);
+    fireEvent.click(screen.getByText('Waiting for approval', { selector: '.task-approval-badge' }));
+    expect(opened).toEqual(['t1']);
+    // The status itself is left alone: the turn is still running.
+    expect(screen.queryByText('Awaiting User')).toBeNull();
+  });
+
+  it('shows no approval badge when nothing waits', () => {
+    render(<TaskCard task={makeTask({ status: 'in_progress', transport: { kind: 'structured' } })} models={[]} isExecuting />);
+    expect(document.querySelector('.task-approval-badge')).toBeNull();
   });
 });

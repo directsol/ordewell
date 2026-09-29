@@ -14,7 +14,7 @@ function send(msg: HostToTaskLog): void {
 function status(overrides: Partial<TaskLogStatus> = {}): TaskLogStatus {
   return {
     taskId: 't1', order: 2, title: 'Parse JSON', runner: 'claude-code',
-    planStatus: 'in_progress', working: false, queued: [], attempts: [1], attempt: 1, continuable: false,
+    planStatus: 'in_progress', awaitingApproval: 0, working: false, queued: [], attempts: [1], attempt: 1, continuable: false,
     ...overrides,
   };
 }
@@ -110,5 +110,51 @@ describe('the task log tab (ADR-0018, V1)', () => {
 
     expect(api.postMessage).toHaveBeenCalledWith({ type: 'continueTask', text: 'also handle arrays' });
     expect(screen.queryByText('Send')).toBeNull();
+  });
+
+  describe('a runner\'s tool request (ADR-0018, A1)', () => {
+    const request = (overrides: Partial<Extract<DisplayBlock, { type: 'approval' }>> = {}): DisplayBlock => ({
+      type: 'approval', id: 'b2', approvalId: 'ap-1', kind: 'runner_tool', subject: 'Bash(npm test)', scope: 'Bash', status: 'pending', allowForTask: true,
+      ...overrides,
+    });
+
+    it('offers Allow, Allow for this task and Deny, each sent with its whole decision', () => {
+      render(<TaskLogApp />);
+      init({ working: true, awaitingApproval: 1 }, [request()]);
+      expect(screen.getByText('Waiting for approval', { selector: '.task-log-state' })).toBeTruthy();
+
+      fireEvent.click(screen.getByText('Allow'));
+      fireEvent.click(screen.getByText('Allow for this task'));
+      expect(api.postMessage).toHaveBeenCalledWith({ type: 'answerApproval', id: 'ap-1', decision: { decision: 'allow' } });
+      expect(api.postMessage).toHaveBeenCalledWith({ type: 'answerApproval', id: 'ap-1', decision: { decision: 'allowForTask' } });
+    });
+
+    it('denies with the note typed on the card', () => {
+      render(<TaskLogApp />);
+      init({}, [request()]);
+      fireEvent.change(screen.getByPlaceholderText(/Note to the agent/), { target: { value: '  write it under notes/ ' } });
+      fireEvent.click(screen.getByText('Deny'));
+      expect(api.postMessage).toHaveBeenCalledWith({ type: 'answerApproval', id: 'ap-1', decision: { decision: 'deny', note: 'write it under notes/' } });
+    });
+
+    it('leaves out Allow for this task when the runner offered no grant', () => {
+      render(<TaskLogApp />);
+      init({}, [request({ allowForTask: false })]);
+      expect(screen.queryByText('Allow for this task')).toBeNull();
+      expect(screen.getByText('Allow')).toBeTruthy();
+    });
+
+    it('settles into how it was answered, with no buttons left', () => {
+      render(<TaskLogApp />);
+      init({}, [
+        request({ status: 'granted', decidedBy: 'asked', forTask: true }),
+        request({ id: 'b3', approvalId: 'ap-2', status: 'denied', decidedBy: 'asked', note: 'use notes/' }),
+        request({ id: 'b4', approvalId: 'ap-3', status: 'withdrawn' }),
+      ]);
+      expect(screen.getByText('Approved for this task')).toBeTruthy();
+      expect(screen.getByText('Note to the agent: use notes/')).toBeTruthy();
+      expect(screen.getByText('Withdrawn')).toBeTruthy();
+      expect(screen.queryByText('Allow')).toBeNull();
+    });
   });
 });

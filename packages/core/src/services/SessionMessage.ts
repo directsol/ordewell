@@ -23,6 +23,12 @@ export type SerializedTaskStatus = {
   queued?: QueuedTaskMessage[];
   /** Set when the task can be continued in its saved runner session (ADR-0018, K1); the id itself stays in the daemon. */
   continuable?: true;
+  /**
+   * How many of a structured task's runner requests wait for an answer
+   * (ADR-0018, A1) — "waiting for approval", which leaves `status` alone.
+   * Absent when none do.
+   */
+  awaitingApproval?: number;
 };
 
 export type SerializedTask = {
@@ -248,6 +254,7 @@ export function serializeTaskStatus(
   idleSince: string | null = null,
   isolation: TaskIsolation | null = null,
   queued: readonly QueuedTaskMessage[] = [],
+  awaitingApproval = 0,
 ): SerializedTaskStatus {
   return {
     id: t.id,
@@ -261,6 +268,7 @@ export function serializeTaskStatus(
     ...(t.status === 'awaiting_user' && t.awaitingReason ? { awaitingReason: t.awaitingReason } : {}),
     ...(queued.length > 0 ? { queued: queued.map((m) => ({ ...m })) } : {}),
     ...(canContinue(t) ? { continuable: true as const } : {}),
+    ...(awaitingApproval > 0 ? { awaitingApproval } : {}),
   };
 }
 

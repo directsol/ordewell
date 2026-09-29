@@ -385,7 +385,8 @@ for it — a retry starts a fresh attempt with no message.
 **Task log** (`TaskLogEvent`, `reduceTaskLog`, `TaskLogRecorder`) — what a
 structured task did, at full fidelity (ADR-0018, O1b/P1): normalized events —
 text and thinking, tool calls with their results (long ones trimmed to head
-and tail), subagents, usage, turns, and the message queue — streamed live as
+and tail), subagents, usage, turns, the message queue and runner approvals
+(requested, decided, withdrawn) — streamed live as
 `task_log` and appended to `.ordewell/sessions/<session>/tasks/<task>/<attempt>.jsonl`,
 one file per attempt, numbered from what is on disk. `reduceTaskLog` folds the
 same events into display blocks live and on reload, so the two draw alike. The
@@ -393,6 +394,20 @@ file goes with its session. A terminal-transport task has none.
 *Avoid:* "transcript" (the planner conversation's saved record), "output"
 (the lossy plain-text channel `VerdictEngine` reads — nothing that needs
 fidelity reads it), and reading a verdict from the log.
+
+**Runner approval** (`runner_tool`, `RunnerApprovals`) — a structured task's
+runner asking to use a tool its mode does not cover (ADR-0018, A1). It rides
+the planner's approval seam (`PendingApprovals`, `resolveApproval`) carrying
+the task id, with no timeout, and shows as a card in the task log — never in
+the planner conversation. The answers are *Allow*, *Allow for this task* (the
+runner's own session-scoped grant, offered only when it proposed one) and
+*Deny* with an optional note the agent reads; `resolveApproval` takes the
+whole decision from any answerer, a person or later the supervisor (#28). The
+task stays `in_progress`: "waiting for approval" is derived from its pending
+requests. Cancel, stop and retry deny them before the runner goes; one the
+runner cancels itself, or whose process ends, is *withdrawn*.
+*Avoid:* "permission prompt" for Ordewell's side (that is Claude's protocol),
+and "awaiting approval" as a task status.
 
 **Spawn toolkit** — the pure OS/shell policy behind the runner adapters
 (`core/src/utils/shell.ts`): ANSI stripping (`stripAnsi`), POSIX/PowerShell

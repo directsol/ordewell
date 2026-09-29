@@ -1,5 +1,6 @@
 import type { SubagentOutcome } from '../../models/Task';
 import { partedPromptUsage, type UsageRecord } from '../../models/Usage';
+import type { ApprovalDecision } from '../../interfaces/IApproval';
 import type { AgentEvent, AgentStartOptions, TaskModeAgentAdapter, TaskStartOptions } from './AgentAdapter';
 import { StdioAgentAdapter, type SpawnSpec } from './StdioAgentAdapter';
 
@@ -31,6 +32,9 @@ const PROTOCOL_ARGS = [
  * why nothing downstream treats its absence as "no agents are running".
  */
 const ASYNC_LAUNCH_MARKER = 'Async agent launched successfully';
+
+/** A denial's `message` is required by the CLI; this stands in when nobody wrote a note. */
+const DEFAULT_DENIAL = 'Denied in Ordewell. Continue without it, or say what you need.';
 
 interface ClaudeBlock {
   type: string;
@@ -151,6 +155,8 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
   private readonly pendingControl = new Map<string, (ok: boolean) => void>();
   /** An interrupt was sent during the current turn, so an aborted result is that interrupt, not a failure. */
   private interruptRequested = false;
+  /** A task's tool requests still waiting for an answer, by request id, with what the answer echoes back. */
+  private readonly openPermissions = new Map<string, { input: Record<string, unknown>; suggestions: unknown[] }>();
 
   /** Whether this turn has already emitted reply text — see {@link handleLine}. */
   private turnHasText = false;
@@ -259,6 +265,27 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
     this.process?.stdin?.end();
   }
 
+  /**
+   * The answer to an open tool request, in the shape the CLI validates: an
+   * allow echoes the call's own input (an absent one is warned about and
+   * replaced), and "for this task" hands back Claude's own suggestions — never
+   * a grant of Ordewell's making.
+   */
+  answerPermission(id: string, decision: ApprovalDecision): boolean {
+    const open = this.openPermissions.get(id);
+    if (!open || !this.process) return false;
+    this.openPermissions.delete(id);
+    const response = decision.decision === 'deny'
+      ? { behavior: 'deny', message: decision.note?.trim() || DEFAULT_DENIAL }
+      : {
+        behavior: 'allow',
+        updatedInput: open.input,
+        ...(decision.decision === 'allowForTask' && open.suggestions.length > 0 ? { updatedPermissions: open.suggestions } : {}),
+      };
+    this.writeLine({ type: 'control_response', response: { subtype: 'success', request_id: id, response } });
+    return true;
+  }
+
   protected turnPayload(message: string): string {
     this.turnHasText = false;
     this.interruptRequested = false;
@@ -292,35 +319,41 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
       // The control channel: Claude asks whether a tool may run when its mode
       // cannot decide alone. A read-only planner answers "deny", every time —
       // and must answer, because an unacknowledged request stalls the turn.
-      // A task denies too until approvals reach a person (#56), but the whole
-      // request is passed on so that answer can be someone's to give.
+      // A task's request is left open for someone to answer (ADR-0018, A1).
       case 'control_request': {
         if (msg.request?.subtype !== 'can_use_tool') return;
-        this.writeLine({
-          type: 'control_response',
-          response: {
-            subtype: 'success',
-            request_id: msg.request_id,
+        const input = msg.request.input ?? {};
+        const id = msg.request_id ?? '';
+        if (this.role === 'planner') {
+          this.writeLine({
+            type: 'control_response',
             response: {
-              behavior: 'deny',
-              message: this.role === 'task'
-                ? 'Ordewell cannot ask anyone to approve this yet, so it is denied. Continue without it, or say what you need.'
-                : 'The Ordewell planner is read-only. Mutation belongs to the runners that execute the plan.',
+              subtype: 'success',
+              request_id: msg.request_id,
+              response: { behavior: 'deny', message: 'The Ordewell planner is read-only. Mutation belongs to the runners that execute the plan.' },
             },
-          },
-        });
-        const input = msg.request?.input ?? {};
+          });
+          emit({ type: 'permission_request', id, name: msg.request.tool_name ?? 'unknown', detail: JSON.stringify(input) });
+          return;
+        }
+        const suggestions = msg.request.permission_suggestions ?? [];
+        this.openPermissions.set(id, { input, suggestions });
         emit({
           type: 'permission_request',
-          id: msg.request_id ?? '',
-          name: msg.request?.tool_name ?? 'unknown',
+          id,
+          name: msg.request.tool_name ?? 'unknown',
           detail: JSON.stringify(input),
-          ...(this.role === 'task' ? {
-            input,
-            suggestions: msg.request?.permission_suggestions ?? [],
-            ...(msg.request?.tool_use_id ? { toolUseId: msg.request.tool_use_id } : {}),
-          } : {}),
+          input,
+          suggestions,
+          ...(msg.request.tool_use_id ? { toolUseId: msg.request.tool_use_id } : {}),
         });
+        return;
+      }
+
+      // Claude gave up on a request it asked — an interrupt cancels the call.
+      case 'control_cancel_request': {
+        const id = msg.request_id;
+        if (id && this.openPermissions.delete(id)) emit({ type: 'permission_cancelled', id });
         return;
       }
 

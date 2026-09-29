@@ -341,6 +341,7 @@ function dispatchLifecycle(dispatch: Dispatch, event: LifecycleMessage, sessionI
           transport: task.transport,
           awaitingReason: isAwaitingReason(task.awaitingReason) ? task.awaitingReason : undefined,
           ...(task.continuable ? { continuable: true } : {}),
+          awaitingApproval: typeof task.awaitingApproval === 'number' && task.awaitingApproval > 0 ? task.awaitingApproval : undefined,
         };
       }
       dispatch({ type: 'tasksStatus', updates, sessionId });

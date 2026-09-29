@@ -1,3 +1,4 @@
+import type { ApprovalDecision } from '../interfaces/IApproval';
 import type { StructuredEvent, StructuredTurnEnd } from '../interfaces/ITerminalRunner';
 import type { SubagentOutcome } from './Task';
 import type { UsageRecord } from './Usage';
@@ -9,7 +10,7 @@ import type { UsageRecord } from './Usage';
  * events through `reduceTaskLog`, so the two cannot disagree.
  *
  * Readers skip a type they do not know, which is how later events join
- * without a format version — runner approvals (#56) are the next.
+ * without a format version.
  */
 export type TaskLogEvent =
   /** A turn began by delivering `message`; `messageId` names it when it had been queued. */
@@ -30,7 +31,17 @@ export type TaskLogEvent =
   | { type: 'message_queued'; messageId: string; text: string }
   | { type: 'message_removed'; messageId: string }
   /** The agent's own words for a failed turn. */
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  /**
+   * The runner asked to use a tool its mode does not cover (ADR-0018, A1).
+   * `approvalId` is what the answer is given under; `args` is the call's
+   * arguments as JSON; `allowForTask` says the runner offered its own
+   * session-scoped grant.
+   */
+  | { type: 'approval_requested'; approvalId: string; tool: string; args: string; allowForTask: boolean; toolCallId?: string }
+  | { type: 'approval_decided'; approvalId: string; decision: ApprovalDecision['decision']; note?: string }
+  /** The request went unanswered: the runner withdrew it, or its process ended. */
+  | { type: 'approval_withdrawn'; approvalId: string };
 
 const HEAD_LINES = 60;
 const TAIL_LINES = 40;
@@ -64,8 +75,7 @@ function withSubagent<E extends TaskLogEvent>(event: E, subagentId: string | und
 
 /**
  * The log entry for one structured event, or null for what the log does not
- * keep: permission requests (their approval events come with #56) and
- * background-agent launches, which the subagent's own events already show.
+ * keep: background-agent launches, which the subagent's own events already show.
  */
 export function toTaskLogEvent(event: StructuredEvent): TaskLogEvent | null {
   switch (event.type) {
@@ -99,6 +109,20 @@ export function toTaskLogEvent(event: StructuredEvent): TaskLogEvent | null {
     case 'error':
       return { type: 'error', message: event.message };
     case 'permission_request':
+      return {
+        type: 'approval_requested',
+        approvalId: event.id,
+        tool: event.name,
+        args: event.detail,
+        allowForTask: (event.suggestions?.length ?? 0) > 0,
+        ...(event.toolUseId ? { toolCallId: event.toolUseId } : {}),
+      };
+    case 'permission_decided': {
+      const note = event.decision.decision === 'deny' ? event.decision.note : undefined;
+      return { type: 'approval_decided', approvalId: event.id, decision: event.decision.decision, ...(note ? { note } : {}) };
+    }
+    case 'permission_withdrawn':
+      return { type: 'approval_withdrawn', approvalId: event.id };
     case 'background_agent':
       return null;
   }

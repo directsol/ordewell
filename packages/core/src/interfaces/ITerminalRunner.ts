@@ -1,4 +1,5 @@
 import type { AgentEvent } from '../services/harness/AgentAdapter';
+import type { ApprovalDecision } from './IApproval';
 
 export interface ITerminalSession {
   id: string;
@@ -44,12 +45,16 @@ export type StructuredTurnEnd = 'completed' | 'interrupted' | 'failed';
  * full-fidelity task log, never for verdicts.
  */
 export type StructuredEvent =
-  | Exclude<AgentEvent, { type: 'turn_end' }>
+  | Exclude<AgentEvent, { type: 'turn_end' } | { type: 'permission_cancelled' }>
   /** `text` is the user message the turn answers; `messageId` is set when it had waited in the queue. */
   | { type: 'turn_start'; text: string; messageId?: string }
   | { type: 'turn_end'; reason: StructuredTurnEnd }
   | { type: 'message_queued'; messageId: string; text: string }
-  | { type: 'message_removed'; messageId: string };
+  | { type: 'message_removed'; messageId: string }
+  /** An open `permission_request` was answered, by whoever answered it (ADR-0018, A1). */
+  | { type: 'permission_decided'; id: string; decision: ApprovalDecision }
+  /** An open `permission_request` can no longer be answered: the runner withdrew it, or its process is gone. */
+  | { type: 'permission_withdrawn'; id: string };
 
 export interface QueuedTaskMessage {
   id: string;
@@ -84,6 +89,11 @@ export interface StructuredSessionCapability {
   interrupt(): Promise<void>;
   /** The runner's own session id once announced — what a continue resumes (ADR-0018, K1). */
   nativeSessionId(): string | null;
+  /**
+   * Answer a `permission_request` this session emitted, by its event id. False
+   * when it is no longer open — answered, withdrawn, or never asked.
+   */
+  answerPermission(id: string, decision: ApprovalDecision): boolean;
 }
 
 export function isStructuredSession(session: ITerminalSession): session is ITerminalSession & StructuredSessionCapability {

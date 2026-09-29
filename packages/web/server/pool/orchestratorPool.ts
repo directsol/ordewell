@@ -44,7 +44,7 @@ import { WebConfig } from '../adapters/WebConfig';
 import { scanWorkspaces as scanWorkspacesImpl } from '../utils/workspaceScanner';
 import { PoolFileSystem } from '../adapters/PoolFileSystem';
 import { PoolAwareRunner } from '../adapters/PoolAwareRunner';
-import type { RunnerRegistry as CoreRunnerRegistry, ITerminalRunner } from '@ordewell/core';
+import type { ApprovalAnswer, RunnerRegistry as CoreRunnerRegistry, ITerminalRunner } from '@ordewell/core';
 
 /** A fork the pool has adopted: addressable at once, its plan read back from the file it was written to. */
 export interface AdoptedFork {
@@ -115,9 +115,9 @@ export class OrchestratorPool {
 
   hasSession(sessionId: string): boolean { return this.sessions.has(sessionId); }
 
-  /** Answer a planner approval prompt. False means the id was unknown or already settled. */
-  resolveApproval(sessionId: string, approvalId: string, granted: boolean): boolean {
-    return this.sessions.get(sessionId)?.resolveApproval(approvalId, granted) ?? false;
+  /** Answer an approval prompt, the planner's or a task runner's. False means the id was unknown or already settled. */
+  resolveApproval(sessionId: string, approvalId: string, answer: ApprovalAnswer): boolean {
+    return this.sessions.get(sessionId)?.resolveApproval(approvalId, answer) ?? false;
   }
 
   outstandingApprovals(sessionId: string) {

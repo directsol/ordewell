@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, type AwaitingReason, type ConversationView, type PromptHold, type RunnerTransport, type TaskLogEvent, type TaskLogView, type TaskTransport, type TurnGate } from '@ordewell/core';
+import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, type ApprovalBlock, type AwaitingReason, type ConversationView, type PromptHold, type RunnerTransport, type TaskLogEvent, type TaskLogView, type TaskTransport, type TurnGate } from '@ordewell/core';
 import { emptyEditor, type EditorState } from './editor';
 
 export type RunStatus = 'idle' | 'planning' | 'researching' | 'executing';
@@ -30,6 +30,8 @@ export interface TaskView {
   awaitingReason?: AwaitingReason;
   /** A finished structured task the daemon can continue in its saved session (ADR-0018, K1). */
   continuable?: boolean;
+  /** How many of its runner's tool requests wait for an answer (ADR-0018, A1); absent when none do. */
+  awaitingApproval?: number;
   /** Child tasks, recursively shaped the same way; absent until populated by `toTaskView`. */
   subtasks?: TaskView[];
 }
@@ -473,6 +475,11 @@ export function planRows(state: TuiState): PlanRow[] {
 /** The row the plan pane's cursor points at, or null for an empty plan. */
 export function selectedPlanRow(state: TuiState): PlanRow | null {
   return planRows(state)[state.selectedTask] ?? null;
+}
+
+/** The request the task view's approval keys answer: the oldest one still waiting in the attempt on screen. */
+export function waitingApproval(tv: TaskLogState): ApprovalBlock | undefined {
+  return tv.view.blocks.find((b): b is ApprovalBlock => b.type === 'approval' && b.status === 'pending' && b.approvalId !== undefined);
 }
 
 /**

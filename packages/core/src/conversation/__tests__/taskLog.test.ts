@@ -167,6 +167,44 @@ describe('reduceTaskLog', () => {
     expect(delivered.blocks.at(-1)).toMatchObject({ type: 'message', role: 'user', text: 'also add tests' });
   });
 
+  it('puts a runner\'s tool request after the call it is for, and settles it with the answer', () => {
+    const call: TaskLogEvent = { type: 'tool_call', id: 'toolu_1', name: 'Bash', args: '{"command":"npm test"}' };
+    const asked = replayTaskLog([
+      start, call,
+      { type: 'approval_requested', approvalId: 'ap-1', tool: 'Bash', args: '{"command":"npm test"}', allowForTask: true, toolCallId: 'toolu_1' },
+    ]);
+    expect(unkeyed(asked.blocks).slice(1)).toEqual([
+      expect.objectContaining({ type: 'tool', toolCallId: 'toolu_1', status: 'pending' }),
+      { type: 'approval', approvalId: 'ap-1', kind: 'runner_tool', subject: 'Bash(npm test)', scope: 'Bash', status: 'pending', allowForTask: true, toolCallId: 'toolu_1' },
+    ]);
+
+    const allowed = replayTaskLog([{ type: 'approval_decided', approvalId: 'ap-1', decision: 'allowForTask' }], asked);
+    expect(allowed.blocks.find((b) => b.type === 'approval')).toMatchObject({ status: 'granted', decidedBy: 'asked', forTask: true });
+    expect(allowed.blocks[1]).toBe(asked.blocks[1]);
+  });
+
+  it('settles a denial with its note, and a withdrawn request as withdrawn', () => {
+    const ask = (approvalId: string): TaskLogEvent => ({ type: 'approval_requested', approvalId, tool: 'Write', args: '{"file_path":"/repo/a.txt"}', allowForTask: false });
+    const view = replayTaskLog([
+      start, ask('ap-1'), ask('ap-2'),
+      { type: 'approval_decided', approvalId: 'ap-1', decision: 'deny', note: 'use notes/' },
+      { type: 'approval_withdrawn', approvalId: 'ap-2' },
+    ]);
+    const approvals = view.blocks.filter((b) => b.type === 'approval');
+    expect(approvals).toEqual([
+      expect.objectContaining({ approvalId: 'ap-1', subject: 'Write(/repo/a.txt)', status: 'denied', note: 'use notes/' }),
+      expect.objectContaining({ approvalId: 'ap-2', status: 'withdrawn' }),
+    ]);
+    expect(approvals[0]).not.toHaveProperty('forTask');
+  });
+
+  it('takes the first answer to a request and ignores a repeated request', () => {
+    const asked = replayTaskLog([start, { type: 'approval_requested', approvalId: 'ap-1', tool: 'Bash', args: '{}', allowForTask: false }]);
+    const decided = replayTaskLog([{ type: 'approval_decided', approvalId: 'ap-1', decision: 'allow' }], asked);
+    expect(reduceTaskLog(decided, { type: 'approval_withdrawn', approvalId: 'ap-1' })).toBe(decided);
+    expect(reduceTaskLog(decided, { type: 'approval_requested', approvalId: 'ap-1', tool: 'Bash', args: '{}', allowForTask: false })).toBe(decided);
+  });
+
   it('returns the view itself for an event that changes nothing, including one it does not know', () => {
     const view = replayTaskLog([start]);
     expect(reduceTaskLog(view, { type: 'message_removed', messageId: 'nope' })).toBe(view);

@@ -10,7 +10,7 @@ import { continuesTask, findTask, isTaskRunning, planRows, plannerInFlight, type
 import type { Key } from './keys';
 import { handleOverlayKey } from './reducers/overlays';
 import { handlePlanKey } from './reducers/planPane';
-import { continueTaskStep, handleTaskViewKey, taskLogAbandoned, taskLogArrived, taskLogLoaded } from './reducers/taskView';
+import { announceApprovals, continueTaskStep, handleTaskViewKey, taskLogAbandoned, taskLogArrived, taskLogLoaded } from './reducers/taskView';
 import { pickRewindTarget, runCommand } from './reducers/commands';
 import { disarmStop, drainQueue, plannerEscape } from './reducers/turnQueue';
 import { applySettings, followSession, normalizeTasks, runLabel } from './reducers/incoming';
@@ -100,7 +100,7 @@ export function reduce(state: TuiState, action: Action): Step {
 
     case 'taskLog':
       if (stale(state, action.sessionId)) return step(state);
-      return step(taskLogArrived(state, action));
+      return step(announceApprovals(taskLogArrived(state, action), action));
 
     case 'taskLogLoaded':
       if (stale(state, action.sessionId)) return step(state);
@@ -145,12 +145,14 @@ export function reduce(state: TuiState, action: Action): Step {
         const transport = update.transport;
         const awaitingReason = update.awaitingReason;
         const continuable = update.continuable === true;
+        const awaitingApproval = update.awaitingApproval;
         if (
           update.status !== t.status || idleSince !== (t.idleSince ?? null) || !sameIsolation(isolation, t.isolation)
-          || !sameTransport(transport, t.transport) || awaitingReason !== t.awaitingReason || continuable !== (t.continuable ?? false)
+          || !sameTransport(transport, t.transport) || awaitingReason !== t.awaitingReason
+          || continuable !== (t.continuable ?? false) || awaitingApproval !== t.awaitingApproval
         ) {
           changed = true;
-          return { ...t, status: update.status, idleSince, isolation, transport, awaitingReason, continuable };
+          return { ...t, status: update.status, idleSince, isolation, transport, awaitingReason, continuable, awaitingApproval };
         }
         return t;
       });

@@ -186,6 +186,8 @@ export function followSession(state: TuiState, message: SessionMessage): TuiStat
   const heard = turnActivity(hear(state, message));
   if (message.type === 'approval_request') {
     const { id, kind, subject, scope, detail } = message;
+    // A task runner's request is answered in its task view, never in the planner's modal.
+    if (kind === 'runner_tool') return heard;
     return enqueueApproval(heard, { id, kind, subject, scope, ...(detail ? { detail } : {}) });
   }
   return message.type === 'approval_settled' ? dropApproval(heard, message.id) : heard;

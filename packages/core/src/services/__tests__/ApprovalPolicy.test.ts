@@ -196,7 +196,7 @@ describe('PendingApprovals', () => {
     pending.resolve(onRequest.mock.calls[0][0].id, false);
 
     expect(await answer).toBe(false);
-    expect(onSettled).toHaveBeenCalledWith(expect.any(String), false);
+    expect(onSettled).toHaveBeenCalledWith(expect.any(String), false, { request: req(), decision: { decision: 'deny' } });
   });
 
   it('ignores an unknown or already-settled id', async () => {
@@ -246,5 +246,87 @@ describe('PendingApprovals', () => {
     const answer = pending.ask(req());
     pending.clear();
     expect(await answer).toBe(false);
+  });
+});
+
+describe('PendingApprovals decisions (ADR-0018, A1)', () => {
+  const runnerReq = (overrides: Partial<ApprovalRequest> = {}) =>
+    req({ kind: 'runner_tool', subject: 'Write(/repo/a.txt)', scope: 'Write', taskId: 't1', allowForTask: true, ...overrides });
+
+  it('carries the whole answer: allow, allow for this task, deny with a note', async () => {
+    const pending = new PendingApprovals();
+    const allowed = pending.decide(runnerReq(), { id: 'a' });
+    const forTask = pending.decide(runnerReq(), { id: 'b' });
+    const denied = pending.decide(runnerReq(), { id: 'c' });
+
+    pending.resolve('a', { decision: 'allow' });
+    pending.resolve('b', { decision: 'allowForTask' });
+    pending.resolve('c', { decision: 'deny', note: 'use notes/ instead' });
+    expect(await allowed).toEqual({ decision: 'allow' });
+    expect(await forTask).toEqual({ decision: 'allowForTask' });
+    expect(await denied).toEqual({ decision: 'deny', note: 'use notes/ instead' });
+  });
+
+  it('still takes a planner surface\'s yes or no', async () => {
+    const pending = new PendingApprovals();
+    const yes = pending.decide(req(), { id: 'y' });
+    const no = pending.ask(req(), { id: 'n' });
+    pending.resolve('y', true);
+    pending.resolve('n', false);
+    expect(await yes).toEqual({ decision: 'allow' });
+    expect(await no).toBe(false);
+  });
+
+  it('makes allow for this task a plain allow when the request never offered it', async () => {
+    const pending = new PendingApprovals();
+    const answer = pending.decide(runnerReq({ allowForTask: false }), { id: 'a' });
+    pending.resolve('a', { decision: 'allowForTask' });
+    expect(await answer).toEqual({ decision: 'allow' });
+  });
+
+  it('waits for a runner\'s answer with no timeout, while the planner\'s still expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = new PendingApprovals({ timeoutMs: 1000 });
+      const runner = pending.decide(runnerReq(), { id: 'r', noTimeout: true });
+      const planner = pending.ask(req());
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+
+      expect(await planner).toBe(false);
+      expect(pending.outstanding().map((p) => p.id)).toEqual(['r']);
+      pending.resolve('r', { decision: 'allow' });
+      expect(await runner).toEqual({ decision: 'allow' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hands the answer to onDecision before anything awaiting it runs', () => {
+    const pending = new PendingApprovals();
+    const seen: string[] = [];
+    void pending.decide(runnerReq(), { id: 'r', onDecision: (d) => seen.push(d.decision) });
+    pending.resolve('r', { decision: 'deny' });
+    expect(seen).toEqual(['deny']);
+  });
+
+  it('refuses an id already in use rather than overwriting its request', async () => {
+    const pending = new PendingApprovals();
+    const first = pending.decide(runnerReq(), { id: 'r' });
+    expect(await pending.decide(runnerReq({ subject: 'Bash(rm -rf /)' }), { id: 'r' })).toEqual({ decision: 'deny' });
+    expect(pending.outstanding()).toHaveLength(1);
+    expect(pending.outstanding()[0].request.subject).toBe('Write(/repo/a.txt)');
+    pending.resolve('r', true);
+    await first;
+  });
+
+  it('clears only the requests it is told to', async () => {
+    const pending = new PendingApprovals();
+    const runner = pending.decide(runnerReq(), { id: 'r', noTimeout: true });
+    const planner = pending.ask(req());
+    pending.clear((r) => r.kind !== 'runner_tool');
+    expect(await planner).toBe(false);
+    expect(pending.outstanding().map((p) => p.id)).toEqual(['r']);
+    pending.clear();
+    expect(await runner).toEqual({ decision: 'deny' });
   });
 });

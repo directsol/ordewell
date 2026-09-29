@@ -4,7 +4,7 @@ import { conversationLines, tokenLine } from './blocks';
 import { chatEditorRoomFor, chatPaneWidth, planPaneWidth } from './geometry';
 import { taskRepoNames } from '../isolation';
 import { SLASH_COMMANDS, type SlashCategory } from './slash';
-import { findTask, isTaskRunning, planRows, plannerInFlight, selectedPlanRow, type PlanRow, type TaskView, type TuiState } from './state';
+import { findTask, isTaskRunning, planRows, plannerInFlight, selectedPlanRow, waitingApproval, type PlanRow, type TaskView, type TuiState } from './state';
 import { modesForTask } from './taskAssignment';
 import { ALL_PROVIDERS, capConflictFiles, hasHiddenDetail, runnerForProvider, taskOrderLabel, type AiProvider, type AwaitingReason, type DisplayBlock } from '@ordewell/core';
 
@@ -131,11 +131,13 @@ function queuedTaskBubble(text: string, selected: boolean, cols: number): string
 }
 
 /**
- * What the task view's state is, in the header's words: a live turn wins, then
- * what an `awaiting_user` task waits on (a checkpoint over plain input), then
- * the task's own status.
+ * What the task view's state is, in the header's words: a runner request
+ * waiting for an answer wins — the turn is live but stopped on it — then a
+ * live turn, then what an `awaiting_user` task waits on (a checkpoint over
+ * plain input), then the task's own status.
  */
 function taskActivity(task: TaskView | undefined, working: boolean): string {
+  if (task?.awaitingApproval) return approvalLabel(task.awaitingApproval);
   if (working) return 'working';
   if (task?.status === 'awaiting_user') {
     return task.awaitingReason ? AWAITING_LABEL[task.awaitingReason] : 'waiting for your input';
@@ -152,7 +154,10 @@ function taskHeaderLines(state: TuiState, tv: NonNullable<TuiState['taskView']>,
     task?.assignedRunner ?? '',
     taskActivity(task, tv.view.working),
   ].filter(Boolean);
-  const hint = ['ctrl-r remove queued', 'ctrl-x interrupt'];
+  const approval = waitingApproval(tv);
+  const hint = approval
+    ? ['ctrl-y allow', ...(approval.allowForTask ? ['ctrl-t allow for task'] : []), 'ctrl-g deny (composer text is the note)']
+    : ['ctrl-r remove queued', 'ctrl-x interrupt'];
   const index = tv.attempts.indexOf(tv.attempt);
   if (tv.attempts.length > 1) hint.push(`alt←/→ attempt ${index >= 0 ? index + 1 : 1}/${tv.attempts.length}`);
   hint.push('esc back');
@@ -445,6 +450,10 @@ const AWAITING_LABEL: Record<AwaitingReason, string> = {
   conflict: 'merge conflict',
 };
 
+function approvalLabel(count: number): string {
+  return count > 1 ? `waiting for approval (${count})` : 'waiting for approval';
+}
+
 /** Static marker for a running task whose runner has gone quiet — distinct from both the busy spinner and the awaiting_user '?'. */
 const IDLE_ICON = '~';
 
@@ -633,7 +642,9 @@ function taskLines(state: TuiState, row: PlanRow, index: number, cols: number): 
   // case that needs the user: an agent stopped at a question in its terminal.
   const structured = task.transport?.kind === 'structured';
   const waiting = task.status === 'awaiting_user' && task.awaitingReason ? AWAITING_LABEL[task.awaitingReason] : '';
-  const activity = idle ? (structured ? 'quiet' : 'quiet — t opens its terminal') : running ? 'working' : waiting;
+  const activity = task.awaitingApproval
+    ? `${approvalLabel(task.awaitingApproval)} — t opens it`
+    : idle ? (structured ? 'quiet' : 'quiet — t opens its terminal') : running ? 'working' : waiting;
   const meta = [activity, runner, structured ? 'structured' : '', model].filter(Boolean).join(' · ');
   if (meta) lines.push(style.grey(truncate(`${bodyPad}${meta}`, cols)));
   // Asked for structured and did not get it: said on the row, never silently.
@@ -765,7 +776,7 @@ export function helpLayout(rows: number, cols: number): HelpLayout {
     style.grey('tab switches panes · pgup/pgdn scroll · ctrl-o toggles full detail · esc takes back a queued prompt, otherwise esc twice stops · ctrl-l clears · ctrl-c quits'),
   );
   body.push(
-    style.grey('in a task view (t or /terminal on a structured task): ctrl-r removes the selected queued message · ctrl-x interrupts · alt←/→ changes attempt · esc returns'),
+    style.grey('in a task view (t or /terminal on a structured task): ctrl-r removes the selected queued message · ctrl-x interrupts · ctrl-y allows a tool request · ctrl-t allows it for the task · ctrl-g denies it, with the composer text as the note · alt←/→ changes attempt · esc returns'),
   );
 
   // The sheet is a table: clip long descriptions to one row each rather than

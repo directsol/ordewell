@@ -87,6 +87,7 @@ export default function App() {
   const [taskOutput, setTaskOutput] = useState<TaskOutputMap>({});
   /** Advisory silence timestamp per task id, keyed like taskOutput; null/absent means not stalled. */
   const [taskIdle, setTaskIdle] = useState<Record<string, string | null>>({});
+  const [taskApprovals, setTaskApprovals] = useState<Record<string, number>>({});
   /** Per-task isolation state (ADR-0013); only tasks an isolated run has touched appear. */
   const [taskIsolation, setTaskIsolation] = useState<Record<string, TaskIsolation>>({});
   /** The end-of-run handoff card, present until the run is merged, discarded or restarted. */
@@ -153,6 +154,7 @@ export default function App() {
             setCheckpoint(null);
             setTaskOutput({});
             setTaskIdle({});
+            setTaskApprovals({});
             setTaskIsolation({});
             setHandoff(null);
             setMergeResult(null);
@@ -244,6 +246,10 @@ export default function App() {
 
         case 'taskIdle':
           setTaskIdle((prev) => ({ ...prev, [msg.taskId]: msg.idleSince }));
+          break;
+
+        case 'taskApprovals':
+          setTaskApprovals((prev) => ((prev[msg.taskId] ?? 0) === msg.count ? prev : { ...prev, [msg.taskId]: msg.count }));
           break;
 
         case 'taskIsolation':
@@ -867,6 +873,7 @@ export default function App() {
             isExecuting={isExecuting}
             taskOutput={taskOutput}
             taskIdle={taskIdle}
+            taskApprovals={taskApprovals}
             runnerLabels={runnerLabelMap}
             runners={runnerList}
             onRunnerChange={handleRunnerChange}

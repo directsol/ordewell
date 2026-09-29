@@ -38,6 +38,11 @@ function taskStart(overrides: Partial<TaskStartOptions> = {}): TaskStartOptions 
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+async function until(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !condition(); i++) await tick();
+  if (!condition()) throw new Error('condition never held');
+}
+
 describe('ClaudeCodeAdapter start switch', () => {
   it('starts a planner with exactly the read-only flags it always had', async () => {
     const { spawned, processDeps } = deps([]);
@@ -157,27 +162,183 @@ describe('ClaudeCodeAdapter in task mode', () => {
     adapter.dispose();
   });
 
-  it('still denies a tool request, but passes the whole request on', async () => {
-    const { spawned, processDeps } = deps([fixture('claude-code', 'task-permission'), fixture('claude-code', 'task-permission-after-deny')]);
+  it('leaves a tool request open for someone to answer, and passes the whole request on', async () => {
+    const { spawned, processDeps } = deps([fixture('claude-code', 'permission-task')]);
     const adapter = new ClaudeCodeAdapter(processDeps);
     await adapter.start(taskStart({ mode: 'default', flags: { permissionMode: 'default', effortArgs: [] } }));
     const events: AgentEvent[] = [];
-    await adapter.send('Write notes.txt', (e) => events.push(e));
+    void adapter.send('Write a.txt', (e) => events.push(e));
+    await until(() => events.some((e) => e.type === 'permission_request'));
 
-    const request = events.find((e) => e.type === 'permission_request');
-    expect(request).toEqual({
+    expect(events.find((e) => e.type === 'permission_request')).toEqual({
       type: 'permission_request',
-      id: 'c5ba4691-a850-402b-a475-a9513770ebbb',
+      id: '9a948184-6792-4049-85b1-3e837387f618',
       name: 'Write',
-      detail: JSON.stringify({ file_path: '/repo/notes.txt', content: 'hi' }),
-      input: { file_path: '/repo/notes.txt', content: 'hi' },
+      detail: JSON.stringify({ file_path: '/repo/a.txt', content: 'a' }),
+      input: { file_path: '/repo/a.txt', content: 'a' },
       suggestions: [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }],
-      toolUseId: 'toolu_014wFqd7q2wd1RXyFn21E3Fs',
+      toolUseId: 'toolu_01TxT55eyjF5qKKGmJHwiDbe',
     });
-    const answer = JSON.parse(spawned.processes[0].written[1]) as { response: { request_id: string; response: { behavior: string } } };
-    expect(answer.response.request_id).toBe('c5ba4691-a850-402b-a475-a9513770ebbb');
-    expect(answer.response.response.behavior).toBe('deny');
+    await tick();
+    expect(spawned.processes[0].written).toHaveLength(1);
+    expect(events.some((e) => e.type === 'turn_end')).toBe(false);
+    adapter.dispose();
+  });
+
+  it('answers Allow with the call\'s own input, then Allow for this task with Claude\'s own suggestions', async () => {
+    const { spawned, processDeps } = deps([
+      fixture('claude-code', 'permission-task'),
+      fixture('claude-code', 'permission-task-allowed'),
+      fixture('claude-code', 'permission-task-allowed-for-task'),
+    ]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart({ mode: 'default', flags: { permissionMode: 'default', effortArgs: [] } }));
+    const events: AgentEvent[] = [];
+    const turn = adapter.send('Write a.txt and b.txt', (e) => events.push(e));
+    const requests = () => events.filter((e) => e.type === 'permission_request');
+
+    await until(() => requests().length === 1);
+    expect(adapter.answerPermission('9a948184-6792-4049-85b1-3e837387f618', { decision: 'allow' })).toBe(true);
+    expect(JSON.parse(spawned.processes[0].written[1])).toEqual({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: '9a948184-6792-4049-85b1-3e837387f618',
+        response: { behavior: 'allow', updatedInput: { file_path: '/repo/a.txt', content: 'a' } },
+      },
+    });
+
+    await until(() => requests().length === 2);
+    expect(adapter.answerPermission('5ab6f7de-9bb1-4e03-9e80-8c3aa64c0506', { decision: 'allowForTask' })).toBe(true);
+    expect(JSON.parse(spawned.processes[0].written[2])).toEqual({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: '5ab6f7de-9bb1-4e03-9e80-8c3aa64c0506',
+        response: {
+          behavior: 'allow',
+          updatedInput: { file_path: '/repo/b.txt', content: 'b' },
+          updatedPermissions: [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }],
+        },
+      },
+    });
+
+    await turn;
+    // The recorded run: both writes went through, and the third call ran
+    // unasked under the session-scoped grant.
+    expect(events.filter((e) => e.type === 'tool_result').map((e) => e.type === 'tool_result' && e.success)).toEqual([true, true, true]);
+    expect(requests()).toHaveLength(2);
     expect(events.at(-1)).toEqual({ type: 'turn_end' });
+    adapter.dispose();
+  });
+
+  it('answers Deny with the note as the message the agent reads', async () => {
+    const { spawned, processDeps } = deps([fixture('claude-code', 'permission-task-deny'), fixture('claude-code', 'permission-task-denied')]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart({ mode: 'default', flags: { permissionMode: 'default', effortArgs: [] } }));
+    const events: AgentEvent[] = [];
+    void adapter.send('Write d.txt', (e) => events.push(e));
+    await until(() => events.some((e) => e.type === 'permission_request'));
+
+    expect(adapter.answerPermission('160adb6f-1e51-4d65-a12f-911f10dd46ae', { decision: 'deny', note: 'Not this one — write it to notes/c.txt instead.' })).toBe(true);
+    expect(JSON.parse(spawned.processes[0].written[1])).toEqual({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: '160adb6f-1e51-4d65-a12f-911f10dd46ae',
+        response: { behavior: 'deny', message: 'Not this one — write it to notes/c.txt instead.' },
+      },
+    });
+    await until(() => events.filter((e) => e.type === 'permission_request').length === 2);
+    expect(events.find((e) => e.type === 'tool_result')).toMatchObject({ success: false, output: 'Not this one — write it to notes/c.txt instead.' });
+    adapter.dispose();
+  });
+
+  it('denies without a note in words of its own, since the CLI requires a message', async () => {
+    const { spawned, processDeps } = deps([fixture('claude-code', 'permission-task-deny')]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart());
+    const events: AgentEvent[] = [];
+    void adapter.send('Write d.txt', (e) => events.push(e));
+    await until(() => events.some((e) => e.type === 'permission_request'));
+    adapter.answerPermission('160adb6f-1e51-4d65-a12f-911f10dd46ae', { decision: 'deny', note: '   ' });
+    const answer = JSON.parse(spawned.processes[0].written[1]) as { response: { response: { behavior: string; message: string } } };
+    expect(answer.response.response.behavior).toBe('deny');
+    expect(answer.response.response.message).toMatch(/\S/);
+    adapter.dispose();
+  });
+
+  it('answers Allow for this task as a plain allow when Claude suggested nothing', async () => {
+    const noSuggestions = fixture('claude-code', 'permission-task').replace(/,"permission_suggestions":\[[^\]]*\]/, '');
+    const { spawned, processDeps } = deps([noSuggestions]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart());
+    const events: AgentEvent[] = [];
+    void adapter.send('Write a.txt', (e) => events.push(e));
+    await until(() => events.some((e) => e.type === 'permission_request'));
+    expect(events.find((e) => e.type === 'permission_request')).toMatchObject({ suggestions: [] });
+    adapter.answerPermission('9a948184-6792-4049-85b1-3e837387f618', { decision: 'allowForTask' });
+    const answer = JSON.parse(spawned.processes[0].written[1]) as { response: { response: Record<string, unknown> } };
+    expect(answer.response.response).toEqual({ behavior: 'allow', updatedInput: { file_path: '/repo/a.txt', content: 'a' } });
+    adapter.dispose();
+  });
+
+  it('answers each request once, and nothing it never asked', async () => {
+    const { spawned, processDeps } = deps([fixture('claude-code', 'permission-task')]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart());
+    const events: AgentEvent[] = [];
+    void adapter.send('Write a.txt', (e) => events.push(e));
+    await until(() => events.some((e) => e.type === 'permission_request'));
+    expect(adapter.answerPermission('not-asked', { decision: 'allow' })).toBe(false);
+    expect(adapter.answerPermission('9a948184-6792-4049-85b1-3e837387f618', { decision: 'allow' })).toBe(true);
+    expect(adapter.answerPermission('9a948184-6792-4049-85b1-3e837387f618', { decision: 'deny' })).toBe(false);
+    expect(spawned.processes[0].written).toHaveLength(2);
+    adapter.dispose();
+  });
+
+  it('reports a request Claude withdraws when the turn is interrupted, and takes no answer for it', async () => {
+    const { spawned, processDeps } = deps([
+      fixture('claude-code', 'permission-task-deny'),
+      fixture('claude-code', 'permission-task-denied'),
+      (written, proc) => {
+        const request = JSON.parse(written) as { request_id: string };
+        proc.emitStdout(fixture('claude-code', 'permission-task-cancelled', { REQUEST_ID: request.request_id }));
+      },
+    ]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart());
+    const events: AgentEvent[] = [];
+    const turn = adapter.send('Write d.txt', (e) => events.push(e));
+    await until(() => events.some((e) => e.type === 'permission_request'));
+    adapter.answerPermission('160adb6f-1e51-4d65-a12f-911f10dd46ae', { decision: 'deny' });
+    await until(() => events.filter((e) => e.type === 'permission_request').length === 2);
+
+    await expect(adapter.interrupt(1000)).resolves.toBe(true);
+    await turn;
+    expect(events).toContainEqual({ type: 'permission_cancelled', id: '04436c5a-8682-477d-a23f-34bbb9f814f3' });
+    expect(adapter.answerPermission('04436c5a-8682-477d-a23f-34bbb9f814f3', { decision: 'allow' })).toBe(false);
+    expect(events.at(-1)).toEqual({ type: 'turn_end', interrupted: true });
+    expect(spawned.processes[0].written).toHaveLength(3);
+    adapter.dispose();
+  });
+
+  it('still denies a planner\'s request itself, at once, with nothing left open', async () => {
+    const { spawned, processDeps } = deps([fixture('claude-code', 'permission-task')]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start({ kind: 'planner', cwd: '/repo', systemPrompt: 'PLAN' });
+    const events: AgentEvent[] = [];
+    void adapter.send('Plan it', (e) => events.push(e));
+    await until(() => spawned.processes[0].written.length === 2);
+    const answer = JSON.parse(spawned.processes[0].written[1]) as { response: { response: { behavior: string } } };
+    expect(answer.response.response.behavior).toBe('deny');
+    expect(events.find((e) => e.type === 'permission_request')).toEqual({
+      type: 'permission_request',
+      id: '9a948184-6792-4049-85b1-3e837387f618',
+      name: 'Write',
+      detail: JSON.stringify({ file_path: '/repo/a.txt', content: 'a' }),
+    });
+    expect(adapter.answerPermission('9a948184-6792-4049-85b1-3e837387f618', { decision: 'allow' })).toBe(false);
     adapter.dispose();
   });
 

@@ -2,10 +2,10 @@ import type { QueuedTaskMessage, StructuredTurnEnd } from '../interfaces/ITermin
 import type { TaskLogEvent } from '../models/TaskLog';
 import { addPlannerUsage, isMeasured, usageLine, type PlannerUsage } from '../models/Usage';
 import { mapAgentTool, normalizeAgentArgs } from '../services/harness/agentTools';
-import type { MessageBlock, SubagentChild, SubagentStatus, ThinkingDisplayBlock } from './blocks';
+import type { ApprovalBlock, MessageBlock, SubagentChild, SubagentStatus, ThinkingDisplayBlock } from './blocks';
 import { toolHeadline } from './format';
 import {
-  append, appendOutput, closeOpenBlocks, findLastIndex, laneAppend, laneBlocks, laneOf, laneReplace, setUsageLine, updateSubagent, sealed,
+  append, appendOutput, replaceAt, closeOpenBlocks, findLastIndex, laneAppend, laneBlocks, laneOf, laneReplace, setUsageLine, updateSubagent, sealed,
   type BlockList, type Lane,
 } from './lanes';
 import { finishedTool, pendingTool, settledMessage } from './records';
@@ -161,6 +161,43 @@ function reportUsage(view: TaskLogView, { record }: Event<'usage'>): TaskLogView
   return isMeasured(usage.totals) ? setUsageLine(next, usageLine(usage)) : next;
 }
 
+/** A runner's tool request, read the way its call's row reads: `Bash(npm test)`. */
+export function runnerToolSubject(tool: string, args: string): string {
+  const { tool: mapped, toolLabel } = mapAgentTool(tool);
+  const parsed = parseArgs(args);
+  const headline = toolHeadline(mapped, parsed ? JSON.stringify(normalizeAgentArgs(mapped, parsed)) : args, toolLabel);
+  return headline.keyArg ? `${headline.name}(${headline.keyArg})` : headline.name;
+}
+
+function requestApproval(view: TaskLogView, { approvalId, tool, args, allowForTask, toolCallId }: Event<'approval_requested'>): TaskLogView {
+  if (view.blocks.some((b) => b.type === 'approval' && b.approvalId === approvalId)) return view;
+  return append(view, (id) => ({
+    type: 'approval', id, approvalId, kind: 'runner_tool',
+    subject: runnerToolSubject(tool, args),
+    scope: tool,
+    status: 'pending',
+    ...(allowForTask ? { allowForTask } : {}),
+    ...(toolCallId ? { toolCallId } : {}),
+  }));
+}
+
+function settleApproval(view: TaskLogView, approvalId: string, settle: (block: ApprovalBlock) => ApprovalBlock): TaskLogView {
+  const i = findLastIndex(view.blocks, (b) => b.type === 'approval' && b.approvalId === approvalId);
+  const block = view.blocks[i];
+  if (block?.type !== 'approval' || block.status !== 'pending') return view;
+  return { ...view, blocks: replaceAt(view.blocks, i, settle(block)) };
+}
+
+function decideApproval(view: TaskLogView, { approvalId, decision, note }: Event<'approval_decided'>): TaskLogView {
+  return settleApproval(view, approvalId, (block) => ({
+    ...block,
+    status: decision === 'deny' ? 'denied' : 'granted',
+    decidedBy: 'asked',
+    ...(decision === 'allowForTask' ? { forTask: true } : {}),
+    ...(note ? { note } : {}),
+  }));
+}
+
 function startTurn(view: TaskLogView, { message, messageId }: Event<'turn_start'>): TaskLogView {
   const queued = messageId ? view.queued.filter((m) => m.id !== messageId) : view.queued;
   return append({ ...view, queued, working: true }, (id) => settledMessage(id, 'user', message));
@@ -205,6 +242,9 @@ export function reduceTaskLog(view: TaskLogView, event: TaskLogEvent): TaskLogVi
     case 'message_queued': return queueMessage(view, event);
     case 'message_removed': return unqueueMessage(view, event);
     case 'error': return appendOutput(view, null, (id) => settledMessage(id, 'error', event.message));
+    case 'approval_requested': return requestApproval(view, event);
+    case 'approval_decided': return decideApproval(view, event);
+    case 'approval_withdrawn': return settleApproval(view, event.approvalId, (block) => ({ ...block, status: 'withdrawn' }));
     default: return view;
   }
 }

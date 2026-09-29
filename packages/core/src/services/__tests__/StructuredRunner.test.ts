@@ -77,6 +77,11 @@ function userTurns(written: string[]): string[] {
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+async function until(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !condition(); i++) await tick();
+  if (!condition()) throw new Error('condition never held');
+}
+
 describe('StructuredRunner spawn', () => {
   it.each([
     ['default', 'default'],
@@ -208,13 +213,54 @@ describe('StructuredSession output', () => {
     turn.session.kill();
   });
 
-  it('passes a runner permission request on as an event', async () => {
-    const { runner } = harness([fixture('claude-code', 'task-permission'), fixture('claude-code', 'task-permission-after-deny')]);
+  it('passes a runner permission request on under an id of its own, and answers it through the session', async () => {
+    const { runner, spawned } = harness([fixture('claude-code', 'permission-task'), fixture('claude-code', 'permission-task-allowed')]);
     const turn = observe(await runner.spawn(options({ mode: 'default' })));
-    await turn.nextTurnEnd();
+    await until(() => turn.events.some((e) => e.type === 'permission_request'));
     const request = turn.events.find((e) => e.type === 'permission_request');
-    expect(request).toMatchObject({ name: 'Write', input: { file_path: '/repo/notes.txt' }, suggestions: [{ type: 'setMode', mode: 'acceptEdits' }] });
+    expect(request).toMatchObject({ name: 'Write', input: { file_path: '/repo/a.txt' }, suggestions: [{ type: 'setMode', mode: 'acceptEdits' }] });
+    const id = request?.type === 'permission_request' ? request.id : '';
+    expect(id).toBe(`${turn.session.id}-perm-1`);
+    // Still mid-turn: an approval is not the end of one.
+    expect(turn.session.turnState()).toBe('working');
+
+    expect(turn.session.answerPermission(id, { decision: 'allow' })).toBe(true);
+    expect(turn.events).toContainEqual({ type: 'permission_decided', id, decision: { decision: 'allow' } });
+    const answer = JSON.parse(spawned.processes[0].written[1]) as { response: { request_id: string } };
+    expect(answer.response.request_id).toBe('9a948184-6792-4049-85b1-3e837387f618');
+    expect(turn.session.answerPermission(id, { decision: 'deny' })).toBe(false);
     turn.session.kill();
+  });
+
+  it('withdraws a request the runner cancels, and one left open when it goes', async () => {
+    const { runner } = harness([
+      fixture('claude-code', 'permission-task-deny'),
+      fixture('claude-code', 'permission-task-denied'),
+      (written, proc) => {
+        const request = JSON.parse(written) as { request_id: string };
+        proc.emitStdout(fixture('claude-code', 'permission-task-cancelled', { REQUEST_ID: request.request_id }));
+      },
+    ]);
+    const turn = observe(await runner.spawn(options({ mode: 'default' })));
+    const requests = () => turn.events.flatMap((e) => (e.type === 'permission_request' ? [e.id] : []));
+    await until(() => requests().length === 1);
+    turn.session.answerPermission(requests()[0], { decision: 'deny', note: 'Not this one' });
+    await until(() => requests().length === 2);
+
+    await turn.session.interrupt();
+    expect(turn.events).toContainEqual({ type: 'permission_withdrawn', id: requests()[1] });
+    expect(turn.turnEnds).toEqual(['interrupted']);
+    expect(turn.session.answerPermission(requests()[1], { decision: 'allow' })).toBe(false);
+    turn.session.kill();
+  });
+
+  it('withdraws what is still open when the session is killed', async () => {
+    const { runner } = harness([fixture('claude-code', 'permission-task')]);
+    const turn = observe(await runner.spawn(options({ mode: 'default' })));
+    await until(() => turn.events.some((e) => e.type === 'permission_request'));
+    const request = turn.events.find((e) => e.type === 'permission_request');
+    turn.session.kill();
+    expect(turn.events.at(-1)).toEqual({ type: 'permission_withdrawn', id: request?.type === 'permission_request' ? request.id : '' });
   });
 });
 

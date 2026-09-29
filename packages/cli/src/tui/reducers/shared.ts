@@ -1,4 +1,4 @@
-import type { AwaitingReason, ConversationMessage, PlannerUsage, ResearchLogEntry, RunnerTransport, SessionMessage, TaskLogEvent } from '@ordewell/core';
+import type { ApprovalDecision, AwaitingReason, ConversationMessage, PlannerUsage, ResearchLogEntry, RunnerTransport, SessionMessage, TaskLogEvent } from '@ordewell/core';
 import type { Key } from '../keys';
 import type {
   HandoffView, LandedTaskView, ModelView, ModeView, RewindTargetView, RunnerView, SessionView,
@@ -14,6 +14,7 @@ export interface TaskStatusUpdate {
   transport?: TaskTransportView;
   awaitingReason?: AwaitingReason;
   continuable?: boolean;
+  awaitingApproval?: number;
 }
 
 /** Side effects the runtime performs; the reducer itself stays pure. */
@@ -79,6 +80,8 @@ export type Effect =
   /** Continue a finished structured task in its saved session, with `text` as its next turn (ADR-0018, K1). */
   | { type: 'continueTask'; sessionId: string; taskId: string; text: string; watch?: boolean }
   | { type: 'respondApproval'; sessionId: string; approvalId: string; granted: boolean }
+  /** A task runner's tool request, answered from its task view (ADR-0018, A1). */
+  | { type: 'answerTaskApproval'; sessionId: string; approvalId: string; answer: ApprovalDecision }
   /** Startup refreshes silently; only a typed `/refresh` sets `announce`. */
   | { type: 'refresh'; announce?: boolean }
   | { type: 'exit' };

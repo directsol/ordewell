@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type {
-  ApprovalBlock, ApprovalKind, ApprovalSource, DisplayBlock, MessageBlock, PlanBlock, SubagentBlock, SubagentStatus,
+  ApprovalBlock, ApprovalDecision, ApprovalKind, ApprovalSource, DisplayBlock, MessageBlock, PlanBlock, SubagentBlock, SubagentStatus,
   ThinkingDisplayBlock, ToolBlock, ToolStatus,
 } from '@ordewell/core';
 import { outputLines, outputPreview } from '@ordewell/core/plan-utils';
@@ -167,6 +167,7 @@ const APPROVAL_KIND: Record<ApprovalKind, string> = {
   shell_command: 'Run a command',
   url_fetch: 'Fetch a URL',
   external_path: 'Read outside the workspace',
+  runner_tool: 'Use a tool',
 };
 
 // The source the policy decided under. `asked` is omitted: a card a user
@@ -181,13 +182,54 @@ function approvalSourceLabel(source: ApprovalSource | undefined): string {
   }
 }
 
-export function ApprovalCard({ block, onResolve }: { block: ApprovalBlock; onResolve: (id: string, granted: boolean) => void }) {
+function approvalStatusLabel(block: ApprovalBlock): string {
   const silent = block.decidedBy !== undefined && block.decidedBy !== 'asked';
-  const status = block.status === 'pending'
-    ? 'Waiting for you'
-    : block.status === 'granted'
-      ? (silent ? `Auto-approved (${approvalSourceLabel(block.decidedBy)})` : 'Approved')
-      : (silent ? `Auto-denied (${approvalSourceLabel(block.decidedBy)})` : 'Denied');
+  switch (block.status) {
+    case 'pending': return 'Waiting for you';
+    case 'granted': return silent ? `Auto-approved (${approvalSourceLabel(block.decidedBy)})` : block.forTask ? 'Approved for this task' : 'Approved';
+    case 'denied': return silent ? `Auto-denied (${approvalSourceLabel(block.decidedBy)})` : 'Denied';
+    case 'withdrawn': return 'Withdrawn';
+  }
+}
+
+/**
+ * A task runner's tool request (ADR-0018, A1), in its task's log. Its answers
+ * are the runner's own: Allow, Allow for this task when the runner offered a
+ * grant for it, and Deny with an optional note the agent reads.
+ */
+function RunnerApprovalCard({ block, onAnswer }: { block: ApprovalBlock; onAnswer: (id: string, decision: ApprovalDecision) => void }) {
+  const [note, setNote] = useState('');
+  const pending = block.status === 'pending' && block.approvalId !== undefined;
+  const answer = (decision: ApprovalDecision) => { if (block.approvalId) onAnswer(block.approvalId, decision); };
+  return (
+    <div className={`approval-card ${block.status}`} data-status={block.status}>
+      <div className="approval-card-head">
+        <span className="approval-card-kind">{APPROVAL_KIND[block.kind]}</span>
+        <span className="approval-card-status">{approvalStatusLabel(block)}</span>
+      </div>
+      <code className="approval-card-subject">{block.subject}</code>
+      {block.note && <div className="approval-card-detail">Note to the agent: {block.note}</div>}
+      {pending && (
+        <>
+          <input className="approval-card-note" type="text" value={note} placeholder="Note to the agent if you deny (optional)"
+            onChange={(e) => setNote(e.target.value)} />
+          <div className="approval-card-actions">
+            <button type="button" className="approval-card-allow" onClick={() => answer({ decision: 'allow' })}>Allow</button>
+            {block.allowForTask && (
+              <button type="button" className="approval-card-allow-task" title="Allow it, and let the runner keep the grant it proposed for the rest of this task"
+                onClick={() => answer({ decision: 'allowForTask' })}>Allow for this task</button>
+            )}
+            <button type="button" className="approval-card-deny"
+              onClick={() => answer(note.trim() ? { decision: 'deny', note: note.trim() } : { decision: 'deny' })}>Deny</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+export function ApprovalCard({ block, onResolve }: { block: ApprovalBlock; onResolve: (id: string, granted: boolean) => void }) {
+  const status = approvalStatusLabel(block);
   return (
     <div className={`approval-card ${block.status}`} data-status={block.status}>
       <div className="approval-card-head">
@@ -212,12 +254,13 @@ export function ApprovalCard({ block, onResolve }: { block: ApprovalBlock; onRes
 }
 
 function Block({
-  block, expanded, onShowPlan, onResolveApproval,
+  block, expanded, onShowPlan, onResolveApproval, onAnswerApproval,
 }: {
   block: DisplayBlock;
   expanded: boolean;
   onShowPlan: () => void;
   onResolveApproval: (id: string, granted: boolean) => void;
+  onAnswerApproval: (id: string, decision: ApprovalDecision) => void;
 }) {
   switch (block.type) {
     case 'message':
@@ -231,7 +274,9 @@ function Block({
     case 'plan':
       return <PlanMarker block={block} onShowPlan={onShowPlan} />;
     case 'approval':
-      return <ApprovalCard block={block} onResolve={onResolveApproval} />;
+      return block.kind === 'runner_tool'
+        ? <RunnerApprovalCard block={block} onAnswer={onAnswerApproval} />
+        : <ApprovalCard block={block} onResolve={onResolveApproval} />;
     // The token line is pinned below the conversation, not drawn in it.
     case 'usage':
       return null;
@@ -241,17 +286,20 @@ function Block({
 const MemoBlock = React.memo(Block);
 
 export function ConversationBlocks({
-  blocks, detailAll, onShowPlan, onResolveApproval = noop,
+  blocks, detailAll, onShowPlan, onResolveApproval = noop, onAnswerApproval = noop,
 }: {
   blocks: readonly DisplayBlock[];
   detailAll: boolean;
   onShowPlan: () => void;
   onResolveApproval?: (id: string, granted: boolean) => void;
+  /** A task runner's request, answered in its task log (ADR-0018, A1). */
+  onAnswerApproval?: (id: string, decision: ApprovalDecision) => void;
 }) {
   return (
     <div className="conversation">
       {blocks.map((block) => (
-        <MemoBlock key={block.id} block={block} expanded={detailAll} onShowPlan={onShowPlan} onResolveApproval={onResolveApproval} />
+        <MemoBlock key={block.id} block={block} expanded={detailAll} onShowPlan={onShowPlan}
+          onResolveApproval={onResolveApproval} onAnswerApproval={onAnswerApproval} />
       ))}
     </div>
   );

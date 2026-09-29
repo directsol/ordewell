@@ -217,6 +217,7 @@ const APPROVAL_KIND: Record<ApprovalKind, string> = {
   shell_command: 'Run a command',
   url_fetch: 'Fetch a URL',
   external_path: 'Read outside the workspace',
+  runner_tool: 'Use a tool',
 };
 
 // A request the user answered reads "Approved": naming `asked` would state the obvious.
@@ -233,9 +234,12 @@ function approvalLine(block: ApprovalBlock, cols: number): string {
   const [mark, status, paint] = block.status === 'pending'
     ? ['?', 'Waiting for you', style.yellow]
     : block.status === 'granted'
-      ? ['✓', policy ? `Auto-approved (${policy})` : 'Approved', style.green]
-      : ['⊘', policy ? `Auto-denied (${policy})` : 'Denied', style.yellow];
-  const line = `${mark} ${status} · ${APPROVAL_KIND[block.kind]}: ${firstLine(block.subject)}`;
+      ? ['✓', policy ? `Auto-approved (${policy})` : block.forTask ? 'Approved for this task' : 'Approved', style.green]
+      : block.status === 'withdrawn'
+        ? ['·', 'Withdrawn', style.grey]
+        : ['⊘', policy ? `Auto-denied (${policy})` : 'Denied', style.yellow];
+  const note = block.note ? ` — “${firstLine(block.note)}”` : '';
+  const line = `${mark} ${status} · ${APPROVAL_KIND[block.kind]}: ${firstLine(block.subject)}${note}`;
   return `${paint(mark)}${truncate(line, cols).slice(mark.length)}`;
 }
 

@@ -1,14 +1,14 @@
 import * as vscode from 'vscode';
-import { canContinue, type DisplayBlock, type SessionMessage, type Task, type TaskLogEvent } from '@ordewell/core';
+import { canContinue, type ApprovalAnswer, type DisplayBlock, type PendingApproval, type SessionMessage, type Task, type TaskLogEvent } from '@ordewell/core';
 import { EMPTY_TASK_LOG, reduceTaskLog, replayTaskLog, type TaskLogView } from '@ordewell/core/plan-utils';
 import { diffConversation } from '../shared/conversationPatch';
 import { renderWebviewHtml } from './webviewHtml';
 import type { HostToTaskLog, TaskLogStatus, TaskLogToHost } from '../shared/taskLogProtocol';
 
 /**
- * The Session calls a task-log panel makes (ADR-0018, M1, K1). Narrowed to the six
- * the panel owns, so its test needs no Session — the concrete Session
- * satisfies this structurally.
+ * The Session calls a task-log panel makes (ADR-0018, M1, A1, K1). Narrowed to
+ * the ones the panel owns, so its test needs no Session — the concrete
+ * Session satisfies this structurally.
  */
 export interface TaskLogSession {
   taskLogAttempts(taskId: string): number[];
@@ -17,6 +17,8 @@ export interface TaskLogSession {
   removeQueuedTaskMessage(taskId: string, id: string): boolean;
   interruptTask(taskId: string): Promise<void>;
   continueTask(taskId: string, message: string): Promise<void>;
+  outstandingApprovals(): PendingApproval[];
+  resolveApproval(id: string, answer: ApprovalAnswer): boolean;
 }
 
 export interface TaskLogPanelDeps {
@@ -122,6 +124,12 @@ export class TaskLogPanel {
         this.followLive = true;
         this.controlAsync(() => this.deps.session.continueTask(this.taskId, msg.text));
         return;
+      // The card settles when the task log reports the answer.
+      case 'answerApproval':
+        this.control(() => {
+          if (!this.deps.session.resolveApproval(msg.id, msg.decision)) throw new Error('That request is no longer waiting for an answer.');
+        });
+        return;
     }
   }
 
@@ -196,6 +204,8 @@ export class TaskLogPanel {
       runner: task?.assignedRunner ?? '',
       planStatus: task?.status ?? 'pending',
       awaitingReason: task?.awaitingReason,
+      awaitingApproval: this.deps.session.outstandingApprovals()
+        .filter((p) => p.request.kind === 'runner_tool' && p.request.taskId === this.taskId).length,
       working: this.view.working,
       lastTurnEnd: this.view.lastTurnEnd,
       queued: this.view.queued,

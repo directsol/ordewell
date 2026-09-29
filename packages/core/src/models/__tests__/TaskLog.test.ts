@@ -43,8 +43,24 @@ describe('toTaskLogEvent', () => {
     expect(toTaskLogEvent({ type: 'turn_start', text: 'Do the task' })).toEqual({ type: 'turn_start', message: 'Do the task' });
   });
 
-  it('leaves out permission requests and background launches', () => {
-    expect(toTaskLogEvent({ type: 'permission_request', id: 'p', name: 'Bash', detail: 'rm' })).toBeNull();
+  it('keeps a runner\'s tool request, whether it offered a grant for the task, and the call it is for', () => {
+    expect(toTaskLogEvent({
+      type: 'permission_request', id: 'p1', name: 'Write', detail: '{"file_path":"a.txt"}', input: { file_path: 'a.txt' },
+      suggestions: [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }], toolUseId: 'toolu_1',
+    })).toEqual({ type: 'approval_requested', approvalId: 'p1', tool: 'Write', args: '{"file_path":"a.txt"}', allowForTask: true, toolCallId: 'toolu_1' });
+    expect(toTaskLogEvent({ type: 'permission_request', id: 'p2', name: 'Bash', detail: '{}', input: {}, suggestions: [] }))
+      .toEqual({ type: 'approval_requested', approvalId: 'p2', tool: 'Bash', args: '{}', allowForTask: false });
+  });
+
+  it('keeps each answer, a denial with its note, and a request that went unanswered', () => {
+    expect(toTaskLogEvent({ type: 'permission_decided', id: 'p1', decision: { decision: 'allowForTask' } }))
+      .toEqual({ type: 'approval_decided', approvalId: 'p1', decision: 'allowForTask' });
+    expect(toTaskLogEvent({ type: 'permission_decided', id: 'p1', decision: { decision: 'deny', note: 'not there' } }))
+      .toEqual({ type: 'approval_decided', approvalId: 'p1', decision: 'deny', note: 'not there' });
+    expect(toTaskLogEvent({ type: 'permission_withdrawn', id: 'p1' })).toEqual({ type: 'approval_withdrawn', approvalId: 'p1' });
+  });
+
+  it('leaves out background launches', () => {
     expect(toTaskLogEvent({ type: 'background_agent', id: 'a' })).toBeNull();
   });
 });
