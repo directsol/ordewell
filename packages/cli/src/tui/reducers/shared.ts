@@ -1,4 +1,4 @@
-import type { AwaitingReason, ConversationMessage, PlannerUsage, ResearchLogEntry, RunnerTransport, SessionMessage, TaskLogEvent } from '@ordewell/core';
+import type { ApprovalDecision, AwaitingReason, ConversationMessage, PlannerUsage, ResearchLogEntry, RunnerTransport, SessionMessage, TaskLogEvent } from '@ordewell/core';
 import type { Key } from '../keys';
 import type {
   HandoffView, LandedTaskView, ModelView, ModeView, RewindTargetView, RunnerView, SessionView,
@@ -13,6 +13,7 @@ export interface TaskStatusUpdate {
   isolation?: TaskIsolationView;
   transport?: TaskTransportView;
   awaitingReason?: AwaitingReason;
+  awaitingApproval?: number;
 }
 
 /** Side effects the runtime performs; the reducer itself stays pure. */
@@ -76,6 +77,8 @@ export type Effect =
   | { type: 'removeTaskMessage'; sessionId: string; taskId: string; messageId: string }
   | { type: 'interruptTask'; sessionId: string; taskId: string }
   | { type: 'respondApproval'; sessionId: string; approvalId: string; granted: boolean }
+  /** A task runner's tool request, answered from its task view (ADR-0018, A1). */
+  | { type: 'answerTaskApproval'; sessionId: string; approvalId: string; answer: ApprovalDecision }
   /** Startup refreshes silently; only a typed `/refresh` sets `announce`. */
   | { type: 'refresh'; announce?: boolean }
   | { type: 'exit' };

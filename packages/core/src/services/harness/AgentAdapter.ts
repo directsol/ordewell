@@ -1,6 +1,7 @@
 import type { SpawnFn } from '../HeadlessRunner';
 import type { SubagentOutcome } from '../../models/Task';
 import type { UsageRecord } from '../../models/Usage';
+import type { ApprovalDecision } from '../../interfaces/IApproval';
 
 
 /**
@@ -50,13 +51,16 @@ export type AgentEvent =
   | { type: 'subagent_finished'; subagentId: string; outcome: SubagentOutcome; digest: string }
   /**
    * The agent asked to do something its mode does not cover. A planner always
-   * auto-denies it (T1) — a planner that can mutate is not a planner. The
-   * adapter is responsible for answering the agent so the turn does not hang.
+   * auto-denies it (T1) — a planner that can mutate is not a planner — and the
+   * adapter answers so the turn does not hang. A task's request stays open
+   * until {@link TaskModeAgentAdapter.answerPermission} (ADR-0018, A1).
    *
-   * `input` and `suggestions` are the raw request, carried so a task-mode
-   * caller can later offer the agent's own answers (ADR-0018, A1).
+   * `input` and `suggestions` are the raw request; `suggestions` are the
+   * agent's own session-scoped grants, what "Allow for this task" answers with.
    */
   | { type: 'permission_request'; id: string; name: string; detail: string; input?: Record<string, unknown>; suggestions?: unknown[]; toolUseId?: string }
+  /** The agent withdrew an open request — an interrupt cancels the call it was for. It takes no answer now. */
+  | { type: 'permission_cancelled'; id: string }
   /**
    * The agent delegated work to a subagent it left running in the background,
    * and may end its turn before that work reports. Ordewell's conversation is
@@ -177,6 +181,11 @@ export interface TaskModeAgentAdapter extends AgentAdapter {
   interrupt(timeoutMs: number): Promise<boolean>;
   /** Registers a listener for the process ending, for any reason. Fires at most once. */
   onProcessExit(listener: (code: number) => void): void;
+  /**
+   * Answer an open `permission_request`. False when the id is not open — it
+   * was answered, cancelled, or never asked.
+   */
+  answerPermission(id: string, decision: ApprovalDecision): boolean;
 }
 
 /**

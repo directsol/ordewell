@@ -70,6 +70,33 @@ describe('POST /api/approvals/:sessionId/:approvalId', () => {
     expect(pool.resolveApproval).toHaveBeenCalledWith('s1', 'ap-1', false);
   });
 
+  it.each([
+    [{ decision: 'allow' }, { decision: 'allow' }],
+    [{ decision: 'allowForTask' }, { decision: 'allowForTask' }],
+    [{ decision: 'deny', note: '  write it under notes/  ' }, { decision: 'deny', note: 'write it under notes/' }],
+    [{ decision: 'deny', note: '   ' }, { decision: 'deny' }],
+  ])('carries a runner request\'s whole answer %o', async (body, expected) => {
+    const res = await app.request('/api/approvals/s1/ap-1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    expect(pool.resolveApproval).toHaveBeenCalledWith('s1', 'ap-1', expected);
+    expect(await res.json()).toEqual({ ok: true, granted: expected.decision !== 'deny', decision: expected.decision });
+  });
+
+  it.each([
+    ['an unknown decision', { decision: 'always' }],
+    ['a decision beside a grant', { decision: 'maybe', granted: true }],
+  ])('treats %s as a denial', async (_label, body) => {
+    await app.request('/api/approvals/s1/ap-1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    expect(pool.resolveApproval).toHaveBeenCalledWith('s1', 'ap-1', { decision: 'deny' });
+  });
+
   it('404s for an unknown session', async () => {
     pool = fakePool({ hasSession: vi.fn().mockReturnValue(false) });
     app = new Hono();

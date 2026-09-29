@@ -20,6 +20,12 @@ export type SerializedTaskStatus = {
   awaitingReason?: AwaitingReason;
   /** Messages waiting for a structured task's turn to end, oldest first; absent when there are none. */
   queued?: QueuedTaskMessage[];
+  /**
+   * How many of a structured task's runner requests wait for an answer
+   * (ADR-0018, A1) — "waiting for approval", which leaves `status` alone.
+   * Absent when none do.
+   */
+  awaitingApproval?: number;
 };
 
 export type SerializedTask = {
@@ -245,6 +251,7 @@ export function serializeTaskStatus(
   idleSince: string | null = null,
   isolation: TaskIsolation | null = null,
   queued: readonly QueuedTaskMessage[] = [],
+  awaitingApproval = 0,
 ): SerializedTaskStatus {
   return {
     id: t.id,
@@ -257,6 +264,7 @@ export function serializeTaskStatus(
     ...(t.transport ? { transport: t.transport.fallback ? { kind: t.transport.kind, fallback: t.transport.fallback } : { kind: t.transport.kind } } : {}),
     ...(t.status === 'awaiting_user' && t.awaitingReason ? { awaitingReason: t.awaitingReason } : {}),
     ...(queued.length > 0 ? { queued: queued.map((m) => ({ ...m })) } : {}),
+    ...(awaitingApproval > 0 ? { awaitingApproval } : {}),
   };
 }
 

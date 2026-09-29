@@ -19,6 +19,8 @@ export interface SessionEventRelayDeps {
   orchestrator: Pick<TaskOrchestrator, 'getIdleSince' | 'getTaskIsolation' | 'getQueuedTaskMessages'>;
   /** Shared with the Session, which snapshots, restores and clears it. */
   usage: PlannerUsageLedger;
+  /** How many of a task's runner requests wait for an answer (ADR-0018, A1). */
+  awaitingApproval?: (taskId: string) => number;
 }
 
 /** Every orchestrator event the relay announces; `onTaskSettled` is persistence only, so it is the Session's. */
@@ -42,6 +44,7 @@ export class SessionEventRelay {
   private readonly store: SessionEventRelayDeps['store'];
   private readonly orchestrator: SessionEventRelayDeps['orchestrator'];
   private readonly usage: PlannerUsageLedger;
+  private readonly awaitingApproval: (taskId: string) => number;
   /**
    * The in-flight turn's subagent activity, grouped one run per subagent so a
    * replay nests each step under its own brief/result. Folded into the plan's
@@ -57,6 +60,7 @@ export class SessionEventRelay {
     this.store = deps.store;
     this.orchestrator = deps.orchestrator;
     this.usage = deps.usage;
+    this.awaitingApproval = deps.awaitingApproval ?? (() => 0);
   }
 
   /** `plan` is read per event: a Session with no plan (or mid-reset) announces nothing about tasks. */
@@ -99,7 +103,13 @@ export class SessionEventRelay {
     plan.tasks = this.store.snapshot();
     this.broadcast({
       type: 'status_update',
-      tasks: this.store.allTasks.map((t) => serializeTaskStatus(t, this.orchestrator.getIdleSince(t.id), this.orchestrator.getTaskIsolation(t.id), this.orchestrator.getQueuedTaskMessages(t.id))),
+      tasks: this.store.allTasks.map((t) => serializeTaskStatus(
+        t,
+        this.orchestrator.getIdleSince(t.id),
+        this.orchestrator.getTaskIsolation(t.id),
+        this.orchestrator.getQueuedTaskMessages(t.id),
+        this.awaitingApproval(t.id),
+      )),
     });
   }
 

@@ -9,6 +9,8 @@ import type { OrchestratorObserver, TaskOrchestrator } from './TaskOrchestrator'
 import { PlanStore } from './PlanStore';
 import { ApprovalPolicy } from './ApprovalPolicy';
 import { PendingApprovals, type PendingApproval } from './PendingApprovals';
+import { RunnerApprovals } from './RunnerApprovals';
+import { isRunnerApproval, type ApprovalAnswer, type ApprovalRequest } from '../interfaces/IApproval';
 import { HttpWebFetcher } from './HttpWebFetcher';
 import { ModelResolver } from './ModelResolver';
 import { filterModelsForPrompt, coerceAssignments, effectiveAllowlist } from './ModelAllowlistResolver';
@@ -240,6 +242,15 @@ function liveAiService(config: IConfig, workspaceRoot: () => string): () => IAiS
 }
 
 /**
+ * The planner's own prompts. A turn's abort or a plan change settles these;
+ * a task runner's request belongs to its attempt, and is denied when that
+ * attempt's runner stops.
+ */
+function isPlannerApproval(request: ApprovalRequest): boolean {
+  return !isRunnerApproval(request);
+}
+
+/**
  * The composition root: builds every collaborator a Session drives and wires
  * them to each other, so the Session only receives them. Hosts create a
  * Session here; the optional {@link SessionDeps} are the seams tests fill.
@@ -255,10 +266,44 @@ export function createSession(deps: SessionDeps): Session {
     location: () => session.taskLogLocation,
     open: deps.openTaskLog,
   });
+  // Made by the Session (it is the conversation's host); an approval prompt
+  // names the turn that raised it, so the chain below reads it once it exists.
+  let conversation: PlannerConversation | undefined;
+
+  // The approval chain: the filesystem asks the policy, the policy asks the
+  // registry, the registry announces on the same broadcast seam every other
+  // planner event uses, and any surface answers through `resolveApproval`.
+  // Nothing in core knows which UI is listening.
+  //
+  // A task runner's request (ADR-0018, A1) rides the task's log instead: it
+  // is not the planner's, so it never becomes a card in the conversation.
+  // What changes is the task's status, "waiting for approval".
+  const approvals = new PendingApprovals({
+    onRequest: ({ id, request }) => {
+      if (isRunnerApproval(request)) {
+        events.status(session.planState);
+        return;
+      }
+      deps.broadcast({
+        type: 'approval_request',
+        id,
+        kind: request.kind,
+        subject: request.subject,
+        scope: request.scope,
+        detail: request.detail,
+        turnId: conversation?.currentTurnId,
+      });
+    },
+    onSettled: (id, granted, { request }) => {
+      if (isRunnerApproval(request)) events.status(session.planState);
+      else deps.broadcast({ type: 'approval_settled', id, granted });
+    },
+  });
+  const runnerApprovals = new RunnerApprovals(approvals);
   const orchestrator = createTaskOrchestrator({
     config: deps.config,
     notifications: deps.notifications,
-    terminalRunner: taskLogs.wrap(deps.runner),
+    terminalRunner: taskLogs.wrap(runnerApprovals.wrap(deps.runner)),
     store,
     output: deps.taskOutput,
     isolation: deps.isolation,
@@ -268,28 +313,11 @@ export function createSession(deps: SessionDeps): Session {
     runnerTransport: () => deps.settings().runnerTransport ?? 'terminal',
   });
   const usage = new PlannerUsageLedger();
-  const events = new SessionEventRelay({ broadcast: deps.broadcast, onNotice: deps.onNotice, store, orchestrator, usage });
-
-  // Made by the Session (it is the conversation's host); an approval prompt
-  // names the turn that raised it, so the chain below reads it once it exists.
-  let conversation: PlannerConversation | undefined;
-
-  // The approval chain: the filesystem asks the policy, the policy asks the
-  // registry, the registry announces on the same broadcast seam every other
-  // planner event uses, and any surface answers through `resolveApproval`.
-  // Nothing in core knows which UI is listening.
-  const approvals = new PendingApprovals({
-    onRequest: ({ id, request }) => deps.broadcast({
-      type: 'approval_request',
-      id,
-      kind: request.kind,
-      subject: request.subject,
-      scope: request.scope,
-      detail: request.detail,
-      turnId: conversation?.currentTurnId,
-    }),
-    onSettled: (id, granted) => deps.broadcast({ type: 'approval_settled', id, granted }),
+  const events = new SessionEventRelay({
+    broadcast: deps.broadcast, onNotice: deps.onNotice, store, orchestrator, usage,
+    awaitingApproval: (taskId) => runnerApprovals.waiting(taskId),
   });
+
   const approvalPolicy = new ApprovalPolicy({
     mode: deps.config.approvalMode,
     preApproved: deps.config.approvalPreApproved,
@@ -472,8 +500,8 @@ export class Session {
    * server's HTTP route, the VS Code webview, the TUI prompt — so the decision
    * path is identical regardless of who is looking.
    */
-  resolveApproval(id: string, granted: boolean): boolean {
-    return this.approvals.resolve(id, granted);
+  resolveApproval(id: string, answer: ApprovalAnswer): boolean {
+    return this.approvals.resolve(id, answer);
   }
 
   /** Requests still waiting for an answer, replayed to a surface that connects mid-prompt. */
@@ -580,7 +608,7 @@ export class Session {
     this.usage.clear();
     // A prompt raised by the turn we are abandoning has nobody left to serve;
     // denying it unblocks the old research loop instead of stranding it.
-    this.approvals.clear();
+    this.approvals.clear(isPlannerApproval);
     this.orchestrator.clearQueuedMessages();
     this.store.clearLog();
     this.orchestrator.loadPlan([]);
@@ -711,10 +739,10 @@ export class Session {
   private denyApprovalsOnAbort(signal: AbortSignal | undefined): () => void {
     if (!signal) return () => {};
     if (signal.aborted) {
-      this.approvals.clear();
+      this.approvals.clear(isPlannerApproval);
       return () => {};
     }
-    const onAbort = () => this.approvals.clear();
+    const onAbort = () => this.approvals.clear(isPlannerApproval);
     signal.addEventListener('abort', onAbort);
     return () => signal.removeEventListener('abort', onAbort);
   }
@@ -1471,7 +1499,7 @@ export class Session {
       this.orchestrator.clearQueuedMessages();
       // Approval scopes are equally session-scoped: a path or command approved
       // for the previous plan must not stay approved for the newly adopted one.
-      this.approvals.clear();
+      this.approvals.clear(isPlannerApproval);
       this.approvalPolicy.reset();
     }
     const adopting = plan !== this.plan;

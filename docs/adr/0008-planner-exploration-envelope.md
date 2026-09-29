@@ -187,3 +187,9 @@ kind `runner_tool` ([ADR-0018](0018-structured-runner-transport.md)). They have
 no timeout: T5's five-minute auto-deny is the planner's, where an unanswered
 prompt would hang a research loop; a task's request waits for a person. The
 planner's envelope is unchanged.
+
+*Added 2026-09-29 (#56).* `resolveApproval` takes the whole decision — allow,
+allow for this task, or deny with a note — and a boolean still answers a
+planner prompt exactly as before. A turn's abort and a plan change deny only
+the planner's own prompts; a runner's is denied when its attempt's runner
+stops.

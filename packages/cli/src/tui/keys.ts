@@ -25,13 +25,18 @@ const CONTROL: Record<string, string> = {
   '\x03': 'ctrl-c',
   '\x04': 'ctrl-d',
   '\x05': 'ctrl-e',
+  '\x07': 'ctrl-g',
   '\x0b': 'ctrl-k',
   '\x0c': 'ctrl-l',
   '\x0e': 'ctrl-n',
   '\x0f': 'ctrl-o',
   '\x10': 'ctrl-p',
+  '\x12': 'ctrl-r',
+  '\x14': 'ctrl-t',
   '\x15': 'ctrl-u',
   '\x17': 'ctrl-w',
+  '\x18': 'ctrl-x',
+  '\x19': 'ctrl-y',
 };
 
 const ESCAPES: Record<string, string> = {

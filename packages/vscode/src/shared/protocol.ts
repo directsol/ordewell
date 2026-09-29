@@ -166,6 +166,8 @@ export type HostToWebview =
   | { type: 'planUpdated'; plan: LegacyPlanState }
   | { type: 'taskOutput'; taskId: string; text: string }
   | { type: 'taskIdle'; taskId: string; idleSince: string | null }
+  /** How many of a structured task's runner requests wait for an answer (ADR-0018, A1); 0 clears the badge. */
+  | { type: 'taskApprovals'; taskId: string; count: number }
   /** Every plan edit still waiting at a batch boundary, in the order it was sent. */
   | { type: 'pendingPlanEdits'; edits: PendingPlanEdit[] }
   /** The queued prompts the host is holding for the next planner turn, oldest first. */

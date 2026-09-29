@@ -1,4 +1,4 @@
-import type { AwaitingReason, DisplayBlock, StructuredTurnEnd, TaskStatus } from '@ordewell/core';
+import type { ApprovalDecision, AwaitingReason, DisplayBlock, StructuredTurnEnd, TaskStatus } from '@ordewell/core';
 
 /*
  * The messages between the extension host and a task-log panel (ADR-0018, V1).
@@ -27,6 +27,8 @@ export interface TaskLogStatus {
   runner: string;
   planStatus: TaskStatus;
   awaitingReason?: AwaitingReason;
+  /** How many of the runner's tool requests wait for an answer (ADR-0018, A1). */
+  awaitingApproval: number;
   /** A turn is live. */
   working: boolean;
   /** How the last turn ended; absent before the first one does. */
@@ -53,5 +55,7 @@ export type TaskLogToHost =
   | { type: 'sendTaskMessage'; text: string }
   | { type: 'removeQueuedTaskMessage'; id: string }
   | { type: 'interruptTask' }
+  /** Answer one of the runner's tool requests (ADR-0018, A1). */
+  | { type: 'answerApproval'; id: string; decision: ApprovalDecision }
   /** Show an earlier attempt; the host answers with `init`. */
   | { type: 'selectAttempt'; attempt: number };

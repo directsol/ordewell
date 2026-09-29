@@ -7,6 +7,7 @@ import type {
   StructuredSessionCapability,
   StructuredTurnEnd,
 } from '../interfaces/ITerminalRunner';
+import type { ApprovalDecision } from '../interfaces/IApproval';
 import type { ResearchToolType } from '../models/Task';
 import { resolveTaskRunnerFlags } from '../plugins/resolveArgs';
 import { AbstractRunner, AbstractTerminalSession, type RunnerSpawnOptions } from './AbstractRunner';
@@ -155,6 +156,13 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
   private interrupting: Promise<void> | null = null;
   private lastSessionId: string | null = null;
   private readonly structuredEmitter = new EventEmitter();
+  private permissionCount = 0;
+  /**
+   * Open tool requests by the id this session gave them, with the runner's own
+   * id. The runner's ids are only unique to its process — Codex numbers its
+   * requests — while an approval must be answerable by id across the session.
+   */
+  private readonly permissions = new Map<string, { requestId: string; adapter: TaskModeAgentAdapter }>();
 
   constructor(id: string, taskId: string, private readonly launch: SessionLaunch) {
     super(id, taskId);
@@ -190,6 +198,7 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
     // An adapter still starting has no process yet to kill; `startAdapter`
     // disposes it once it has one.
     if (adapter && this.adapterStarted) adapter.dispose();
+    this.withdrawPermissions();
     this.baseHandleExit(-1);
   }
 
@@ -228,6 +237,27 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
     return this.adapter?.nativeSessionId() ?? this.lastSessionId;
   }
 
+  answerPermission(id: string, decision: ApprovalDecision): boolean {
+    const open = this.permissions.get(id);
+    if (!open) return false;
+    this.permissions.delete(id);
+    if (!open.adapter.answerPermission(open.requestId, decision)) {
+      this.emitEvent({ type: 'permission_withdrawn', id });
+      return false;
+    }
+    this.emitEvent({ type: 'permission_decided', id, decision });
+    return true;
+  }
+
+  /** Every open request goes unanswered once the process that asked is gone. */
+  private withdrawPermissions(adapter?: TaskModeAgentAdapter): void {
+    for (const [id, open] of [...this.permissions]) {
+      if (adapter && open.adapter !== adapter) continue;
+      this.permissions.delete(id);
+      this.emitEvent({ type: 'permission_withdrawn', id });
+    }
+  }
+
   interrupt(): Promise<void> {
     if (this.interrupting) return this.interrupting;
     const turn = this.turn;
@@ -261,11 +291,13 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
     const resumeSessionId = this.nativeSessionId() ?? undefined;
     this.generation += 1;
     turn.abort.abort();
+    if (this.adapter) this.withdrawPermissions(this.adapter);
     try {
       await this.startAdapter({ ...this.launch.startOptions, resumeSessionId });
     } catch (err) {
       this.text.line(`Could not restart ${this.launch.runner} after the interrupt: ${err instanceof Error ? err.message : String(err)}`);
       this.endTurn(turn, 'interrupted');
+      this.withdrawPermissions();
       this.baseHandleExit(-1);
       return;
     }
@@ -286,6 +318,7 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
     adapter.onProcessExit((code) => {
       if (generation !== this.generation) return;
       this.lastSessionId = adapter.nativeSessionId() ?? this.lastSessionId;
+      this.withdrawPermissions();
       this.baseHandleExit(code);
     });
   }
@@ -304,6 +337,8 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
     void adapter.send(text, (event) => {
       if (generation !== this.generation) return;
       if (event.type === 'turn_end') reason = event.interrupted ? 'interrupted' : 'completed';
+      else if (event.type === 'permission_request') this.openPermission(adapter, event);
+      else if (event.type === 'permission_cancelled') this.cancelPermission(adapter, event.id);
       else {
         if (event.type === 'error') reason = 'failed';
         this.handleEvent(event);
@@ -317,7 +352,23 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
     });
   }
 
-  private handleEvent(event: Exclude<AgentEvent, { type: 'turn_end' }>): void {
+  private openPermission(adapter: TaskModeAgentAdapter, event: Extract<AgentEvent, { type: 'permission_request' }>): void {
+    this.permissionCount += 1;
+    const id = `${this.id}-perm-${this.permissionCount}`;
+    this.permissions.set(id, { requestId: event.id, adapter });
+    this.emitEvent({ ...event, id });
+  }
+
+  private cancelPermission(adapter: TaskModeAgentAdapter, requestId: string): void {
+    for (const [id, open] of this.permissions) {
+      if (open.adapter !== adapter || open.requestId !== requestId) continue;
+      this.permissions.delete(id);
+      this.emitEvent({ type: 'permission_withdrawn', id });
+      return;
+    }
+  }
+
+  private handleEvent(event: Exclude<AgentEvent, { type: 'turn_end' | 'permission_request' | 'permission_cancelled' }>): void {
     switch (event.type) {
       case 'assistant_text_delta': this.text.delta(event.text); break;
       case 'assistant_text': this.text.block(event.text); break;

@@ -491,6 +491,7 @@ export function handleSessionMessage(
           : 'draft';
       for (const task of msg.tasks) {
         deps.chatProvider.sendTaskIdle(task.id, task.idleSince ?? null);
+        deps.chatProvider.sendTaskApprovals(task.id, task.awaitingApproval ?? 0);
         // A shared-root plan sends none; only a task with isolated work reports
         // it, so the cards stay quiet unless isolation has something to say.
         if (task.isolation) deps.chatProvider.sendTaskIsolation(task.id, task.isolation);

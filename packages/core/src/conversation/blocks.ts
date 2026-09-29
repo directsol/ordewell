@@ -94,7 +94,8 @@ export interface SubagentBlock {
   turnId?: string;
 }
 
-export type ApprovalStatus = 'pending' | 'granted' | 'denied';
+/** `withdrawn`: a runner's request that went unanswered — the runner cancelled it, or its process ended. */
+export type ApprovalStatus = 'pending' | 'granted' | 'denied' | 'withdrawn';
 
 export interface ApprovalBlock {
   type: 'approval';
@@ -109,6 +110,14 @@ export interface ApprovalBlock {
   /** Absent while pending. */
   decidedBy?: ApprovalSource;
   turnId?: string;
+  /** A runner's request (`runner_tool`) that can also be allowed for the rest of its task. */
+  allowForTask?: boolean;
+  /** Granted for the rest of the task, not this call alone. */
+  forTask?: boolean;
+  /** What a denial told the agent. */
+  note?: string;
+  /** The runner's tool call the request is about. */
+  toolCallId?: string;
 }
 
 export type PlanMarkerStatus = 'building' | 'generated' | 'updated';

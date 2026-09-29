@@ -7,6 +7,8 @@ import type { SessionBroadcaster } from './SessionMessage';
 /** Long enough to gather a burst of deltas into one message, short enough to read as live. */
 const DEFAULT_FLUSH_MS = 50;
 
+const FLUSHED_AT_ONCE: ReadonlySet<TaskLogEvent['type']> = new Set(['turn_end', 'approval_requested', 'approval_decided', 'approval_withdrawn']);
+
 export interface TaskLogRecorderDeps {
   broadcast: SessionBroadcaster;
   /** Where the session's logs go, read as each attempt starts: a session's id can change between plans. */
@@ -87,9 +89,10 @@ export class TaskLogRecorder {
       const entry = toTaskLogEvent(event);
       if (!entry) return;
       pending.push(entry);
-      // A turn's end is what a surface shows "waiting for input" on, so it
-      // goes out at once rather than after the batch window.
-      if (entry.type === 'turn_end') flush();
+      // A turn's end is what a surface shows "waiting for input" on, and an
+      // approval is someone's to answer, so these go out at once rather than
+      // after the batch window.
+      if (FLUSHED_AT_ONCE.has(entry.type)) flush();
       else if (!timer) {
         timer = setTimeout(flush, this.flushMs);
         timer.unref?.();
