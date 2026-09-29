@@ -1,6 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Hono } from 'hono';
-import { loadSessionPlanState } from '@ordewell/core';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { loadSessionPlanState, openTaskLog } from '@ordewell/core';
 import { sessionsRoute } from '../sessions';
 import type { OrchestratorPool } from '../../pool/orchestratorPool';
 
@@ -148,5 +151,36 @@ describe('POST /api/sessions/:id/close', () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as { ok?: boolean }).ok).toBe(true);
     expect(pool.destroy).toHaveBeenCalledWith('s1');
+  });
+});
+
+describe('GET /api/sessions/:id/tasks/:taskId/log', () => {
+  let ws: string;
+  beforeEach(() => { ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ordewell-route-tasklog-')); });
+  afterEach(() => { fs.rmSync(ws, { recursive: true, force: true }); });
+
+  function app(): Hono {
+    const a = new Hono();
+    a.route('/api/sessions', sessionsRoute(fakePool()));
+    return a;
+  }
+
+  it('lists a task’s attempts and serves one attempt’s events from disk', async () => {
+    const where = { baseDir: ws, sessionId: 's1' };
+    openTaskLog(where, 't1').append([{ type: 'turn_start', message: 'go' }]);
+    openTaskLog(where, 't1').append([{ type: 'text', text: 'again' }]);
+    const qs = `?workspace=${encodeURIComponent(ws)}`;
+
+    const list = await app().request(`/api/sessions/s1/tasks/t1/log${qs}`);
+    expect(await list.json()).toEqual({ attempts: [1, 2] });
+
+    const second = await app().request(`/api/sessions/s1/tasks/t1/log/2${qs}`);
+    expect(await second.json()).toEqual({ attempt: 2, events: [{ type: 'text', text: 'again' }] });
+  });
+
+  it('answers an empty log for a task that has none, and refuses a malformed attempt', async () => {
+    const qs = `?workspace=${encodeURIComponent(ws)}`;
+    expect(await (await app().request(`/api/sessions/s1/tasks/none/log${qs}`)).json()).toEqual({ attempts: [] });
+    expect((await app().request(`/api/sessions/s1/tasks/t1/log/zero${qs}`)).status).toBe(400);
   });
 });

@@ -238,6 +238,13 @@ describe('StructuredSession messages', () => {
 
     await turn.nextTurnEnd();
     expect(turn.statesAtTurnEnd).toEqual(['working', 'idle']);
+    const queue = turn.events.filter((e) => e.type === 'message_queued' || e.type === 'turn_start');
+    const [queued] = queue.filter((e) => e.type === 'message_queued');
+    expect(queue).toEqual([
+      { type: 'turn_start', text: 'Do the task' },
+      { type: 'message_queued', messageId: expect.any(String), text: 'Yes, go ahead.' },
+      { type: 'turn_start', text: 'Yes, go ahead.', messageId: queued?.type === 'message_queued' ? queued.messageId : '' },
+    ]);
     turn.session.kill();
   });
 
@@ -248,6 +255,7 @@ describe('StructuredSession messages', () => {
     const id = turn.session.sendMessage('Never mind');
     expect(turn.session.removeQueued(id)).toBe(true);
     expect(turn.session.removeQueued(id)).toBe(false);
+    expect(turn.events.filter((e) => e.type === 'message_removed')).toEqual([{ type: 'message_removed', messageId: id }]);
 
     spawned.processes[0].emitStdout(fixture('claude-code', 'task-no-marker'));
     await turn.nextTurnEnd();

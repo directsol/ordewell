@@ -532,6 +532,7 @@ export function handleSessionMessage(
     case 'subagent_finished':
     case 'approval_settled':
     case 'approval_decided':
+    case 'task_log':
       break;
     // What Merge all did, whether this host asked for it or another surface did.
     // The webview shows a blocked or part-landed group per repo; core's notices

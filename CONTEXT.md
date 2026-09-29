@@ -377,6 +377,18 @@ leaves dependents alone, as retry does.
 *Avoid:* "resume" for the user action (that is the protocol flag), and "retry"
 for it — a retry starts a fresh attempt with no message.
 
+**Task log** (`TaskLogEvent`, `reduceTaskLog`, `TaskLogRecorder`) — what a
+structured task did, at full fidelity (ADR-0018, O1b/P1): normalized events —
+text and thinking, tool calls with their results (long ones trimmed to head
+and tail), subagents, usage, turns, and the message queue — streamed live as
+`task_log` and appended to `.ordewell/sessions/<session>/tasks/<task>/<attempt>.jsonl`,
+one file per attempt, numbered from what is on disk. `reduceTaskLog` folds the
+same events into display blocks live and on reload, so the two draw alike. The
+file goes with its session. A terminal-transport task has none.
+*Avoid:* "transcript" (the planner conversation's saved record), "output"
+(the lossy plain-text channel `VerdictEngine` reads — nothing that needs
+fidelity reads it), and reading a verdict from the log.
+
 **Spawn toolkit** — the pure OS/shell policy behind the runner adapters
 (`core/src/utils/shell.ts`): ANSI stripping (`stripAnsi`), POSIX/PowerShell
 quoting, the login-shell invocation (`buildShellInvocation`), and the
@@ -1089,10 +1101,11 @@ the botched one.
 repair loop looks like to a viewer.
 
 **Display block** (`core/src/conversation/blocks.ts`) — one thing a surface
-draws for the planner conversation: a `message` (user, planner, system or
-error), `thinking`, `tool`, `subagent`, `approval`, `plan` or the `usage`
-token line. Built once in core by `reduceConversation` from the `SessionMessage`
-stream plus the surface's own `LocalEntry` lines; a block's `id` is stable for
+draws for the planner conversation or a structured task's log: a `message`
+(user, planner, agent, system or error), `thinking`, `tool`, `subagent`,
+`approval`, `plan` or the `usage` token line. Built once in core by
+`reduceConversation` from the `SessionMessage` stream plus the surface's own
+`LocalEntry` lines, or by `reduceTaskLog` from a task's log; a block's `id` is stable for
 as long as the block exists, so a surface can key its UI state on it.
 *Avoid:* deriving a per-surface block shape from raw `SessionMessage`s again —
 the block list is the contract (ADR-0017); *Avoid:* storing per-block UI state

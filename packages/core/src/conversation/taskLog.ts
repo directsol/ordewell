@@ -1,0 +1,215 @@
+import type { QueuedTaskMessage, StructuredTurnEnd } from '../interfaces/ITerminalRunner';
+import type { TaskLogEvent } from '../models/TaskLog';
+import { addPlannerUsage, isMeasured, usageLine, type PlannerUsage } from '../models/Usage';
+import { mapAgentTool, normalizeAgentArgs } from '../services/harness/agentTools';
+import type { MessageBlock, SubagentChild, SubagentStatus, ThinkingDisplayBlock } from './blocks';
+import { toolHeadline } from './format';
+import {
+  append, appendOutput, closeOpenBlocks, findLastIndex, laneAppend, laneBlocks, laneOf, laneReplace, setUsageLine, updateSubagent, sealed,
+  type BlockList, type Lane,
+} from './lanes';
+import { finishedTool, pendingTool, settledMessage } from './records';
+
+/**
+ * What a surface draws for one attempt of a structured task (ADR-0018, O1b):
+ * the same display blocks as the planner conversation, built from the task's
+ * {@link TaskLogEvent}s. No planner turn ids — a task's turns are its own,
+ * one at a time.
+ */
+export interface TaskLogView extends BlockList {
+  /** Messages waiting for the running turn to end, oldest first. */
+  readonly queued: readonly QueuedTaskMessage[];
+  /** A turn is running. */
+  readonly working: boolean;
+  /** How the last turn ended; absent before the first one does. */
+  readonly lastTurnEnd?: StructuredTurnEnd;
+  /** What the runner reported over the attempt, subagents included. */
+  readonly usage?: PlannerUsage;
+  /**
+   * The block each run of deltas streams into, keyed by stream, so the run's
+   * authoritative copy replaces it instead of repeating it below.
+   */
+  readonly streams: Readonly<Record<string, string>>;
+}
+
+export const EMPTY_TASK_LOG: TaskLogView = { blocks: [], nextId: 1, queued: [], working: false, streams: {} };
+
+type Event<T extends TaskLogEvent['type']> = Extract<TaskLogEvent, { type: T }>;
+
+const TEXT_STREAM = 'text';
+const thinkingStream = (subagentId: string | undefined) => `thinking:${subagentId ?? ''}`;
+
+function withoutStream(view: TaskLogView, key: string): TaskLogView {
+  if (!(key in view.streams)) return view;
+  return { ...view, streams: Object.fromEntries(Object.entries(view.streams).filter(([k]) => k !== key)) };
+}
+
+// A later text block of the same turn opens with a paragraph break (the
+// adapter joins a turn's messages that way); as a block of its own it needs none.
+function blockText(text: string): string {
+  return text.replace(/^\n+/, '');
+}
+
+type Streamed = MessageBlock | ThinkingDisplayBlock;
+
+/** The lane's streaming block for `key`, while it is still the lane's latest output and still streaming. */
+function openStream(view: TaskLogView, lane: Lane, key: string): number {
+  const id = view.streams[key];
+  if (id === undefined) return -1;
+  const blocks = laneBlocks(view, lane);
+  const i = findLastIndex(blocks, (b) => b.type !== 'usage');
+  const block = blocks[i];
+  return block?.id === id && (block.type === 'message' || block.type === 'thinking') && block.streaming ? i : -1;
+}
+
+function streamDelta(view: TaskLogView, lane: Lane, key: string, text: string, make: (id: string, text: string) => Streamed): TaskLogView {
+  const i = openStream(view, lane, key);
+  const open = laneBlocks(view, lane)[i];
+  if (open?.type === 'message' || open?.type === 'thinking') return laneReplace(view, lane, i, { ...open, text: open.text + text });
+  const next = appendOutput(view, lane, (id) => make(id, blockText(text)));
+  return { ...next, streams: { ...next.streams, [key]: `b${view.nextId}` } };
+}
+
+/**
+ * A run's authoritative copy: it replaces the text its deltas built, wherever
+ * that block now sits in the lane, and is added whole when nothing streamed.
+ */
+function streamWhole(view: TaskLogView, lane: Lane, key: string, text: string, make: (id: string) => SubagentChild): TaskLogView {
+  const id = view.streams[key];
+  const blocks = laneBlocks(view, lane);
+  const i = id === undefined ? -1 : findLastIndex(blocks, (b) => b.id === id);
+  const streamed = blocks[i];
+  const next = withoutStream(view, key);
+  if (streamed?.type === 'message' || streamed?.type === 'thinking') {
+    return laneReplace(next, lane, i, { ...streamed, text: blockText(text), streaming: false });
+  }
+  return appendOutput(next, lane, make);
+}
+
+function agentText(view: TaskLogView, text: string): TaskLogView {
+  return streamWhole(view, null, TEXT_STREAM, text, (id) => settledMessage(id, 'agent', blockText(text)));
+}
+
+function agentTextDelta(view: TaskLogView, text: string): TaskLogView {
+  return streamDelta(view, null, TEXT_STREAM, text, (id, t) => ({ type: 'message', id, role: 'agent', text: t, streaming: true }));
+}
+
+function thinkingBlock(id: string, text: string, streaming: boolean, subagentId: string | undefined): ThinkingDisplayBlock {
+  return { type: 'thinking', id, text, streaming, ...(subagentId ? { subagentId } : {}) };
+}
+
+function thinkingDelta(view: TaskLogView, { text, subagentId }: Event<'thinking_delta'>): TaskLogView {
+  const [placed, lane] = laneOf(view, subagentId);
+  return streamDelta(placed, lane, thinkingStream(subagentId), text, (id, t) => thinkingBlock(id, t, true, subagentId));
+}
+
+function thinkingWhole(view: TaskLogView, { text, subagentId }: Event<'thinking'>): TaskLogView {
+  const [placed, lane] = laneOf(view, subagentId);
+  return streamWhole(placed, lane, thinkingStream(subagentId), text, (id) => thinkingBlock(id, blockText(text), false, subagentId));
+}
+
+function announceTool(view: TaskLogView, { id: toolCallId, name, args, subagentId }: Event<'tool_call'>): TaskLogView {
+  const { tool, toolLabel } = mapAgentTool(name);
+  const [placed, lane] = laneOf(view, subagentId);
+  return appendOutput(placed, lane, (id) => {
+    const call = pendingTool(id, { tool, toolLabel, args, toolCallId });
+    const parsed = parseArgs(args);
+    // Headline from the normalized arguments, as the harness planner's rows
+    // are, so a `Read` or a Codex argv reads the same in both views.
+    return parsed ? { ...call, headline: toolHeadline(tool, JSON.stringify(normalizeAgentArgs(tool, parsed)), toolLabel) } : call;
+  });
+}
+
+function parseArgs(args: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(args);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function settleTool(view: TaskLogView, { id: toolCallId, output, success, subagentId }: Event<'tool_result'>): TaskLogView {
+  const [placed, lane] = laneOf(view, subagentId);
+  const blocks = laneBlocks(placed, lane);
+  const i = findLastIndex(blocks, (b) => b.type === 'tool' && b.status === 'pending' && b.toolCallId === toolCallId);
+  const pending = blocks[i];
+  const outcome = success ? 'success' : 'failure';
+  if (pending?.type === 'tool') return laneReplace(placed, lane, i, finishedTool(pending, output, outcome));
+  // The call that spawned a subagent is shown by the subagent's block, and
+  // only the subagent's own finish settles it: a backgrounded agent's call
+  // returns at launch, long before the work ends.
+  if (lane === null && blocks.some((b) => b.type === 'subagent' && b.toolCallId === toolCallId)) return view;
+  return laneAppend(placed, lane, (id) => finishedTool(pendingTool(id, { tool: 'agent_tool', toolLabel: 'Tool', args: '', toolCallId }), output, outcome));
+}
+
+function startSubagent(view: TaskLogView, { subagentId, brief, model }: Event<'subagent_started'>): TaskLogView {
+  return updateSubagent(view, subagentId, undefined, (block) => ({ ...block, ...(brief ? { brief } : {}), ...(model ? { model } : {}) }));
+}
+
+function finishSubagent(view: TaskLogView, { subagentId, outcome, digest }: Event<'subagent_finished'>): TaskLogView {
+  const usage = view.usage?.bySubagent?.[subagentId];
+  const next = updateSubagent(view, subagentId, undefined, (block) => ({
+    ...block, status: outcome, digest, children: block.children.map(sealed), ...(usage ? { usage } : {}),
+  }));
+  return withoutStream(next, thinkingStream(subagentId));
+}
+
+function reportUsage(view: TaskLogView, { record }: Event<'usage'>): TaskLogView {
+  const usage = addPlannerUsage(view.usage ?? { totals: {} }, record);
+  const next = { ...view, usage };
+  return isMeasured(usage.totals) ? setUsageLine(next, usageLine(usage)) : next;
+}
+
+function startTurn(view: TaskLogView, { message, messageId }: Event<'turn_start'>): TaskLogView {
+  const queued = messageId ? view.queued.filter((m) => m.id !== messageId) : view.queued;
+  return append({ ...view, queued, working: true }, (id) => settledMessage(id, 'user', message));
+}
+
+const CUT: Record<StructuredTurnEnd, SubagentStatus | null> = { completed: null, interrupted: 'stopped', failed: 'failed' };
+
+function endTurn(view: TaskLogView, { reason }: Event<'turn_end'>): TaskLogView {
+  const closed = closeOpenBlocks({ ...view, working: false, lastTurnEnd: reason, streams: {} }, CUT[reason]);
+  return reason === 'interrupted' ? append(closed, (id) => settledMessage(id, 'system', 'Interrupted.')) : closed;
+}
+
+function queueMessage(view: TaskLogView, { messageId, text }: Event<'message_queued'>): TaskLogView {
+  if (view.queued.some((m) => m.id === messageId)) return view;
+  return { ...view, queued: [...view.queued, { id: messageId, text }] };
+}
+
+function unqueueMessage(view: TaskLogView, { messageId }: Event<'message_removed'>): TaskLogView {
+  const queued = view.queued.filter((m) => m.id !== messageId);
+  return queued.length === view.queued.length ? view : { ...view, queued };
+}
+
+/**
+ * Fold one task-log event into the view. Pure and incremental, like
+ * `reduceConversation`: an event that changes nothing returns `view` itself,
+ * and an event of a type this build does not know is skipped — a log written
+ * by a newer Ordewell still reads.
+ */
+export function reduceTaskLog(view: TaskLogView, event: TaskLogEvent): TaskLogView {
+  switch (event.type) {
+    case 'turn_start': return startTurn(view, event);
+    case 'turn_end': return endTurn(view, event);
+    case 'text_delta': return agentTextDelta(view, event.text);
+    case 'text': return agentText(view, event.text);
+    case 'thinking_delta': return thinkingDelta(view, event);
+    case 'thinking': return thinkingWhole(view, event);
+    case 'tool_call': return announceTool(view, event);
+    case 'tool_result': return settleTool(view, event);
+    case 'subagent_started': return startSubagent(view, event);
+    case 'subagent_finished': return finishSubagent(view, event);
+    case 'usage': return reportUsage(view, event);
+    case 'message_queued': return queueMessage(view, event);
+    case 'message_removed': return unqueueMessage(view, event);
+    case 'error': return appendOutput(view, null, (id) => settledMessage(id, 'error', event.message));
+    default: return view;
+  }
+}
+
+/** A whole attempt's events, folded from the start — what a reload shows. */
+export function replayTaskLog(events: readonly TaskLogEvent[], from: TaskLogView = EMPTY_TASK_LOG): TaskLogView {
+  return events.reduce(reduceTaskLog, from);
+}

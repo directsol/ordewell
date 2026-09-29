@@ -21,6 +21,9 @@ import type { SessionBroadcaster, SessionNotice } from './SessionMessage';
 import { SessionEventRelay } from './SessionEventRelay';
 import { conflictResolverTask } from './Landing';
 import { saveSession } from '../utils/sessionStore';
+import { listTaskLogAttempts, readTaskLog, type TaskLogFile, type TaskLogLocation } from '../utils/taskLogStore';
+import type { TaskLogEvent } from '../models/TaskLog';
+import { TaskLogRecorder } from './TaskLogRecorder';
 import { PlannerUsageLedger } from './PlannerUsage';
 import { mintSessionId } from '../utils/sessionId';
 import { savePrdMarkdown, extractPrdBlock } from '../utils/prdStore';
@@ -205,6 +208,8 @@ export interface SessionDeps {
   isolation?: IWorktreeIsolation;
   /** Persistence seam. Defaults to the saved-session store under the workspace. */
   saveSession?: SaveSession;
+  /** Where a structured task's log is saved (ADR-0018, P1). Defaults to a file per attempt beside the session's. */
+  openTaskLog?: (location: TaskLogLocation, taskId: string) => TaskLogFile;
 }
 
 /**
@@ -243,10 +248,17 @@ export function createSession(deps: SessionDeps): Session {
   const pinnedAiService = deps.aiService;
   const aiService = pinnedAiService ? () => pinnedAiService : liveAiService(deps.config, deps.workspaceRoot);
   const store = new PlanStore();
+  const taskLogs = new TaskLogRecorder({
+    broadcast: deps.broadcast,
+    // Read through the Session, whose id and workspace are the ones it saves
+    // under and can change with a plan. Only read once a task spawns.
+    location: () => session.taskLogLocation,
+    open: deps.openTaskLog,
+  });
   const orchestrator = createTaskOrchestrator({
     config: deps.config,
     notifications: deps.notifications,
-    terminalRunner: deps.runner,
+    terminalRunner: taskLogs.wrap(deps.runner),
     store,
     output: deps.taskOutput,
     isolation: deps.isolation,
@@ -300,7 +312,7 @@ export function createSession(deps: SessionDeps): Session {
   });
   deps.fsAdapter.setApproval?.(approvalPolicy);
 
-  return new Session({
+  const session = new Session({
     config: deps.config,
     registry: deps.registry,
     workspace: deps.workspaceRoot(),
@@ -325,6 +337,7 @@ export function createSession(deps: SessionDeps): Session {
     saveSession: deps.saveSession ?? saveSession,
     conversation: (host) => (conversation = new PlannerConversation(host)),
   });
+  return session;
 }
 
 /** What {@link createSession} hands a Session: every collaborator, already built and wired. */
@@ -475,6 +488,19 @@ export class Session {
 
   /** The stable id this session persists under — matches the host's id when one was provided. */
   get sessionId(): string { return this.currentSessionId; }
+  /** Where this session's structured task logs are saved (ADR-0018, P1). */
+  get taskLogLocation(): TaskLogLocation { return { baseDir: this.workspace, sessionId: this.currentSessionId }; }
+
+  /** The attempts of a task that have a saved log, oldest first. */
+  taskLogAttempts(taskId: string): number[] {
+    return listTaskLogAttempts(this.taskLogLocation, taskId);
+  }
+
+  /** One attempt's saved log, for `replayTaskLog` — what a reopened task view shows. */
+  taskLog(taskId: string, attempt: number): TaskLogEvent[] {
+    return readTaskLog(this.taskLogLocation, taskId, attempt);
+  }
+
   get executionLog(): ReadonlyArray<TaskSnapshot> { return this.store.getExecutionLog(); }
   /** Tasks always read from PlanStore — the single source of truth. */
   get planTasks(): ReadonlyArray<Readonly<Task>> { return this.store.planTasks; }

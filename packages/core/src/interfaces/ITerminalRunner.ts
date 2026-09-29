@@ -39,13 +39,17 @@ export type StructuredTurnEnd = 'completed' | 'interrupted' | 'failed';
 
 /**
  * One normalized event from a structured task (ADR-0018, O1b): the adapter's
- * events, with the turn made explicit at both ends. Subagent work carries its
- * `subagentId`. The source for the full-fidelity task log, never for verdicts.
+ * events, with the turn made explicit at both ends and the message queue (M1)
+ * alongside. Subagent work carries its `subagentId`. The source for the
+ * full-fidelity task log, never for verdicts.
  */
 export type StructuredEvent =
   | Exclude<AgentEvent, { type: 'turn_end' }>
-  | { type: 'turn_start'; text: string }
-  | { type: 'turn_end'; reason: StructuredTurnEnd };
+  /** `text` is the user message the turn answers; `messageId` is set when it had waited in the queue. */
+  | { type: 'turn_start'; text: string; messageId?: string }
+  | { type: 'turn_end'; reason: StructuredTurnEnd }
+  | { type: 'message_queued'; messageId: string; text: string }
+  | { type: 'message_removed'; messageId: string };
 
 export interface QueuedTaskMessage {
   id: string;

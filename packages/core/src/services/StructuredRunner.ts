@@ -207,14 +207,19 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
     this.messageCount += 1;
     const id = `msg-${this.messageCount}`;
     if (this.state === 'idle' && this.adapterStarted && !this.exited) this.deliver(text);
-    else this.queue.push({ id, text });
+    else {
+      this.queue.push({ id, text });
+      this.emitEvent({ type: 'message_queued', messageId: id, text });
+    }
     return id;
   }
 
   removeQueued(id: string): boolean {
     const before = this.queue.length;
     this.queue = this.queue.filter((m) => m.id !== id);
-    return this.queue.length < before;
+    if (this.queue.length === before) return false;
+    this.emitEvent({ type: 'message_removed', messageId: id });
+    return true;
   }
 
   queued(): QueuedTaskMessage[] { return this.queue.map((m) => ({ ...m })); }
@@ -285,14 +290,14 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
     });
   }
 
-  private deliver(text: string): void {
+  private deliver(text: string, messageId?: string): void {
     const adapter = this.adapter;
     if (!adapter) return;
     this.turnCount += 1;
     const turn = { id: this.turnCount, abort: new AbortController(), ended: false };
     this.turn = turn;
     this.state = 'working';
-    this.emitEvent({ type: 'turn_start', text });
+    this.emitEvent({ type: 'turn_start', text, ...(messageId ? { messageId } : {}) });
     const generation = this.generation;
     let reason: StructuredTurnEnd = 'completed';
 
@@ -336,7 +341,7 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
     const next = this.exited ? undefined : this.queue.shift();
     if (!next) this.state = 'idle';
     this.structuredEmitter.emit('turnEnd', reason);
-    if (next) this.deliver(next.text);
+    if (next) this.deliver(next.text, next.id);
   }
 
   private emitEvent(event: StructuredEvent): void {

@@ -1,8 +1,12 @@
 import type { ResearchStep } from '../models/Task';
 import type { SessionMessage } from '../services/SessionMessage';
 import { isMeasured } from '../models/Usage';
-import type { DisplayBlock, MessageBlock, PlanBlock, SubagentBlock, SubagentChild, SubagentStatus, ToolBlock } from './blocks';
-import { pendingTool, planMarker, settledMessage, settledTool, subagentBlock, toolFromStep, usageBlock } from './records';
+import type { DisplayBlock, MessageBlock, PlanBlock, ToolBlock } from './blocks';
+import { pendingTool, planMarker, settledMessage, settledTool, toolFromStep } from './records';
+import {
+  append, appendOutput, closeOpenBlocks, findLastIndex, laneBlocks, laneOf, laneAppend, laneReplace, replaceAt, sealLane, sealed, setUsageLine,
+  think, updateSubagent, type BlockList,
+} from './lanes';
 
 /**
  * A line a surface adds to the conversation itself rather than receiving from
@@ -16,9 +20,7 @@ export interface LocalEntry {
 
 export type ConversationInput = SessionMessage | LocalEntry;
 
-export interface ConversationView {
-  readonly blocks: readonly DisplayBlock[];
-  readonly nextId: number;
+export interface ConversationView extends BlockList {
   /**
    * The newest transcript entry the view accounts for. Plan markers and system
    * notes reach a surface only inside the transcript a `plan_generated`
@@ -30,81 +32,6 @@ export interface ConversationView {
 export const EMPTY_CONVERSATION: ConversationView = { blocks: [], nextId: 1 };
 
 type Message<T extends SessionMessage['type']> = Extract<SessionMessage, { type: T }>;
-
-/** The top level of the conversation (`null`), or the index of the subagent whose children are meant. */
-type Lane = number | null;
-
-function findLastIndex<T>(items: readonly T[], match: (item: T) => boolean): number {
-  for (let i = items.length - 1; i >= 0; i--) if (match(items[i])) return i;
-  return -1;
-}
-
-function replaceAt<T>(items: readonly T[], index: number, item: T): T[] {
-  const next = items.slice();
-  next[index] = item;
-  return next;
-}
-
-// The usage line always sits last, so everything else lands above it.
-function insertTop(blocks: readonly DisplayBlock[], block: DisplayBlock): DisplayBlock[] {
-  const last = blocks[blocks.length - 1];
-  return last?.type === 'usage' ? [...blocks.slice(0, -1), block, last] : [...blocks, block];
-}
-
-function append(view: ConversationView, make: (id: string) => DisplayBlock): ConversationView {
-  return { ...view, blocks: insertTop(view.blocks, make(`b${view.nextId}`)), nextId: view.nextId + 1 };
-}
-
-function subagentAt(view: ConversationView, lane: number): SubagentBlock {
-  const block = view.blocks[lane];
-  if (block.type !== 'subagent') throw new Error(`block ${lane} is not a subagent`);
-  return block;
-}
-
-function laneBlocks(view: ConversationView, lane: Lane): readonly DisplayBlock[] {
-  return lane === null ? view.blocks : subagentAt(view, lane).children;
-}
-
-function setChildren(view: ConversationView, lane: number, children: readonly SubagentChild[]): ConversationView {
-  return { ...view, blocks: replaceAt(view.blocks, lane, { ...subagentAt(view, lane), children }) };
-}
-
-function laneReplace(view: ConversationView, lane: Lane, index: number, block: SubagentChild): ConversationView {
-  if (lane === null) return { ...view, blocks: replaceAt(view.blocks, index, block) };
-  return setChildren(view, lane, replaceAt(subagentAt(view, lane).children, index, block));
-}
-
-function laneAppend(view: ConversationView, lane: Lane, make: (id: string) => SubagentChild): ConversationView {
-  if (lane === null) return append(view, make);
-  const children = [...subagentAt(view, lane).children, make(`b${view.nextId}`)];
-  return { ...setChildren(view, lane, children), nextId: view.nextId + 1 };
-}
-
-function isStreaming(block: DisplayBlock): boolean {
-  return (block.type === 'message' || block.type === 'thinking') && block.streaming;
-}
-
-function sealed<B extends DisplayBlock>(block: B): B {
-  return isStreaming(block) ? { ...block, streaming: false } : block;
-}
-
-/**
- * Planner output landed at `keep` in the lane, so nothing else there is still
- * streaming: one lane has one voice at a time, and a block left marked as
- * streaming would keep its cursor after its text had moved on.
- */
-function sealLane(view: ConversationView, lane: Lane, keep: number): ConversationView {
-  const blocks = laneBlocks(view, lane);
-  if (!blocks.some((b, i) => i !== keep && isStreaming(b))) return view;
-  if (lane === null) return { ...view, blocks: view.blocks.map((b, i) => (i === keep ? b : sealed(b))) };
-  return setChildren(view, lane, subagentAt(view, lane).children.map((b, i) => (i === keep ? b : sealed(b))));
-}
-
-/** Append planner output to the lane, which then speaks through it alone. */
-function appendOutput(view: ConversationView, lane: Lane, make: (id: string) => SubagentChild): ConversationView {
-  const next = laneAppend(view, lane, make);
-  return sealLane(next, lane, findLastIndex(laneBlocks(next, lane), (b) => b.type !== 'usage'));
-}
 
 function isUnsettledSegment(block: DisplayBlock, turnId: string): block is MessageBlock {
   return block.type === 'message' && block.turnId === turnId && block.segmentId !== undefined;
@@ -178,32 +105,6 @@ function retractText(view: ConversationView, { turnId, segmentId }: Message<'pla
   return dropBuildingPlan(blocks.length === view.blocks.length ? view : { ...view, blocks }, turnId, segmentId);
 }
 
-/**
- * The subagent's block, created on first sighting: its activity can arrive
- * before (or without) its start. The planner call that spawns it becomes the
- * block, keeping the call's id and position — the call and the subagent are
- * one thing on screen.
- */
-function subagentLane(view: ConversationView, subagentId: string, turnId?: string): [ConversationView, number] {
-  const existing = findLastIndex(view.blocks, (b) => b.type === 'subagent' && b.subagentId === subagentId);
-  if (existing >= 0) return [view, existing];
-  const spawn = findLastIndex(view.blocks, (b) => b.type === 'tool' && (b.spawns === subagentId || b.toolCallId === subagentId));
-  const call = view.blocks[spawn];
-  if (call?.type === 'tool') {
-    const block = subagentBlock(call.id, {
-      subagentId, brief: call.headline.keyArg, status: 'running', children: [], digest: '', toolCallId: call.toolCallId, turnId: call.turnId,
-    });
-    return [{ ...view, blocks: replaceAt(view.blocks, spawn, block) }, spawn];
-  }
-  const next = append(view, (id) => subagentBlock(id, { subagentId, brief: '', status: 'running', children: [], digest: '', turnId }));
-  return [next, findLastIndex(next.blocks, (b) => b.type === 'subagent' && b.subagentId === subagentId)];
-}
-
-function updateSubagent(view: ConversationView, subagentId: string, turnId: string | undefined, update: (block: SubagentBlock) => SubagentBlock): ConversationView {
-  const [next, lane] = subagentLane(view, subagentId, turnId);
-  return { ...next, blocks: replaceAt(next.blocks, lane, update(subagentAt(next, lane))) };
-}
-
 function startSubagent(view: ConversationView, { subagentId, brief, model, turnId }: Message<'subagent_started'>): ConversationView {
   return updateSubagent(view, subagentId, turnId, (block) => ({ ...block, ...(brief ? { brief } : {}), ...(model ? { model } : {}) }));
 }
@@ -214,27 +115,11 @@ function finishSubagent(view: ConversationView, { subagentId, outcome, digest, u
   }));
 }
 
-function think(view: ConversationView, text: string, turnId?: string, segmentId?: string, subagentId?: string): ConversationView {
-  const [placed, lane]: [ConversationView, Lane] = subagentId ? subagentLane(view, subagentId, turnId) : [view, null];
-  const blocks = laneBlocks(placed, lane);
-  const lastIndex = findLastIndex(blocks, (b) => b.type !== 'usage');
-  const last = blocks[lastIndex];
-  if (last?.type === 'thinking' && last.streaming && last.segmentId === segmentId) {
-    return laneReplace(placed, lane, lastIndex, { ...last, text: last.text + text });
-  }
-  return appendOutput(placed, lane, (id) => ({
-    type: 'thinking', id, text, streaming: true,
-    ...(turnId ? { turnId } : {}),
-    ...(segmentId ? { segmentId } : {}),
-    ...(subagentId ? { subagentId } : {}),
-  }));
-}
-
 function announceTool(view: ConversationView, call: Message<'research_step'>): ConversationView {
   // A spawn call names the subagent it starts; any other call tagged with a
   // subagent is that subagent's own.
   const spawns = call.tool === 'spawn_research_agent' ? call.subagentId : undefined;
-  const [placed, lane]: [ConversationView, Lane] = call.subagentId && !spawns ? subagentLane(view, call.subagentId, call.turnId) : [view, null];
+  const [placed, lane] = laneOf(view, spawns ? undefined : call.subagentId, call.turnId);
   return appendOutput(placed, lane, (id) => ({ ...pendingTool(id, call), ...(spawns ? { spawns } : {}) }));
 }
 
@@ -247,7 +132,7 @@ function isPendingCallOf(block: DisplayBlock, step: ResearchStep): block is Tool
 }
 
 function settleTool(view: ConversationView, { step, turnId }: Message<'research_step_done'>): ConversationView {
-  const [placed, lane]: [ConversationView, Lane] = step.subagentId ? subagentLane(view, step.subagentId, turnId) : [view, null];
+  const [placed, lane] = laneOf(view, step.subagentId, turnId);
   const blocks = laneBlocks(placed, lane);
   const i = findLastIndex(blocks, (b) => isPendingCallOf(b, step));
   const pending = blocks[i];
@@ -310,21 +195,7 @@ function decideApproval(view: ConversationView, { kind, subject, scope, detail, 
 }
 
 function reportUsage(view: ConversationView, message: Message<'planner_usage'>): ConversationView {
-  if (!isMeasured(message.totals)) return view;
-  const last = view.blocks[view.blocks.length - 1];
-  const line = usageBlock(last?.type === 'usage' ? last.id : `b${view.nextId}`, message);
-  if (last?.type === 'usage') return { ...view, blocks: replaceAt(view.blocks, view.blocks.length - 1, line) };
-  return { ...view, blocks: [...view.blocks, line], nextId: view.nextId + 1 };
-}
-
-function closeBlock<B extends DisplayBlock>(block: B, interrupted: boolean): B {
-  return interrupted && block.type === 'tool' && block.status === 'pending' ? { ...block, status: 'interrupted' } : sealed(block);
-}
-
-function closeSubagent(block: SubagentBlock, cut: SubagentStatus | null): SubagentBlock {
-  const children = block.children.map((c) => closeBlock(c, cut !== null));
-  const status = cut && block.status === 'running' ? cut : block.status;
-  return status === block.status && children.every((c, i) => c === block.children[i]) ? block : { ...block, status, children };
+  return isMeasured(message.totals) ? setUsageLine(view, message) : view;
 }
 
 /**
@@ -338,9 +209,7 @@ function endTurn(view: ConversationView, { turnId, outcome }: Message<'planner_t
   let next = dropBuildingPlan(view, turnId);
   const planText = outcome === 'plan' ? finalSegmentIndex(next.blocks, turnId, true) : -1;
   if (planText >= 0) next = { ...next, blocks: next.blocks.filter((_, i) => i !== planText) };
-  const cut: SubagentStatus | null = outcome === 'stopped' ? 'stopped' : outcome === 'error' ? 'failed' : null;
-  const blocks = next.blocks.map((b) => (b.type === 'subagent' ? closeSubagent(b, cut) : closeBlock(b, cut !== null)));
-  return blocks.every((b, i) => b === next.blocks[i]) ? next : { ...next, blocks };
+  return closeOpenBlocks(next, outcome === 'stopped' ? 'stopped' : outcome === 'error' ? 'failed' : null);
 }
 
 // The summary is announced as a planner message before the transcript it now

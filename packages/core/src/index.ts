@@ -1,6 +1,7 @@
 export * from './models/Task';
 export * from './models/Session';
 export * from './models/Usage';
+export * from './models/TaskLog';
 export * from './interfaces/IFileSystem';
 export { BaseFileSystem } from './services/BaseFileSystem';
 export { STOPPED_TOOL_RESULT } from './services/executeTool';
@@ -128,6 +129,8 @@ export { StructuredRunner, StructuredSession } from './services/StructuredRunner
 export type { StructuredRunnerDeps, StructuredSpawnOptions } from './services/StructuredRunner';
 export { TransportRouter, routeTransport } from './services/TransportRouter';
 export type { TransportRoute } from './services/TransportRouter';
+export { TaskLogRecorder } from './services/TaskLogRecorder';
+export type { TaskLogRecorderDeps } from './services/TaskLogRecorder';
 export * from './utils/shell';
 export {
   planDirectLaunch,
@@ -182,6 +185,7 @@ export type { RunnerPluginManifest, RunnerInvocation, PluginEntry, ResolveContex
 export * from './utils/fsHelpers';
 export * from './utils/stateStore';
 export * from './utils/sessionStore';
+export * from './utils/taskLogStore';
 export { mintSessionId } from './utils/sessionId';
 export { extractPrdBlock, savePrdMarkdown, sanitizeSlug } from './utils/prdStore';
 export type { PrdBlock } from './utils/prdStore';
