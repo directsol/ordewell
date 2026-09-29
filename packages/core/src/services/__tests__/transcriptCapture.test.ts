@@ -3,6 +3,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'fs';
 import { tmpdir } from 'os';
 import * as path from 'path';
 import { HomeTranscriptReader } from '../transcriptCapture';
+import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
+import { FakeTerminalSession } from '../../testing';
 
 let fakeHome: string;
 let reader: HomeTranscriptReader;
@@ -242,5 +244,62 @@ describe('HomeTranscriptReader', () => {
       expect(await reader.finalAssistantText({ runner: 'opencode', cwd: CWD, startedAt, marker: 'mk-a' })).toBe('opencode answer A');
       expect(await reader.finalAssistantText({ runner: 'opencode', cwd: CWD, startedAt, marker: 'mk-c' })).toBeNull();
     });
+  });
+});
+
+describe('a continued attempt (ADR-0018, K1)', () => {
+  // `--resume` appends to the same transcript, so the earlier attempt's
+  // marker-bearing answer is still in it, above the continued one.
+  type Turn = { at: number; user: string; answer?: string };
+  function resumedSession(file: string, turns: Turn[]): void {
+    writeFileSync(file, turns.flatMap(({ at, user, answer }) => [
+      claudeLine('user', { timestamp: new Date(at).toISOString(), message: { role: 'user', content: [{ type: 'text', text: user }] } }),
+      ...(answer === undefined ? [] : [
+        claudeLine('assistant', { timestamp: new Date(at + 1000).toISOString(), isSidechain: false, message: { role: 'assistant', content: [{ type: 'text', text: answer }] } }),
+      ]),
+    ]).join('\n'));
+  }
+  const now = Date.now();
+  const firstAttempt: Turn = { at: now - 60_000, user: promptFor('mk-1'), answer: 'Parsed objects.\n<<<ORDEWELL_DONE_mk-1>>>' };
+  const continuedAt = now - 10_000;
+  const attempt = { taskId: 't1', runner: 'claude-code', cwd: CWD, startedAt: new Date(continuedAt).toISOString(), completionMarker: 'mk-1' };
+  const projectDir = () => {
+    const dir = path.join(fakeHome, '.claude', 'projects', MUNGED);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+
+  it('picks the newest marker-bearing answer, not the earlier attempt\'s', async () => {
+    resumedSession(path.join(projectDir(), 'sess-1.jsonl'), [
+      firstAttempt,
+      { at: continuedAt + 1000, user: `also handle arrays\n\n---\n${promptFor('mk-1')}`, answer: 'Arrays handled too.\n<<<ORDEWELL_DONE_mk-1>>>' },
+    ]);
+    const output = new BufferedTaskOutputSource({ transcripts: reader });
+
+    const summary = await output.finalText(attempt, '<<<ORDEWELL_DONE_mk-1>>>');
+
+    expect(summary).toContain('Arrays handled too.');
+    expect(summary).not.toContain('Parsed objects.');
+  });
+
+  it('falls back to the attempt\'s own output while its answer is not yet in the transcript, never the earlier one', async () => {
+    // The verdict reads the summary as the marker streams out, which can be
+    // before Claude writes the turn down.
+    resumedSession(path.join(projectDir(), 'sess-1.jsonl'), [firstAttempt, { at: continuedAt + 1000, user: 'also handle arrays' }]);
+    const output = new BufferedTaskOutputSource({ transcripts: reader });
+    const session = new FakeTerminalSession('s2', 't1');
+    output.attach('t1', session);
+    session.emitOutput('Arrays handled too.\n<<<ORDEWELL_DONE_mk-1>>>\n');
+
+    const summary = await output.finalText(attempt, '<<<ORDEWELL_DONE_mk-1>>>');
+
+    expect(summary).toContain('Arrays handled too.');
+    expect(summary).not.toContain('Parsed objects.');
+  });
+
+  it('keeps records with no timestamp, as it always read them', async () => {
+    claudeSession(path.join(projectDir(), 'old-format.jsonl'), 'mk-1', 'Done, no timestamps here.');
+
+    expect(await reader.finalAssistantText({ runner: 'claude-code', cwd: CWD, marker: 'mk-1', startedAt: attempt.startedAt })).toBe('Done, no timestamps here.');
   });
 });

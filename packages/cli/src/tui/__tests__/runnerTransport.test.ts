@@ -16,8 +16,9 @@ const task = (over: Partial<TaskView> = {}): TaskView => ({
 
 // eslint-disable-next-line no-control-regex
 const plain = (state: TuiState): string => render(state).join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+// A fixed workspace: the status bar prints it, and a checkout path can itself say "structured".
 const planState = (over: Partial<TuiState> = {}): TuiState =>
-  initialState({ sessionId: 's1', rows: 20, cols: 180, focus: 'plan', ...over });
+  initialState({ sessionId: 's1', rows: 20, cols: 180, focus: 'plan', workspace: '/repo', ...over });
 
 describe('/transport', () => {
   it.each(['terminal', 'structured'] as const)('/transport %s sets it through the daemon', (transport) => {

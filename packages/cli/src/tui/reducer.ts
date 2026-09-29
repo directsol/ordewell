@@ -6,11 +6,11 @@ import { activeToken, findCommand, parseSlash, tokenCompletions } from './slash'
 import { applyKey, commit } from './editor';
 import { say, wiped } from './transcript';
 import { blockedPicker, clearIsolation, handoffArrived, isolationForPlan, sameIsolation, showDiff } from './handoff';
-import { findTask, isTaskRunning, planRows, plannerInFlight, type RunStatus, type TaskTransportView, type TaskView, type TuiState } from './state';
+import { continuesTask, findTask, isTaskRunning, planRows, plannerInFlight, type RunStatus, type TaskTransportView, type TaskView, type TuiState } from './state';
 import type { Key } from './keys';
 import { handleOverlayKey } from './reducers/overlays';
 import { handlePlanKey } from './reducers/planPane';
-import { handleTaskViewKey, taskLogAbandoned, taskLogArrived, taskLogLoaded } from './reducers/taskView';
+import { continueTaskStep, handleTaskViewKey, taskLogAbandoned, taskLogArrived, taskLogLoaded } from './reducers/taskView';
 import { pickRewindTarget, runCommand } from './reducers/commands';
 import { disarmStop, drainQueue, plannerEscape } from './reducers/turnQueue';
 import { applySettings, followSession, normalizeTasks, runLabel } from './reducers/incoming';
@@ -144,12 +144,13 @@ export function reduce(state: TuiState, action: Action): Step {
         // means the task's latest attempt was not asked to run structured.
         const transport = update.transport;
         const awaitingReason = update.awaitingReason;
+        const continuable = update.continuable === true;
         if (
           update.status !== t.status || idleSince !== (t.idleSince ?? null) || !sameIsolation(isolation, t.isolation)
-          || !sameTransport(transport, t.transport) || awaitingReason !== t.awaitingReason
+          || !sameTransport(transport, t.transport) || awaitingReason !== t.awaitingReason || continuable !== (t.continuable ?? false)
         ) {
           changed = true;
-          return { ...t, status: update.status, idleSince, isolation, transport, awaitingReason };
+          return { ...t, status: update.status, idleSince, isolation, transport, awaitingReason, continuable };
         }
         return t;
       });
@@ -442,9 +443,12 @@ function submit(state: TuiState): Step {
 
   // The task view's composer talks to the runner, not the planner: the daemon
   // queues the message (or delivers it to a waiting task) and the log shows it.
+  // A finished task has no turn to message; its composer continues it instead.
   if (state.taskView) {
     if (!state.sessionId) return step(state);
-    return step(cleared, [{ type: 'sendTaskMessage', sessionId: state.sessionId, taskId: state.taskView.taskId, text }]);
+    const taskId = state.taskView.taskId;
+    if (continuesTask(findTask(state.tasks, taskId))) return continueTaskStep(cleared, state.sessionId, taskId, text);
+    return step(cleared, [{ type: 'sendTaskMessage', sessionId: state.sessionId, taskId, text }]);
   }
 
   // A prompt while a turn answers is held, not sent: the transcript would

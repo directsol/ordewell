@@ -30,6 +30,7 @@ export interface OrdewellApi {
   sendTaskMessage(sessionId: string, taskId: string, text: string): Promise<{ id: string }>;
   removeQueuedTaskMessage(sessionId: string, taskId: string, messageId: string): Promise<{ removed: boolean }>;
   interruptTask(sessionId: string, taskId: string): Promise<{ ok: boolean }>;
+  continueTask(sessionId: string, taskId: string, text: string): Promise<{ ok: boolean }>;
   addTask(sessionId: string, task: Record<string, unknown>): Promise<{ ok: boolean }>;
   updateTask(sessionId: string, taskId: string, changes: Record<string, unknown>): Promise<{ ok: boolean }>;
   removeTask(sessionId: string, taskId: string): Promise<{ ok: boolean }>;
@@ -327,6 +328,16 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
     case 'sendTaskMessage':
       await api.sendTaskMessage(effect.sessionId, effect.taskId, effect.text);
       return;
+
+    // The daemon starts the new attempt; its `task_log` and status arrive over
+    // the execution stream, which a TUI not already watching a run holds open.
+    case 'continueTask': {
+      const { sessionId, taskId, text } = effect;
+      const request = () => api.continueTask(sessionId, taskId, text);
+      await (effect.watch ? withExecutionStream(deps, sessionId, request) : request());
+      await refreshPlan(deps, sessionId);
+      return;
+    }
 
     case 'removeTaskMessage': {
       const { removed } = await api.removeQueuedTaskMessage(effect.sessionId, effect.taskId, effect.messageId);

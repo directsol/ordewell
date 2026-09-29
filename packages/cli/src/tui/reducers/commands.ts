@@ -8,7 +8,7 @@ import { modelsForRunner } from '../taskAssignment';
 import { say } from '../transcript';
 import { DEFAULT_EFFORT, picker, pickerItemsFor, plannerEffortItems, plannerItems, providerErrorHint } from './pickers';
 import { taskActionEffect } from './planPane';
-import { openTaskTerminalOrView } from './taskView';
+import { continueTaskStep, openTaskTerminalOrView } from './taskView';
 import {
   addTask, openTaskDepsPicker, taskCommand, taskEffortCommand, taskModeCommand, taskModelCommand, taskRunnerCommand,
 } from './taskEdits';
@@ -108,6 +108,13 @@ export function runCommand(state: TuiState, { name, args }: ParsedCommand): Step
       );
     case 'terminal':
       return taskCommand(state, args[0], (sessionId, taskId) => openTaskTerminalOrView(state, sessionId, taskId));
+    case 'continue':
+      return taskCommand(state, args[0], (sessionId, taskId) => {
+        const text = args.slice(1).join(' ').trim();
+        if (!text) return fail(state, 'Usage: /continue <id> <message>');
+        // The daemon owns the rule and says why it refuses, so nothing is pre-judged here.
+        return continueTaskStep(state, sessionId, taskId, text);
+      });
     case 'task-runner':
       return taskRunnerCommand(state, args);
     case 'task-model':

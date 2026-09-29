@@ -86,13 +86,20 @@ function claudeFinal(configDirs: string[], query: TranscriptQuery, maxChars: num
   for (const file of candidates) {
     const raw = readFileSync(file, 'utf8');
     if (!raw.includes(query.marker)) continue;
-    const text = claudeLastAssistant(raw);
+    const text = claudeLastAssistant(raw, cutoff);
     if (text) return clamp(text, maxChars);
   }
   return null;
 }
 
-function claudeLastAssistant(raw: string): string | null {
+/**
+ * Only records written since `since` count: a continued attempt resumes the
+ * same session file (ADR-0018, K1), so the earlier attempt's marker-bearing
+ * answer is still in it — and still its last record in the moment between the
+ * new marker streaming out and Claude writing the turn down. A record with no
+ * timestamp is kept, as every record was before.
+ */
+function claudeLastAssistant(raw: string, since: number): string | null {
   let last: string | null = null;
   // Parse only the tail: transcripts reach megabytes and the final answer is
   // the last text-bearing line. The cut moves forward to a line boundary so
@@ -101,13 +108,14 @@ function claudeLastAssistant(raw: string): string | null {
   const buf = start > 0 ? raw.slice(raw.indexOf('\n', start) + 1) : raw;
   for (const line of buf.split('\n')) {
     if (!line.trim()) continue;
-    let rec: { type?: string; isSidechain?: boolean; message?: { content?: unknown } };
+    let rec: { type?: string; isSidechain?: boolean; timestamp?: unknown; message?: { content?: unknown } };
     try {
       rec = JSON.parse(line);
     } catch {
       continue;
     }
     if (rec.type !== 'assistant' || rec.isSidechain) continue;
+    if (since && typeof rec.timestamp === 'string' && Date.parse(rec.timestamp) < since) continue;
     const content = rec.message?.content;
     if (!Array.isArray(content)) continue;
     const texts = content

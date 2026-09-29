@@ -63,10 +63,13 @@ export default function TaskLogApp() {
     return () => window.removeEventListener('message', handler);
   }, []);
 
+  // A finished task has no turn to message: its box continues it instead.
+  const continues = status?.continuable === true;
+
   const send = (): void => {
     const value = text.trim();
     if (!value) return;
-    vscode.postMessage({ type: 'sendTaskMessage', text: value });
+    vscode.postMessage(continues ? { type: 'continueTask', text: value } : { type: 'sendTaskMessage', text: value });
     setText('');
   };
 
@@ -132,9 +135,9 @@ export default function TaskLogApp() {
 
       <div className="task-log-composer">
         <textarea className="task-log-input" value={text} rows={2}
-          placeholder="Message the task… (Ctrl+Enter to send)"
+          placeholder={continues ? 'Continue the task in its saved session… (Ctrl+Enter to send)' : 'Message the task… (Ctrl+Enter to send)'}
           onChange={(e) => setText(e.target.value)} onKeyDown={onComposerKeyDown} />
-        <button type="button" className="task-log-send" disabled={!canSend} onClick={send}>Send</button>
+        <button type="button" className="task-log-send" disabled={!canSend} onClick={send}>{continues ? 'Continue' : 'Send'}</button>
       </div>
     </div>
   );

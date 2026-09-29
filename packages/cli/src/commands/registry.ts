@@ -11,7 +11,7 @@ import { handleAllowlist } from './allowlist';
 import { handleVerify } from './verify';
 import { handleTransport } from './transport';
 import { handleMarkComplete, handleSkip, handleUncomplete } from './mark-complete';
-import { handleRunTask, handleForceStart, handleRetry, handleCancel } from './task-control';
+import { handleRunTask, handleForceStart, handleRetry, handleCancel, handleContinue } from './task-control';
 import { handleAddTask } from './add-task';
 import { handleRemoveTask } from './remove-task';
 import { handleSessions } from './sessions';
@@ -68,6 +68,7 @@ export const COMMANDS: Record<string, (args: string[]) => Promise<void> | void> 
   'force-start': handleForceStart,
   'retry': handleRetry,
   'cancel': handleCancel,
+  continue: handleContinue,
   'add-task': handleAddTask,
   'remove-task': handleRemoveTask,
   'task-runner': handleTaskRunner,

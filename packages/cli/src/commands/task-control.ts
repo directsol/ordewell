@@ -76,6 +76,29 @@ function makeHandler(action: Action, command: string = action) {
   };
 }
 
+/**
+ * Continue a finished structured task in its saved runner session, with the
+ * rest of the line as its next turn (ADR-0018, K1). The daemon starts the new
+ * attempt; its progress is followed like any run (`ordewell status`).
+ */
+export async function handleContinue(subArgs: string[], injectedApi?: ApiClient): Promise<void> {
+  const usage = 'Usage: ordewell continue <task-id-or-order> <message> [--session-id <id>] [--workspace /path]';
+  const message = positionals(subArgs).slice(1).join(' ').trim();
+  if (!message) {
+    console.error(usage);
+    process.exit(1);
+  }
+  await withResolvedTask(subArgs, usage, injectedApi, async (api, sessionId, taskId) => {
+    try {
+      await api.continueTask(sessionId, taskId, message);
+      console.log('Task continued.');
+    } catch (err) {
+      console.error(`Failed to continue task: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+}
+
 export const handleRunTask = makeHandler('run', 'run-task');
 export const handleForceStart = makeHandler('force-start');
 export const handleRetry = makeHandler('retry');

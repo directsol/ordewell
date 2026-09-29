@@ -135,6 +135,20 @@ export function plansRoute(pool: OrchestratorPool) {
     }
   });
 
+  // Continue a finished structured task in its saved session (ADR-0018, K1).
+  // A task that cannot be continued is refused with the reason.
+  router.post('/:sessionId/tasks/:taskId/continue', async (c) => {
+    try {
+      const body: unknown = await c.req.json().catch(() => ({}));
+      const text = typeof body === 'object' && body !== null && 'text' in body ? body.text : undefined;
+      if (typeof text !== 'string' || !text.trim()) return c.json({ error: 'text is required' }, 400);
+      await pool.session(c.req.param('sessionId')).continueTask(c.req.param('taskId'), text);
+      return c.json({ ok: true });
+    } catch (err) {
+      return editFailure(c, err);
+    }
+  });
+
   router.delete('/:sessionId/tasks/:taskId/messages/:messageId', (c) => {
     try {
       const removed = pool.session(c.req.param('sessionId')).removeQueuedTaskMessage(c.req.param('taskId'), c.req.param('messageId'));

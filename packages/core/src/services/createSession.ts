@@ -1014,6 +1014,16 @@ export class Session {
     this.persist();
   }
 
+  /**
+   * Continue a finished structured task in its saved runner session with the
+   * user's message (ADR-0018, K1); throws `TaskControlError` for a task that
+   * cannot be continued.
+   */
+  async continueTask(taskId: string, message: string): Promise<void> {
+    await this.orchestrator.continueTask(taskId, message);
+    this.persist();
+  }
+
   async cancelTask(taskId: string): Promise<void> {
     await this.orchestrator.cancelTask(taskId);
     this.persist();

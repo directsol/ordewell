@@ -28,6 +28,8 @@ export interface TaskView {
   transport?: TaskTransportView;
   /** What an `awaiting_user` task waits on, when the daemon saved why. */
   awaitingReason?: AwaitingReason;
+  /** A finished structured task the daemon can continue in its saved session (ADR-0018, K1). */
+  continuable?: boolean;
   /** Child tasks, recursively shaped the same way; absent until populated by `toTaskView`. */
   subtasks?: TaskView[];
 }
@@ -478,6 +480,16 @@ export function selectedPlanRow(state: TuiState): PlanRow | null {
  * names a subtask as often as a top-level task, and a top-level-only lookup
  * would treat every subtask as gone the moment one is expanded.
  */
+/**
+ * A finished structured task the daemon can continue in its saved session
+ * (ADR-0018, K1): the composer continues it rather than messaging a turn.
+ * The status is checked too, so a start the daemon has not reported the
+ * flag's end for yet is not continued twice.
+ */
+export function continuesTask(task: TaskView | undefined): boolean {
+  return task?.continuable === true && (task.status === 'completed' || task.status === 'failed');
+}
+
 export function findTask(tasks: TaskView[], id: string): TaskView | undefined {
   for (const task of tasks) {
     if (task.id === id) return task;

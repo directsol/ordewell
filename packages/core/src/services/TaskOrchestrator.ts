@@ -3,7 +3,7 @@ import { Task, TaskSnapshot, Verdict, QueuedMessage, RunnerId, flattenTasksWithP
 import { IConfig } from '../interfaces/IConfig';
 import { INotification } from '../interfaces/INotification';
 import { isStructuredSession, type ITerminalRunner, type ITerminalSession, type QueuedTaskMessage, type RunnerTransport, type StructuredSessionCapability } from '../interfaces/ITerminalRunner';
-import { composeAugmentedPrompt, summarizeOutput } from './promptAugment';
+import { composeAugmentedPrompt, composeContinuationPrompt, summarizeOutput } from './promptAugment';
 import { VerdictEngine } from './VerdictEngine';
 import { BufferedTaskOutputSource } from './BufferedTaskOutputSource';
 import type { LiveTail, LiveTailOptions, TaskOutputSource } from '../interfaces/TaskOutputSource';
@@ -28,6 +28,7 @@ import { MessageQueue } from './MessageQueue';
 import { selectReadyTasks } from './readiness';
 import { resolveWorkspaceEnv, type WorkspaceEnv } from './workspaceEnv';
 import { routeTransport } from './TransportRouter';
+import { continuability } from './continuation';
 
 /**
  * The one notification channel out of the orchestrator. Everything that used
@@ -104,6 +105,8 @@ interface TaskAttempt {
   integration: Promise<LandingOutcome> | null;
   /** Set when this attempt is a conflict repair (ADR-0015) of work that already passed. */
   readonly repair: RepairAttempt | null;
+  /** Set when this attempt continues the task's saved runner session (ADR-0018, K1). */
+  readonly continuation: Continuation | null;
   readonly startedAt: string;
   /**
    * Set as its verdict arrives, before the verdict is applied: the turn that
@@ -114,6 +117,11 @@ interface TaskAttempt {
 }
 
 type AttemptPhase = 'starting' | 'running' | 'integrating';
+
+interface Continuation {
+  message: string;
+  resumeSessionId: string;
+}
 
 /** Read-only view of a task's live attempt. */
 export interface TaskAttemptSnapshot {
@@ -436,6 +444,12 @@ export class TaskOrchestrator {
       return;
     }
     if (this.store.get(taskId)?.status !== 'in_progress') return;
+    if (this.unresumed(attempt)) {
+      // There is no session to wait in. Ending the runner hands the attempt to
+      // its verdict, which fails it for want of the marker.
+      session.kill();
+      return;
+    }
     this.store.markAwaitingUser(taskId, 'input');
     this.verifier.pauseIdle(taskId);
     this.emit('onTaskSettled', { taskId });
@@ -707,6 +721,7 @@ export class TaskOrchestrator {
     // task since. A stale verdict must not overwrite that decision.
     if (this.attempts.get(taskId) !== attempt) return;
     const landing = verdict.outcome === 'pass' ? await this.land(attempt, () => this.landing.landPassed(task, attempt)) : null;
+    const unresumedReason = this.unresumed(attempt) ? unresumedMessage(task, `${attempt.runner} could not find its saved session`) : null;
     if (this.attempts.get(taskId) !== attempt) return;
     this.endAttempt(taskId, 'verdict');
     this.store.setTaskVerdict(taskId, verdict);
@@ -728,11 +743,11 @@ export class TaskOrchestrator {
       // work from a full-plan run until the user retries/resumes explicitly.
       // Already-active parallel tasks may finish, but no new task is spawned.
       this.haltOnFailure();
-      this.notifications.error(`Task "${task.title}" failed verification: ${verdict.reason}`);
+      this.notifications.error(unresumedReason ?? `Task "${task.title}" failed verification: ${verdict.reason}`);
       if (attempt.worktree) await this.runs.release(taskId, { keep: true });
     }
 
-    this.store.setTaskOutputSummary(taskId, summarizeOutput(verdict.reason, summary));
+    this.store.setTaskOutputSummary(taskId, summarizeOutput(unresumedReason ?? verdict.reason, summary));
 
     this.logAndArchive(task, verdict);
     await this.afterVerdict(taskId);
@@ -983,6 +998,40 @@ export class TaskOrchestrator {
   }
 
   /**
+   * Continue a finished structured task in its saved runner session (ADR-0018,
+   * K1): a retry whose first turn is the user's message, sent to the session
+   * the task ended in rather than a fresh one given its prompt again. Like a
+   * retry it is a new attempt in a fresh worktree from the integration tip —
+   * the same path, which is where the runner keeps its sessions — verified and
+   * landed like any other, and dependents are left alone.
+   */
+  async continueTask(taskId: string, message: string): Promise<void> {
+    const text = message.trim();
+    if (!text) throw new TaskControlError('A message to continue a task with cannot be empty.');
+    const task = this.store.get(taskId);
+    if (!task) throw new TaskControlError(`No task ${taskId} in this plan.`);
+    const eligible = continuability(task);
+    if (!eligible.ok) throw new TaskControlError(eligible.reason);
+    const runner = this.store.resolveTaskRunner(task);
+    const route = routeTransport('structured', runner, this.registry);
+    if (route.transport !== 'structured') throw new TaskControlError(`Task "${task.title}" cannot be continued: ${route.fallback}. Use Retry instead.`);
+    if (!(await this.runs.open(() => this.continueTask(taskId, message)))) return;
+    // The run may have started it while opening; the claim below must be the only one.
+    if (this.attempts.has(taskId) || !continuability(task).ok) return;
+
+    this.retryCounts.set(taskId, (this.retryCounts.get(taskId) ?? 0) + 1);
+    this.endAttempt(taskId, 'retry');
+    this.store.retry(taskId);
+    this.store.unblockDependents(taskId);
+    this.onHold.delete(taskId);
+    // Claimed before anything is awaited, so a running scheduler never sees the
+    // pending task and starts it afresh. Its prepare replaces the old worktree.
+    const started = this.startTask(task, { message: text, resumeSessionId: eligible.sessionId });
+    if (this.haltedByFailure && !this.running) await this.start();
+    await started;
+  }
+
+  /**
    * Manually start a single AI task right now, bypassing dependency/readiness
    * gating (the "force start" affordance on a task card). Reuses the scheduler's
    * own startTask so a force-started task gets the same augmented prompt, session
@@ -1090,7 +1139,7 @@ export class TaskOrchestrator {
     this.emit('onTick');
   }
 
-  private async startTask(task: Task): Promise<void> {
+  private async startTask(task: Task, continuation: Continuation | null = null): Promise<void> {
     if (this.attempts.has(task.id)) return;
     const attempt: TaskAttempt = {
       taskId: task.id,
@@ -1102,6 +1151,7 @@ export class TaskOrchestrator {
       worktree: false,
       integration: null,
       repair: this.landing.nextRepair(task.id),
+      continuation,
       startedAt: new Date().toISOString(),
       decided: false,
     };
@@ -1121,7 +1171,7 @@ export class TaskOrchestrator {
       const group = this.runs.current?.repos.some((r) => r.path !== SELF_REPO);
       this.tell('info', `Repairing the conflict of task "${task.title}" in its own ${group ? 'worktrees' : 'worktree'} (repair ${attempt.repair.n} of ${attempt.repair.limit}).`);
     } else {
-      this.notifications.info(`Task "${task.title}" started (${attempt.runner})`);
+      this.notifications.info(`Task "${task.title}" ${continuation ? 'continued' : 'started'} (${attempt.runner})`);
     }
   }
 
@@ -1146,14 +1196,18 @@ export class TaskOrchestrator {
       }
       // Through the same augmenting as any spawn, so the marker is the task's
       // own and the VerdictEngine watches for it unchanged.
-      const finalPrompt = composeAugmentedPrompt(attempt.repair ? { ...task, prompt: this.landing.repairPrompt(task) } : task, this.store.planTasks, {
-        planMapEnabled: this.config.planMapEnabled,
-        // A merge to resolve is not new behaviour to drive test-first.
-        tddEnabled: !attempt.repair && this.tddEnabled(),
-      });
+      const finalPrompt = attempt.continuation
+        ? composeContinuationPrompt(task, attempt.continuation.message)
+        : composeAugmentedPrompt(attempt.repair ? { ...task, prompt: this.landing.repairPrompt(task) } : task, this.store.planTasks, {
+          planMapEnabled: this.config.planMapEnabled,
+          // A merge to resolve is not new behaviour to drive test-first.
+          tddEnabled: !attempt.repair && this.tddEnabled(),
+        });
       this.lingering.close(task.id);
       const env = await this.envForTask(cwd);
-      const transport = this.planTransport ?? 'terminal';
+      // A continue resumes a session only the structured transport can reach,
+      // whatever the plan's latest run copied: the task already ran that way.
+      const transport = attempt.continuation ? 'structured' : this.planTransport ?? 'terminal';
       const session = await this.terminalRunner.spawn({
         taskId: task.id,
         runner: attempt.runner,
@@ -1168,6 +1222,7 @@ export class TaskOrchestrator {
         title: task.title,
         env,
         transport,
+        resumeSessionId: attempt.continuation?.resumeSessionId,
       });
 
       // Stop/load/cancel can end the attempt while the async adapter is
@@ -1177,6 +1232,12 @@ export class TaskOrchestrator {
       if (this.attempts.get(task.id) !== attempt) {
         this.abandonSpawn(task, attempt, session);
         return false;
+      }
+      if (attempt.continuation && !isStructuredSession(session)) {
+        // A terminal session ignored the resume and started fresh, with none of
+        // what the message refers to.
+        session.kill();
+        throw new Error(routeTransport(transport, attempt.runner, this.registry).fallback ?? 'this surface cannot run structured tasks');
       }
       attempt.phase = 'running';
       attempt.session = session;
@@ -1195,6 +1256,17 @@ export class TaskOrchestrator {
         return false;
       }
       this.endAttempt(task.id, 'spawn-failed');
+      if (attempt.continuation) {
+        await this.runs.release(task.id, { keep: false });
+        const reason = unresumedMessage(task, `could not start: ${err instanceof Error ? err.message : String(err)}`);
+        this.store.markFailed(task.id);
+        this.store.setTaskOutputSummary(task.id, summarizeOutput(reason, ''));
+        this.notifications.error(reason);
+        this.emit('onTaskSettled', { taskId: task.id });
+        this.emit('onTaskChanged');
+        await this.tick();
+        return false;
+      }
       if (attempt.repair) {
         this.settleUnlanded(task, await this.landing.unrepaired(task, `could not start: ${err instanceof Error ? err.message : String(err)}`));
         this.emit('onTaskSettled', { taskId: task.id });
@@ -1231,6 +1303,15 @@ export class TaskOrchestrator {
     }
     const fallback = routeTransport(requested, attempt.runner, this.registry).fallback ?? 'this surface cannot run structured tasks';
     this.store.setTaskTransport(task.id, { kind: 'terminal', fallback });
+  }
+
+  /**
+   * A continue whose runner never announced the session it was told to
+   * resume. Nothing was continued, and nothing fresh was started in its place.
+   */
+  private unresumed(attempt: TaskAttempt): boolean {
+    const session = attempt.session;
+    return attempt.continuation !== null && session !== null && isStructuredSession(session) && !session.nativeSessionId();
   }
 
   /**
@@ -1320,6 +1401,10 @@ export class TaskOrchestrator {
     if (reason === 'load') this.output.reset();
     return ended;
   }
+}
+
+function unresumedMessage(task: Task, why: string): string {
+  return `Could not continue task "${task.title}": ${why}. Retry starts it afresh.`;
 }
 
 /**

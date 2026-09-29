@@ -37,6 +37,8 @@ export interface TaskLogStatus {
   attempts: readonly number[];
   /** Which attempt the blocks below belong to. */
   attempt: number;
+  /** The task finished and can be continued in its saved session (ADR-0018, K1): the message box continues it. */
+  continuable: boolean;
 }
 
 export type HostToTaskLog =
@@ -53,5 +55,7 @@ export type TaskLogToHost =
   | { type: 'sendTaskMessage'; text: string }
   | { type: 'removeQueuedTaskMessage'; id: string }
   | { type: 'interruptTask' }
+  /** Continue the finished task in its saved session, with `text` as its next turn. */
+  | { type: 'continueTask'; text: string }
   /** Show an earlier attempt; the host answers with `init`. */
   | { type: 'selectAttempt'; attempt: number };

@@ -381,4 +381,28 @@ describe('ApiClient — adopting a saved session', () => {
       'POST /api/plans/s1/tasks/t1/interrupt',
     ]);
   });
+
+  it('continues a finished task on its own route, and surfaces a refusal (ADR-0018, K1)', async () => {
+    const hits: string[] = [];
+    const srv = await startCustomServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => { body += String(chunk); });
+      req.on('end', () => {
+        hits.push(`${req.method} ${req.url} ${body}`.trim());
+        res.setHeader('Content-Type', 'application/json');
+        if (req.url?.includes('/t2/')) {
+          res.statusCode = 400;
+          return res.end(JSON.stringify({ error: 'Task "Two" cannot be continued: it ran in a terminal' }));
+        }
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    servers.push(srv);
+    const client = new ApiClient(srv.port);
+
+    expect(await client.continueTask('s1', 't1', 'also handle arrays')).toEqual({ ok: true });
+    await expect(client.continueTask('s1', 't2', 'go on')).rejects.toThrow('cannot be continued');
+
+    expect(hits[0]).toBe('POST /api/plans/s1/tasks/t1/continue {"text":"also handle arrays"}');
+  });
 });

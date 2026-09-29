@@ -1,12 +1,12 @@
 import * as vscode from 'vscode';
-import type { DisplayBlock, SessionMessage, Task, TaskLogEvent } from '@ordewell/core';
+import { canContinue, type DisplayBlock, type SessionMessage, type Task, type TaskLogEvent } from '@ordewell/core';
 import { EMPTY_TASK_LOG, reduceTaskLog, replayTaskLog, type TaskLogView } from '@ordewell/core/plan-utils';
 import { diffConversation } from '../shared/conversationPatch';
 import { renderWebviewHtml } from './webviewHtml';
 import type { HostToTaskLog, TaskLogStatus, TaskLogToHost } from '../shared/taskLogProtocol';
 
 /**
- * The Session calls a task-log panel makes (ADR-0018, M1). Narrowed to the five
+ * The Session calls a task-log panel makes (ADR-0018, M1, K1). Narrowed to the six
  * the panel owns, so its test needs no Session — the concrete Session
  * satisfies this structurally.
  */
@@ -16,6 +16,7 @@ export interface TaskLogSession {
   sendTaskMessage(taskId: string, text: string): string;
   removeQueuedTaskMessage(taskId: string, id: string): boolean;
   interruptTask(taskId: string): Promise<void>;
+  continueTask(taskId: string, message: string): Promise<void>;
 }
 
 export interface TaskLogPanelDeps {
@@ -116,6 +117,11 @@ export class TaskLogPanel {
       case 'interruptTask':
         this.controlAsync(() => this.deps.session.interruptTask(this.taskId));
         return;
+      case 'continueTask':
+        // The continue is a new attempt: show it, even from an earlier one.
+        this.followLive = true;
+        this.controlAsync(() => this.deps.session.continueTask(this.taskId, msg.text));
+        return;
     }
   }
 
@@ -195,6 +201,7 @@ export class TaskLogPanel {
       queued: this.view.queued,
       attempts: this.attempts,
       attempt: this.attempt,
+      continuable: task ? canContinue(task) : false,
     };
   }
 

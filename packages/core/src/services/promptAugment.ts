@@ -182,6 +182,14 @@ function renderTddInstruction(): string {
   ].join('\n');
 }
 
+/*
+ * Two halves, for the same reason as the completion marker above: the
+ * watcher scans terminal output for this token, and interactive runners echo
+ * the prompt — a literal marker here checkpointed the task (dropping it out
+ * of `in_progress`) the moment the session started.
+ */
+const CHECKPOINT_MARKER_HOWTO = 'Build it by writing `<<<ORDEWELL_` immediately followed by `CHECKPOINT:` — no space, quote, or any other character between those two parts — then a brief summary of what you are about to do and why human input is needed, closed with `>>>`';
+
 function renderCheckpointInstruction(): string {
   return [
     '## Human-in-the-loop checkpoints',
@@ -190,11 +198,7 @@ function renderCheckpointInstruction(): string {
     'operations, after major design decisions, or when multiple viable paths exist — pause',
     'and request input:',
     '',
-    // Two halves, for the same reason as the completion marker above: the
-    // watcher scans terminal output for this token, and interactive runners echo
-    // the prompt — a literal marker here checkpointed the task (dropping it out
-    // of `in_progress`) the moment the session started.
-    '1. Print one line holding only the checkpoint marker. Build it by writing `<<<ORDEWELL_` immediately followed by `CHECKPOINT:` — no space, quote, or any other character between those two parts — then a brief summary of what you are about to do and why human input is needed, closed with `>>>`',
+    `1. Print one line holding only the checkpoint marker. ${CHECKPOINT_MARKER_HOWTO}`,
     '2. Wait for the human to respond (they will send ORDEWELL_CONTINUE or ORDEWELL_REJECT)',
     '3. On CONTINUE: proceed with the action you described',
     '4. On REJECT: adjust your approach and re-emit a checkpoint if needed',
@@ -230,4 +234,20 @@ export function composeAugmentedPrompt(task: Task, allTasks: readonly Task[], op
 
   if (blocks.length === 0) return basePrompt + marker;
   return `${blocks.join('\n\n')}\n\n${basePrompt}${marker}`;
+}
+
+/**
+ * The first turn of a continue (ADR-0018, K1): the user's message, then a
+ * short reminder of the protocol. The resumed session already holds the
+ * original prompt, so it is not sent again — but it holds the old worktree
+ * too, and this attempt's is fresh from the integration branch.
+ */
+export function composeContinuationPrompt(task: Task, message: string): string {
+  const reminder = [
+    '(Ordewell) You are continuing this task in the same session. Your working directory was recreated from the integration branch: work from your earlier attempt is there only if it landed, so check the files before relying on them.',
+  ];
+  if (isHitlTask(task)) {
+    reminder.push(`If you reach a decision that needs human judgment, print one line holding only the checkpoint marker and wait for ORDEWELL_CONTINUE or ORDEWELL_REJECT. ${CHECKPOINT_MARKER_HOWTO}.`);
+  }
+  return `${message.trim()}\n\n---\n${reminder.join('\n\n')}${renderCompletionMarker(task)}`;
 }

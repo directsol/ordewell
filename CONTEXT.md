@@ -373,7 +373,12 @@ approval" is derived from the task's pending approvals.
 **Continue** — a retry of a completed or failed structured task that resumes
 its saved Claude session (`--resume`) with the user's message as the next turn.
 It is verified and landed like any attempt, is not offered on conflicts, and
-leaves dependents alone, as retry does.
+leaves dependents alone, as retry does. `continuability` is the one rule, and
+a status carries only whether it holds (`continuable`), never the session id.
+The first turn is the message plus a short reminder of the marker protocol
+(`composeContinuationPrompt`), not the original prompt. A session the runner
+cannot find fails the attempt with a message that suggests Retry; a fresh
+session is never started in its place.
 *Avoid:* "resume" for the user action (that is the protocol flag), and "retry"
 for it — a retry starts a fresh attempt with no message.
 
@@ -1034,7 +1039,9 @@ only narrows the candidates, and the transcript must carry the task's
 completion marker UUID, which its prompt contains. Directory and recency alone
 hand task A task B's answer when parallel attempts share a cwd — and for Claude
 Code the directory is not even unique: past 200 characters it keeps a prefix of
-the munged cwd plus a hash, so every directory with that prefix is a candidate. The binding holds
+the munged cwd plus a hash, so every directory with that prefix is a candidate.
+A continued attempt's transcript still holds the earlier attempt's answer, so
+only records written since the attempt started count. The binding holds
 only while no other task's prompt carries that id, which is why a dependent's
 prompt quotes its predecessor's output with the marker id dropped
 (`defuseMarkers` in `promptAugment.ts`).

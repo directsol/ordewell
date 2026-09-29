@@ -13,6 +13,7 @@ export interface TaskStatusUpdate {
   isolation?: TaskIsolationView;
   transport?: TaskTransportView;
   awaitingReason?: AwaitingReason;
+  continuable?: boolean;
 }
 
 /** Side effects the runtime performs; the reducer itself stays pure. */
@@ -75,6 +76,8 @@ export type Effect =
   /** Takes back one queued message before it is delivered. */
   | { type: 'removeTaskMessage'; sessionId: string; taskId: string; messageId: string }
   | { type: 'interruptTask'; sessionId: string; taskId: string }
+  /** Continue a finished structured task in its saved session, with `text` as its next turn (ADR-0018, K1). */
+  | { type: 'continueTask'; sessionId: string; taskId: string; text: string; watch?: boolean }
   | { type: 'respondApproval'; sessionId: string; approvalId: string; granted: boolean }
   /** Startup refreshes silently; only a typed `/refresh` sets `announce`. */
   | { type: 'refresh'; announce?: boolean }

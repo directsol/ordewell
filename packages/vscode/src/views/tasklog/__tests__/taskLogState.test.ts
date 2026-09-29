@@ -5,7 +5,7 @@ import type { TaskLogStatus } from '../../../shared/taskLogProtocol';
 function status(overrides: Partial<TaskLogStatus> = {}): TaskLogStatus {
   return {
     taskId: 't1', order: 1, title: 'Task', runner: 'claude-code',
-    planStatus: 'in_progress', working: false, queued: [], attempts: [1], attempt: 1,
+    planStatus: 'in_progress', working: false, queued: [], attempts: [1], attempt: 1, continuable: false,
     ...overrides,
   };
 }

@@ -82,3 +82,30 @@ describe('talking to a structured task over the daemon (ADR-0018, M1)', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('continuing a finished structured task over the daemon (ADR-0018, K1)', () => {
+  it('continues it with the message', async () => {
+    const continueTask = vi.fn(async () => {});
+    const res = await request(appFor({ continueTask }), 'POST', '/continue', { text: 'also handle arrays' });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(continueTask).toHaveBeenCalledWith('t1', 'also handle arrays');
+  });
+
+  it('asks for the text rather than continuing with nothing', async () => {
+    const continueTask = vi.fn();
+    const res = await request(appFor({ continueTask }), 'POST', '/continue', {});
+
+    expect(res.status).toBe(400);
+    expect(continueTask).not.toHaveBeenCalled();
+  });
+
+  it('answers a refusal — a conflict, say — with 400 and the reason', async () => {
+    const refusal = new TaskControlError('Task "Only" cannot be continued: its work is waiting on a merge conflict. Resolve or repair the conflict instead.');
+    const res = await request(appFor({ continueTask: async () => { throw refusal; } }), 'POST', '/continue', { text: 'go on' });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: refusal.message });
+  });
+});

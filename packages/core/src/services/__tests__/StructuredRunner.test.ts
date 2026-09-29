@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { StructuredRunner, type StructuredSpawnOptions } from '../StructuredRunner';
+import { StructuredRunner } from '../StructuredRunner';
+import type { RunnerSpawnOptions } from '../AbstractRunner';
 import { HeadlessSession } from '../HeadlessRunner';
 import { RunnerRegistry } from '../../plugins/RunnerRegistry';
 import { isStructuredSession, type ITerminalSession, type StructuredEvent, type StructuredTurnEnd } from '../../interfaces/ITerminalRunner';
@@ -30,7 +31,7 @@ function harness(replies: ScriptedReply[], interruptGraceMs = 1000) {
   return { runner, spawned, spawns };
 }
 
-function options(overrides: Partial<StructuredSpawnOptions> = {}): StructuredSpawnOptions {
+function options(overrides: Partial<RunnerSpawnOptions> = {}): RunnerSpawnOptions {
   return {
     taskId: 'task-0001-abcdef',
     runner: 'claude-code',
@@ -326,6 +327,20 @@ describe('StructuredSession interrupt', () => {
     // The killed process was replaced, not lost: the task is still alive.
     await tick();
     expect(turn.exits).toEqual([]);
+    turn.session.kill();
+  });
+
+  it('resumes the session it was continuing when interrupted before the runner took it up (ADR-0018, K1)', async () => {
+    const { runner, spawned } = harness([() => {}], 20);
+    const turn = observe(await runner.spawn(options({ resumeSessionId: 'sess-prev' })));
+    await tick();
+    expect(turn.session.nativeSessionId()).toBeNull();
+
+    await turn.session.interrupt();
+
+    expect(spawned.processes).toHaveLength(2);
+    const args = spawned.lastArgs();
+    expect(args[args.indexOf('--resume') + 1]).toBe('sess-prev');
     turn.session.kill();
   });
 

@@ -66,6 +66,8 @@ interface ClaudeLine {
   session_id?: string;
   result?: string;
   is_error?: boolean;
+  /** A failed result's own words when it has no `result` text — a refused `--resume`, say. */
+  errors?: string[];
   request_id?: string;
   request?: { subtype?: string; tool_name?: string; input?: Record<string, unknown>; permission_suggestions?: unknown[]; tool_use_id?: string };
   /** `control_response`: the answer to a request Ordewell sent, such as an interrupt. */
@@ -169,6 +171,8 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
   private readonly openSubagents = new Map<string, { background: boolean }>();
   /** Subagent messages already counted. A message arrives as one line per content block, each repeating its usage. */
   private readonly countedSubagentMessages = new Set<string>();
+  /** The session `--resume` asked for, until the CLI's `init` shows it was taken up. */
+  private pendingResume: string | null = null;
 
   protected spawnSpec(opts: AgentStartOptions): SpawnSpec {
     if (opts.kind === 'task') return this.taskSpawnSpec(opts);
@@ -188,6 +192,7 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
     if (opts.resumeSessionId) {
       args.push('--resume', opts.resumeSessionId);
       this.reportedCostUsd = undefined;
+      this.pendingResume = opts.resumeSessionId;
     }
     return { command: 'claude', args };
   }
@@ -211,6 +216,7 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
     if (opts.resumeSessionId) {
       args.push('--resume', opts.resumeSessionId);
       this.reportedCostUsd = undefined;
+      this.pendingResume = opts.resumeSessionId;
     }
     return { command: 'claude', args };
   }
@@ -240,6 +246,19 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
     });
   }
 
+  /**
+   * A `--resume` the CLI cannot find is answered at once with an error result
+   * and no `init`, after which it waits on stdin for input it never reads — a
+   * turn sent to it would hang. Closing stdin lets it exit. The id it echoes is
+   * not recorded: no session was taken up, and a continue must not offer it again.
+   */
+  private refuseResume(msg: ClaudeLine, emit: (event: AgentEvent) => void): void {
+    const requested = this.pendingResume;
+    this.pendingResume = null;
+    emit({ type: 'error', message: msg.errors?.join('\n').trim() || msg.result?.trim() || `Claude Code could not resume session ${requested}.` });
+    this.process?.stdin?.end();
+  }
+
   protected turnPayload(message: string): string {
     this.turnHasText = false;
     this.interruptRequested = false;
@@ -253,6 +272,13 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
     const msg = StdioAgentAdapter.parse<ClaudeLine>(line);
     if (!msg) return;
 
+    if (this.pendingResume) {
+      if (msg.type === 'result' && msg.is_error) {
+        this.refuseResume(msg, emit);
+        return;
+      }
+      if (msg.type === 'system' && msg.subtype === 'init') this.pendingResume = null;
+    }
     if (msg.session_id) this.sessionId = msg.session_id;
 
     // Subagent traffic, replayed on the same stream with the spawning tool call
@@ -361,7 +387,7 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
           this.interruptRequested = false;
           emit({ type: 'turn_end', interrupted: true });
         } else if (msg.is_error || (msg.subtype && msg.subtype !== 'success')) {
-          emit({ type: 'error', message: msg.result?.trim() || `Claude Code ended the turn: ${msg.subtype ?? 'error'}` });
+          emit({ type: 'error', message: msg.result?.trim() || msg.errors?.join('\n').trim() || `Claude Code ended the turn: ${msg.subtype ?? 'error'}` });
         } else {
           emit({ type: 'turn_end' });
         }
