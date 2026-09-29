@@ -36,7 +36,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'retry', usage: '/retry <id>', description: 'Re-run a failed task', category: 'tasks' },
   { name: 'cancel', usage: '/cancel <id>', description: 'Kill a running task', category: 'tasks' },
   { name: 'force-start', usage: '/force-start <id>', description: 'Start a task now, ignoring dependencies', category: 'tasks' },
-  { name: 'terminal', usage: '/terminal <id>', description: "Open a real terminal attached to a task's runner", category: 'tasks' },
+  { name: 'terminal', usage: '/terminal <id>', description: "Open a task: its OS terminal, or a structured task's live log", category: 'tasks' },
   { name: 'task-runner', usage: '/task-runner <id> [runner]', description: "Choose or set a task's executor (re-picks its model and mode)", category: 'tasks' },
   { name: 'task-model', usage: '/task-model <id> [model]', description: "Choose or set a task's executor model", category: 'tasks' },
   { name: 'task-effort', usage: '/task-effort <id> [level]', description: "Choose or set a task's thinking effort", category: 'tasks' },

@@ -1,7 +1,7 @@
 import { execSync } from 'child_process';
 import {
   ALL_PROVIDERS, clipboardCopyCommand, isCliProvider, type AiProvider, type HasBinFn, type LegacyPlanState,
-  type PlannerModelRecall, type SerializedPlan, type SessionMeta,
+  type PlannerModelRecall, type SerializedPlan, type SessionMeta, type TaskLogEvent,
 } from '@ordewell/core';
 import { describeConnectionRefused, isConnectionRefused } from '../daemonClient';
 import { WorkspaceInitNeededError } from '../apiClient';
@@ -24,6 +24,12 @@ export interface OrdewellApi {
   taskControl(sessionId: string, taskId: string, action: 'force-start' | 'retry' | 'cancel'): Promise<{ ok: boolean }>;
   markTaskComplete(sessionId: string, taskId: string): Promise<{ ok: boolean }>;
   markTaskIncomplete(sessionId: string, taskId: string): Promise<{ ok: boolean }>;
+  /** A structured task's saved log: which attempts exist, then one attempt's events (ADR-0018, P1). */
+  getTaskLogAttempts(sessionId: string, taskId: string, workspace?: string): Promise<number[]>;
+  getTaskLog(sessionId: string, taskId: string, attempt: number, workspace?: string): Promise<TaskLogEvent[]>;
+  sendTaskMessage(sessionId: string, taskId: string, text: string): Promise<{ id: string }>;
+  removeQueuedTaskMessage(sessionId: string, taskId: string, messageId: string): Promise<{ removed: boolean }>;
+  interruptTask(sessionId: string, taskId: string): Promise<{ ok: boolean }>;
   addTask(sessionId: string, task: Record<string, unknown>): Promise<{ ok: boolean }>;
   updateTask(sessionId: string, taskId: string, changes: Record<string, unknown>): Promise<{ ok: boolean }>;
   removeTask(sessionId: string, taskId: string): Promise<{ ok: boolean }>;
@@ -295,6 +301,43 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
       dispatch(result.ok ? { type: 'notice', message: result.message } : { type: 'failed', message: result.message });
       return;
     }
+
+    // The saved log is read off disk (ADR-0018, P1) so the view opens with the
+    // task's history; the live `task_log` stream then catches it up in place.
+    case 'openTaskLog': {
+      const attempts = await api.getTaskLogAttempts(effect.sessionId, effect.taskId, workspace);
+      if (attempts.length === 0) {
+        dispatch({ type: 'taskLogLoaded', taskId: effect.taskId, attempts: [], attempt: 0, events: [], sessionId: effect.sessionId });
+        return;
+      }
+      const attempt = attempts[attempts.length - 1];
+      const events = await api.getTaskLog(effect.sessionId, effect.taskId, attempt, workspace);
+      dispatch({ type: 'taskLogLoaded', taskId: effect.taskId, attempts, attempt, events, sessionId: effect.sessionId });
+      return;
+    }
+
+    case 'loadTaskAttempt': {
+      const events = await api.getTaskLog(effect.sessionId, effect.taskId, effect.attempt, workspace);
+      dispatch({ type: 'taskLogLoaded', taskId: effect.taskId, attempt: effect.attempt, events, sessionId: effect.sessionId });
+      return;
+    }
+
+    // The daemon queues the message (or delivers it to a waiting task) and
+    // broadcasts the `task_log` event that shows it; nothing to dispatch here.
+    case 'sendTaskMessage':
+      await api.sendTaskMessage(effect.sessionId, effect.taskId, effect.text);
+      return;
+
+    case 'removeTaskMessage': {
+      const { removed } = await api.removeQueuedTaskMessage(effect.sessionId, effect.taskId, effect.messageId);
+      if (!removed) dispatch({ type: 'notice', message: 'That message was already delivered to the task.' });
+      return;
+    }
+
+    case 'interruptTask':
+      await api.interruptTask(effect.sessionId, effect.taskId);
+      dispatch({ type: 'notice', message: 'Interrupting the task…' });
+      return;
 
     case 'command': {
       const result = await api.sendCommand(effect.name, { action: effect.action });

@@ -395,13 +395,18 @@ function dispatchLifecycle(dispatch: Dispatch, event: LifecycleMessage, sessionI
       dispatch({ type: 'isolationHandoff', handoff: { repos: event.repos, landed: event.landed }, sessionId });
       return;
 
-    // Raw runner chatter, and a structured task's log, which its task view
-    // reads rather than the run's watcher. Listed rather than defaulted, so a
-    // new lifecycle variant fails to compile here until someone decides what a
-    // run's watcher does with it.
+    // A structured task's log as it happens (ADR-0018, P1): the task view is
+    // its only reader, and the reducer drops it unless that view is open on
+    // this task. The run's watcher itself does nothing with it.
+    case 'task_log':
+      dispatch({ type: 'taskLog', taskId: String(event.taskId), attempt: event.attempt, events: event.events, sessionId });
+      return;
+
+    // Raw runner chatter. Listed rather than defaulted, so a new lifecycle
+    // variant fails to compile here until someone decides what a run's watcher
+    // does with it.
     case 'task_updated':
     case 'task_output':
-    case 'task_log':
       return;
 
     // Its asker already has the words, from the merge request itself; a

@@ -1,6 +1,6 @@
 import { EMPTY_HOLD, fromTranscript, holdPrompt, taskStartedNotice } from '@ordewell/core';
 import { isolationOfPlan } from '../isolation';
-import { chatEditorRoom } from './geometry';
+import { chatEditorRoomFor } from './geometry';
 import { chatScrollMax } from './layout';
 import { activeToken, findCommand, parseSlash, tokenCompletions } from './slash';
 import { applyKey, commit } from './editor';
@@ -10,6 +10,7 @@ import { findTask, isTaskRunning, planRows, plannerInFlight, type RunStatus, typ
 import type { Key } from './keys';
 import { handleOverlayKey } from './reducers/overlays';
 import { handlePlanKey } from './reducers/planPane';
+import { handleTaskViewKey, taskLogAbandoned, taskLogArrived, taskLogLoaded } from './reducers/taskView';
 import { pickRewindTarget, runCommand } from './reducers/commands';
 import { disarmStop, drainQueue, plannerEscape } from './reducers/turnQueue';
 import { applySettings, followSession, normalizeTasks, runLabel } from './reducers/incoming';
@@ -32,7 +33,7 @@ export function reduce(state: TuiState, action: Action): Step {
     // Isolation belongs to one session's plan, and task ids repeat across
     // sessions, so nothing of the last one's may carry over into this.
     case 'sessionStarted':
-      return step(clearIsolation({ ...state, sessionId: action.sessionId, goal: action.goal }));
+      return step(clearIsolation({ ...state, sessionId: action.sessionId, goal: action.goal, taskView: null }));
 
     // The daemon registers a session only once planning succeeds; when it does
     // not, holding on to the id would send every next message to a session the
@@ -43,6 +44,7 @@ export function reduce(state: TuiState, action: Action): Step {
         ...clearIsolation(state),
         sessionId: null,
         goal: '',
+        taskView: null,
         pendingApprovals: [],
         queuedPrompts: EMPTY_HOLD,
         stopArmed: false,
@@ -95,6 +97,14 @@ export function reduce(state: TuiState, action: Action): Step {
     case 'sessionMessage':
       if (stale(state, action.sessionId)) return step(state);
       return step(followSession(state, action.message));
+
+    case 'taskLog':
+      if (stale(state, action.sessionId)) return step(state);
+      return step(taskLogArrived(state, action));
+
+    case 'taskLogLoaded':
+      if (stale(state, action.sessionId)) return step(state);
+      return step(taskLogLoaded(state, action));
 
     // A settled transcript line, not a research step: nothing ever settles a
     // task's start, so as a step it stayed "⋯" forever and was counted into
@@ -233,6 +243,7 @@ export function reduce(state: TuiState, action: Action): Step {
         ...clearIsolation(state),
         sessionId: action.sessionId,
         goal: action.goal,
+        taskView: null,
         status: 'idle',
         busyLabel: '',
         planApproved: false,
@@ -263,6 +274,9 @@ export function reduce(state: TuiState, action: Action): Step {
       }, ['set-planner', 'set-task-runner']));
 
     case 'failed': {
+      // A failed call may have been the task view's log read; the view falls
+      // back to whatever the live stream sent rather than waiting forever.
+      state = taskLogAbandoned(state);
       const quiet = plannerInFlight(state) && state.stopRequested;
       const reported = { ...(quiet ? state : say(state, 'error', action.message)), status: 'idle' as const, busyLabel: '' };
       // A planner turn dying IS a turn ending — the queue would otherwise wait
@@ -354,6 +368,14 @@ function handleKey(state: TuiState, key: Key): Step {
   // stream in full as it lands is where full detail matters most.
   if (key.name === 'ctrl-o' && state.focus === 'chat' && !state.overlay) return toggleDetail(state);
 
+  // In the task view, Esc backs out the same way: a draft clears first, then
+  // the view closes and the planner chat returns. An open overlay still owns
+  // Esc ahead of it, so /help closes before the view does.
+  if (key.name === 'escape' && state.taskView && !state.overlay) {
+    if (state.editor.text) return step({ ...state, editor: { ...state.editor, text: '', cursor: 0 } });
+    return step({ ...state, taskView: null, scroll: 0 });
+  }
+
   // Esc during a planner turn is the turn queue's (take back a prompt, arm a
   // stop, commit it); every other Esc belongs to the overlay or pane below.
   if (key.name === 'escape') {
@@ -384,6 +406,13 @@ function handleKey(state: TuiState, key: Key): Step {
   }
   if (state.focus === 'plan') return handlePlanKey(state, key);
 
+  // The task view's own keys (attempts, queued messages, interrupt) sit ahead
+  // of the editor; anything they decline still types into the composer.
+  if (state.taskView) {
+    const handled = handleTaskViewKey(state, key);
+    if (handled) return handled;
+  }
+
   if (key.name === 'enter') return submit(state);
   if (key.name === 'escape') return step({ ...state, editor: { ...state.editor, text: '', cursor: 0 } });
   // Page keys and the wheel scroll the transcript. Up/down always go to the
@@ -395,7 +424,7 @@ function handleKey(state: TuiState, key: Key): Step {
   const multilineEditor = state.editor.text.includes('\n');
   // Keys only reach the editor while it has focus, which is exactly when the
   // renderer reserves the caret column.
-  const room = chatEditorRoom(state.cols, true);
+  const room = chatEditorRoomFor(state, true);
   return step({ ...state, editor: applyKey(state.editor, key, multilineEditor ? room : undefined) });
 }
 
@@ -410,6 +439,13 @@ function submit(state: TuiState): Step {
   // interception (see resolveSkillInvocation) substitutes it before a
   // coding-agent planner ever sees the token and tries to resolve it itself.
   if (command && findCommand(command.name)?.source !== 'skill') return runCommand(cleared, command);
+
+  // The task view's composer talks to the runner, not the planner: the daemon
+  // queues the message (or delivers it to a waiting task) and the log shows it.
+  if (state.taskView) {
+    if (!state.sessionId) return step(state);
+    return step(cleared, [{ type: 'sendTaskMessage', sessionId: state.sessionId, taskId: state.taskView.taskId, text }]);
+  }
 
   // A prompt while a turn answers is held, not sent: the transcript would
   // otherwise show a message the daemon has not even received yet, and the

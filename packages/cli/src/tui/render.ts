@@ -5,7 +5,7 @@ import {
   bodyRows, chatInputWrap, chatLayout, footerHints, helpLayout, packHints, planLayout, planOffset,
   stopHint,
 } from './layout';
-import { chatEditorRoom, chatPaneWidth, paneColumns, planPaneWidth } from './geometry';
+import { chatEditorRoomFor, chatPaneWidth, chatPromptLabel, paneColumns, planPaneWidth } from './geometry';
 import { diffRoom, handoffActions } from './handoff';
 import { handoffBase, handoffBranch, isRepoGroup, repoResultLines } from '../isolation';
 import { capConflictFiles } from '@ordewell/core';
@@ -31,7 +31,7 @@ export function render(state: TuiState): string[] {
     renderSkills(state, cols),
     ...body,
     renderStatus(state, cols),
-    ...renderInput(state, cols),
+    ...renderInput(state),
     ...renderFooter(state, cols),
   ];
 
@@ -271,12 +271,14 @@ function paintSpans(text: string, base: number, spans: Array<{ start: number; en
   return out + text.slice(cursor);
 }
 
-function renderInput(state: TuiState, cols: number): string[] {
-  const prompt = state.focus === 'plan' ? style.grey('❯ ') : style.cyan('❯ ');
+function renderInput(state: TuiState): string[] {
+  const prompt = state.taskView
+    ? style.accent(`${chatPromptLabel(state)} `)
+    : state.focus === 'plan' ? style.grey('❯ ') : style.cyan('❯ ');
   // The driver hides the hardware cursor, so the frame marks the caret itself —
   // but only while keystrokes actually go to the editor.
   const lines = chatInputWrap(state);
-  const room = chatEditorRoom(cols, lines !== null);
+  const room = chatEditorRoomFor(state, lines !== null);
   const { text, cursor } = state.editor;
   const continuation = ' '.repeat(width(prompt));
   const spans = highlightSpans(text);
@@ -358,7 +360,10 @@ function renderBody(state: TuiState, rows: number, cols: number): string[] {
   const chatCols = chatPaneWidth(state);
   const chat = renderChat(state, rows, chatCols);
   const plan = renderPlan(state, rows, planCols);
-  const divider = `${ERASE_TO_END}${atColumn(chatCols + 1)}${style.grey('│')}`;
+  // The pane border takes the task view's accent, so the runner's pane is
+  // unmistakably not the planner's even at a glance.
+  const border = state.taskView ? style.accent('│') : style.grey('│');
+  const divider = `${ERASE_TO_END}${atColumn(chatCols + 1)}${border}`;
 
   return Array.from({ length: rows }, (_, i) =>
     `${pad(chat[i] ?? '', chatCols)}${divider}${pad(plan[i] ?? '', planCols)}`,
@@ -370,9 +375,10 @@ function renderChat(state: TuiState, rows: number, cols: number): string[] {
   // user paged back, in which case the view holds `scroll` lines off the tail.
   // The offset is already clamped where it is written, so the `min` here is a
   // belt against a resize that shrank the content under a live offset.
-  const { lines, footer, anchor, maxScroll } = chatLayout(state, rows, cols);
+  const { lines, header, footer, anchor, maxScroll } = chatLayout(state, rows, cols);
   const back = Math.min(state.scroll, maxScroll);
-  return [...fit(lines.slice(0, lines.length - back), rows - footer.length, anchor), ...footer];
+  const body = Math.max(0, rows - header.length - footer.length);
+  return [...header, ...fit(lines.slice(0, lines.length - back), body, anchor), ...footer];
 }
 
 function renderPlan(state: TuiState, rows: number, cols: number): string[] {

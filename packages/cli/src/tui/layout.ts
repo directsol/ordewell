@@ -1,10 +1,10 @@
 import { pad, style, truncate, width, wrap, wrapLines, type WrapLine } from './ansi';
 import { cursorInLines, type CursorPosition } from './editor';
 import { conversationLines, tokenLine } from './blocks';
-import { chatEditorRoom, chatPaneWidth, planPaneWidth } from './geometry';
+import { chatEditorRoomFor, chatPaneWidth, planPaneWidth } from './geometry';
 import { taskRepoNames } from '../isolation';
 import { SLASH_COMMANDS, type SlashCategory } from './slash';
-import { isTaskRunning, planRows, plannerInFlight, selectedPlanRow, type PlanRow, type TuiState } from './state';
+import { findTask, isTaskRunning, planRows, plannerInFlight, selectedPlanRow, type PlanRow, type TaskView, type TuiState } from './state';
 import { modesForTask } from './taskAssignment';
 import { ALL_PROVIDERS, capConflictFiles, hasHiddenDetail, runnerForProvider, taskOrderLabel, type AiProvider, type AwaitingReason, type DisplayBlock } from '@ordewell/core';
 
@@ -36,7 +36,7 @@ const CHROME_ROWS = 4;
 export function chatInputWrap(state: TuiState): WrapLine[] | null {
   const active = state.focus === 'chat' && !state.overlay;
   if (!active) return null;
-  return wrapLines(state.editor.text, chatEditorRoom(state.cols, true));
+  return wrapLines(state.editor.text, chatEditorRoomFor(state, true));
 }
 
 /**
@@ -58,7 +58,9 @@ export function footerHints(state: TuiState): string[] {
   // The arm itself is not named here: its cue is the status row's red line, and
   // a second one in the footer would say the same thing twice and change the
   // footer's height the moment the arm appeared.
-  const planning = plannerInFlight(state);
+  // The task view owns Esc while it is open, so the planner's turn-queue hint
+  // would name a key behaviour that is not in force.
+  const planning = plannerInFlight(state) && !state.taskView;
   const escHint = !planning ? null
     : state.queuedPrompts.length > 0 ? 'esc unsend'
     : 'esc ×2 stop planning';
@@ -81,7 +83,7 @@ export function footerHints(state: TuiState): string[] {
   // Shown only once the conversation holds something it can expand: the
   // welcome alone must keep the footer to one row, or a 24-row terminal
   // loses the logo's last line.
-  const detailHint = hasHiddenDetail(state.conversation.blocks)
+  const detailHint = hasHiddenDetail(state.taskView ? state.taskView.view.blocks : state.conversation.blocks)
     ? [state.detailAll ? 'ctrl-o collapse all' : 'ctrl-o expand all']
     : [];
   return [
@@ -106,6 +108,58 @@ function queuedBubble(text: string, cols: number): string[] {
   return wrap(text, room).map((line, i) => i === 0
     ? truncate(`${style.grey(`◇ ${line}`)} · queued · esc to unsend`, cols)
     : truncate(style.grey(`  ${line}`), cols));
+}
+
+/**
+ * The task view's queued messages, one bubble each, in queue order. A queued
+ * message is a turn that has not gone out yet; the highlighted one is what
+ * ctrl-r takes back.
+ */
+export function taskQueuedRows(state: TuiState, cols: number): string[] {
+  const tv = state.taskView;
+  if (!tv) return [];
+  return tv.view.queued.flatMap((message, i) => queuedTaskBubble(message.text, i === tv.queuedIndex, cols));
+}
+
+function queuedTaskBubble(text: string, selected: boolean, cols: number): string[] {
+  const marker = selected ? style.accent('❯') : style.grey('◇');
+  const tag = selected ? ' · queued · ctrl-r removes' : ' · queued';
+  const room = Math.max(1, cols - width(`❯ ◇  ${tag}`));
+  return wrap(text, room).map((line, i) => i === 0
+    ? truncate(`${marker} ${selected ? style.bold(line) : line}${style.grey(tag)}`, cols)
+    : truncate(`  ${line}`, cols));
+}
+
+/**
+ * What the task view's state is, in the header's words: a live turn wins, then
+ * what an `awaiting_user` task waits on (a checkpoint over plain input), then
+ * the task's own status.
+ */
+function taskActivity(task: TaskView | undefined, working: boolean): string {
+  if (working) return 'working';
+  if (task?.status === 'awaiting_user') {
+    return task.awaitingReason ? AWAITING_LABEL[task.awaitingReason] : 'waiting for your input';
+  }
+  return task?.status ?? '';
+}
+
+/** The task view's two pinned rows: the accent bar, and the keys it owns. */
+function taskHeaderLines(state: TuiState, tv: NonNullable<TuiState['taskView']>, cols: number): string[] {
+  const task = findTask(state.tasks, tv.taskId);
+  const parts = [
+    `→ Task ${task?.order ?? '?'}`,
+    task?.title ?? '(task removed)',
+    task?.assignedRunner ?? '',
+    taskActivity(task, tv.view.working),
+  ].filter(Boolean);
+  const hint = ['ctrl-r remove queued', 'ctrl-x interrupt'];
+  const index = tv.attempts.indexOf(tv.attempt);
+  if (tv.attempts.length > 1) hint.push(`alt←/→ attempt ${index >= 0 ? index + 1 : 1}/${tv.attempts.length}`);
+  hint.push('esc back');
+  return [
+    style.accent(truncate(parts.join(' · '), cols)),
+    style.grey(truncate(hint.join(' · '), cols)),
+  ];
 }
 
 /**
@@ -180,6 +234,8 @@ export function chatBodyLines(blocks: readonly DisplayBlock[], cols: number, det
  */
 export interface ChatLayout {
   lines: string[];
+  /** Rows pinned above the scrolling lines, which no scrolling moves. Empty for the planner chat. */
+  header: string[];
   /** Rows pinned under the scrolling lines, which no scrolling moves. */
   footer: string[];
   anchor: 'top' | 'bottom';
@@ -187,26 +243,31 @@ export interface ChatLayout {
 }
 
 export function chatLayout(state: TuiState, rows: number, cols: number): ChatLayout {
+  const tv = state.taskView;
+  // The task view draws the runner's own blocks; the planner chat draws the
+  // conversation's. Both go through the same core view, so they paint alike.
+  const blocks = tv ? tv.view.blocks : state.conversation.blocks;
   // The welcome (logo, setup, hints) heads the transcript for the whole
   // planning conversation and only goes once a plan exists — from then on the
   // plan pane owns the screen and the chat column is too narrow for the art.
-  const welcome = state.tasks.length === 0;
-  const body = chatBodyLines(state.conversation.blocks, cols, state.detailAll);
+  const welcome = !tv && state.tasks.length === 0;
+  const body = chatBodyLines(blocks, cols, state.detailAll);
   const transcript = !welcome ? body : body.length === 0 ? welcomeLines(state, cols) : [...welcomeLines(state, cols), '', ...body];
   // The queued prompts paint as part of the tail, newest last — they are the
   // turns that have not gone out yet, and they travel where a sent message
-  // would have appeared.
-  const bubbles = queuedPromptRows(state, cols);
+  // would have appeared. A task's queue is its own, taken back one at a time.
+  const bubbles = tv ? taskQueuedRows(state, cols) : queuedPromptRows(state, cols);
   const lines = [...transcript, ...(bubbles.length > 0 ? ['', ...bubbles] : [])];
+  const header = tv ? taskHeaderLines(state, tv, cols) : [];
   // The token line is the session's, not a line of the transcript: it keeps
   // the pane's bottom row while everything above it scrolls — unless the pane
   // is a single row, which belongs to the conversation.
-  const usage = rows > 1 ? tokenLine(state.conversation.blocks, cols) : null;
+  const usage = rows > 1 ? tokenLine(blocks, cols) : null;
   const footer = usage ? [usage] : [];
-  const room = rows - footer.length;
+  const room = Math.max(0, rows - header.length - footer.length);
   // Content that fits hangs off the top so the welcome does not jump when the
   // first message lands; once it overflows the newest lines win the pane.
-  return { lines, footer, anchor: lines.length > room ? 'bottom' : 'top', maxScroll: Math.max(0, lines.length - room) };
+  return { lines, header, footer, anchor: lines.length > room ? 'bottom' : 'top', maxScroll: Math.max(0, lines.length - room) };
 }
 
 /** How far back the chat pane can be scrolled at the size it is about to be painted. */
@@ -702,6 +763,9 @@ export function helpLayout(rows: number, cols: number): HelpLayout {
   }
   body.push(
     style.grey('tab switches panes · pgup/pgdn scroll · ctrl-o toggles full detail · esc takes back a queued prompt, otherwise esc twice stops · ctrl-l clears · ctrl-c quits'),
+  );
+  body.push(
+    style.grey('in a task view (t or /terminal on a structured task): ctrl-r removes the selected queued message · ctrl-x interrupts · alt←/→ changes attempt · esc returns'),
   );
 
   // The sheet is a table: clip long descriptions to one row each rather than

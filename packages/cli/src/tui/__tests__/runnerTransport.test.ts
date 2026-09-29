@@ -41,19 +41,19 @@ describe('/transport', () => {
   });
 });
 
-describe('a structured task has no terminal', () => {
+describe('a structured task opens its log, not a terminal', () => {
   const structured = initialState({ sessionId: 's1', focus: 'plan', tasks: [task({ transport: { kind: 'structured' } })] });
 
-  it('t says so instead of launching a terminal', () => {
+  it('t opens the task view and reads its saved log', () => {
     const { state, effects } = reduce(structured, { type: 'key', key: { name: 'char', char: 't' } });
-    expect(effects).toEqual([]);
-    expect(lastMessage(state)?.text).toContain('Task 1 runs on the structured transport (experimental), so it has no terminal to open.');
+    expect(effects).toEqual([{ type: 'openTaskLog', sessionId: 's1', taskId: 't1' }]);
+    expect(state.taskView?.taskId).toBe('t1');
   });
 
-  it('/terminal says so too', () => {
+  it('/terminal opens the task view too', () => {
     const { state, effects } = run('/terminal t1', { ...structured, focus: 'chat' });
-    expect(effects).toEqual([]);
-    expect(lastMessage(state)?.text).toContain('has no terminal to open');
+    expect(effects).toEqual([{ type: 'openTaskLog', sessionId: 's1', taskId: 't1' }]);
+    expect(state.taskView?.taskId).toBe('t1');
   });
 
   it('a task that fell back still opens its terminal', () => {

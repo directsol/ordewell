@@ -1,4 +1,5 @@
-import type { Focus, TuiState } from './state';
+import { width } from './ansi';
+import { findTask, type Focus, type TuiState } from './state';
 
 /**
  * Where the TUI's panes are and how wide the things inside them are.
@@ -74,4 +75,20 @@ export function taskEditorRoom(state: TuiState): number {
  */
 export function chatEditorRoom(cols: number, active: boolean): number {
   return Math.max(1, cols - CHAT_PROMPT_COLS - (active ? 1 : 0));
+}
+
+/** The composer's prompt: `→ Task N` in the task view, the bare caret otherwise. */
+export function chatPromptLabel(state: TuiState): string {
+  if (!state.taskView) return '❯';
+  const order = findTask(state.tasks, state.taskView.taskId)?.order;
+  return `→ Task ${order ?? '?'}`;
+}
+
+/**
+ * The room the composer has once its own prompt is paid for. The task view's
+ * `→ Task N` label is wider than the planner's caret, so wrapping that assumed
+ * the two were equal spilled the draft past the pane's right edge.
+ */
+export function chatEditorRoomFor(state: TuiState, active: boolean): number {
+  return Math.max(1, state.cols - width(chatPromptLabel(state)) - 1 - (active ? 1 : 0));
 }

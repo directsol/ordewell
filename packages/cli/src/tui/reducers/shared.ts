@@ -1,4 +1,4 @@
-import type { AwaitingReason, ConversationMessage, PlannerUsage, ResearchLogEntry, RunnerTransport, SessionMessage } from '@ordewell/core';
+import type { AwaitingReason, ConversationMessage, PlannerUsage, ResearchLogEntry, RunnerTransport, SessionMessage, TaskLogEvent } from '@ordewell/core';
 import type { Key } from '../keys';
 import type {
   HandoffView, LandedTaskView, ModelView, ModeView, RewindTargetView, RunnerView, SessionView,
@@ -66,6 +66,15 @@ export type Effect =
   | { type: 'updateTask'; sessionId: string; taskId: string; changes: Record<string, unknown>; message: string }
   | { type: 'removeTask'; sessionId: string; taskId: string }
   | { type: 'openTaskTerminal'; sessionId: string; taskId: string }
+  /** Reads a structured task's saved log (ADR-0018, P1) so its view opens with its history. */
+  | { type: 'openTaskLog'; sessionId: string; taskId: string }
+  /** Reads one saved attempt, for switching to an earlier one. */
+  | { type: 'loadTaskAttempt'; sessionId: string; taskId: string; attempt: number }
+  /** A user message to a structured task. */
+  | { type: 'sendTaskMessage'; sessionId: string; taskId: string; text: string }
+  /** Takes back one queued message before it is delivered. */
+  | { type: 'removeTaskMessage'; sessionId: string; taskId: string; messageId: string }
+  | { type: 'interruptTask'; sessionId: string; taskId: string }
   | { type: 'respondApproval'; sessionId: string; approvalId: string; granted: boolean }
   /** Startup refreshes silently; only a typed `/refresh` sets `announce`. */
   | { type: 'refresh'; announce?: boolean }
@@ -82,6 +91,10 @@ export type Action =
   | { type: 'planUpdated'; plan: unknown; sessionId?: string }
   /** One planner message from the session, as it came: core's conversation view decides what it shows. */
   | { type: 'sessionMessage'; message: SessionMessage; sessionId?: string }
+  /** The next events of a structured task's attempt, live (ADR-0018, P1). */
+  | { type: 'taskLog'; taskId: string; attempt: number; events: TaskLogEvent[]; sessionId?: string }
+  /** A structured task's saved log, read when its view opens or an attempt is switched to. `attempts` is omitted when a switch already knows the list. */
+  | { type: 'taskLogLoaded'; taskId: string; attempts?: number[]; attempt: number; events: TaskLogEvent[]; sessionId?: string }
   | { type: 'taskStarted'; taskId: string; title: string; runner?: string; sessionId?: string }
   | { type: 'taskStatus'; taskId: string; status: string; sessionId?: string }
   | { type: 'tasksStatus'; updates: Record<string, TaskStatusUpdate>; sessionId?: string }
