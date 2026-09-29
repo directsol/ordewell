@@ -14,6 +14,23 @@ function getSessionsDir(baseDir?: string): string {
   return path.join(getStateDir(baseDir), SESSIONS_SUBDIR);
 }
 
+/**
+ * A path segment for an id that came from outside — a session id from a URL,
+ * a task id a planner wrote. A plain id is used as is; anything that could
+ * climb out of its directory, or is not portable as a file name, is hex-encoded.
+ */
+export function idSegment(id: string): string {
+  return /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/.test(id) ? id : `~${Buffer.from(id, 'utf-8').toString('hex')}`;
+}
+
+/**
+ * The directory beside a session's file for what it keeps outside that file —
+ * its task logs (ADR-0018, P1). It goes when the session does.
+ */
+export function sessionDataDir(sessionId: string, baseDir?: string): string {
+  return path.join(getSessionsDir(baseDir), idSegment(sessionId));
+}
+
 const REJECTION_MESSAGE = 'This session was created with an older version of Ordewell. Please re-plan.';
 
 function hasScalarRunner(parsed: Record<string, unknown>): boolean {
@@ -180,6 +197,11 @@ export function getLatestSession(baseDir?: string, logger: ILogger = defaultLogg
 export function deleteSession(sessionId: string, baseDir?: string, logger: ILogger = defaultLogger): boolean {
   const sessionsDir = getSessionsDir(baseDir);
   if (!fs.existsSync(sessionsDir)) return false;
+  try {
+    fs.rmSync(sessionDataDir(sessionId, baseDir), { recursive: true, force: true });
+  } catch (err: unknown) {
+    logger.warn('sessionStore', `failed to remove the task logs of ${sessionId}`, err);
+  }
   try {
     const file = findSessionFile(sessionsDir, sessionId, logger);
     if (file) { fs.unlinkSync(path.join(sessionsDir, file)); return true; }

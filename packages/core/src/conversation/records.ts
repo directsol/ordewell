@@ -39,8 +39,12 @@ const STATUS_OF_OUTCOME: Record<ResearchStepOutcome, ToolStatus> = {
   not_executed: 'interrupted',
 };
 
+export function finishedTool(call: ToolBlock, output: string, outcome: ResearchStepOutcome): ToolBlock {
+  return { ...call, status: STATUS_OF_OUTCOME[outcome], outcome, output, outputLineCount: outputLines(output).length };
+}
+
 export function settledTool(call: ToolBlock, step: ResearchStep): ToolBlock {
-  return { ...call, status: STATUS_OF_OUTCOME[step.outcome], outcome: step.outcome, output: step.result, outputLineCount: outputLines(step.result).length };
+  return finishedTool(call, step.result, step.outcome);
 }
 
 export interface AnnouncedCall {

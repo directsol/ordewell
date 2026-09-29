@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { OrchestratorPool, getSessionList, removeSession } from '../pool/orchestratorPool';
-import { loadSessionPlanState, WorkspaceNotFoundError } from '@ordewell/core';
+import { listTaskLogAttempts, loadSessionPlanState, readTaskLog, WorkspaceNotFoundError } from '@ordewell/core';
 
 export function sessionsRoute(pool: OrchestratorPool) {
   const router = new Hono();
@@ -43,6 +43,23 @@ export function sessionsRoute(pool: OrchestratorPool) {
       const status = message === 'Session not found' ? 404 : 500;
       return c.json({ error: message ?? 'Failed to load session' }, status);
     }
+  });
+
+  /**
+   * A structured task's saved log (ADR-0018, P1), read off disk whether or
+   * not the pool holds the session: every attempt is written as it happens,
+   * so the file is as current as the stream a reopened view catches up with.
+   */
+  router.get('/:id/tasks/:taskId/log', (c) => {
+    const ws = c.req.query('workspace') || process.cwd();
+    return c.json({ attempts: listTaskLogAttempts({ baseDir: ws, sessionId: c.req.param('id') }, c.req.param('taskId')) });
+  });
+
+  router.get('/:id/tasks/:taskId/log/:attempt', (c) => {
+    const ws = c.req.query('workspace') || process.cwd();
+    const attempt = Number(c.req.param('attempt'));
+    if (!Number.isInteger(attempt) || attempt < 1) return c.json({ error: 'attempt must be a positive integer' }, 400);
+    return c.json({ attempt, events: readTaskLog({ baseDir: ws, sessionId: c.req.param('id') }, c.req.param('taskId'), attempt) });
   });
 
   router.delete('/:id', (c) => {

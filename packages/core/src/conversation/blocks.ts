@@ -12,7 +12,8 @@ import type { ApprovalSource } from '../services/ApprovalPolicy';
  */
 export type DisplayBlock = MessageBlock | ThinkingDisplayBlock | ToolBlock | SubagentBlock | ApprovalBlock | PlanBlock | UsageBlock;
 
-export type MessageRole = 'user' | 'planner' | 'system' | 'error';
+/** `agent` is a task runner speaking in a structured task's log (ADR-0018); the planner is `planner`. */
+export type MessageRole = 'user' | 'planner' | 'agent' | 'system' | 'error';
 
 export interface MessageBlock {
   type: 'message';

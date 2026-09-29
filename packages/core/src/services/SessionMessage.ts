@@ -1,5 +1,6 @@
 import type { AwaitingReason, LegacyPlanState, QueuedMessage, ResearchStep, RunnerId, SubagentOutcome, Task, TaskTransport, Verdict } from '../models/Task';
 import type { UsageTotals } from '../models/Usage';
+import type { TaskLogEvent } from '../models/TaskLog';
 import type { ApprovalKind } from '../interfaces/IApproval';
 import type { ApprovalSource } from './ApprovalPolicy';
 import type { IsolationHandoff, IsolationMergeResult, TaskIsolation } from '../interfaces/IWorktreeIsolation';
@@ -151,6 +152,13 @@ export type SessionMessage =
   | { type: 'task_updated'; taskId: string; changes: Record<string, unknown> }
   | { type: 'task_started'; taskId: string; order: number; title: string; runner: RunnerId; modelId?: string }
   | { type: 'task_output'; taskId: string; text: string }
+  /**
+   * A structured task's log as it happens (ADR-0018, P1): the next events of
+   * the task's attempt `attempt`, in order — the same ones appended to that
+   * attempt's file, so a surface folding these and one replaying the file
+   * draw the same blocks. Terminal-transport tasks send none.
+   */
+  | { type: 'task_log'; taskId: string; attempt: number; events: TaskLogEvent[] }
   // A run did not start because tracked files are modified. It waits for the
   // user to stash (`continueWithStash`) or to run without isolation this once
   // (`continueWithoutIsolation`); nothing is spawned until then. `repos` names

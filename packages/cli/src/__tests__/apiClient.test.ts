@@ -237,6 +237,21 @@ describe('ApiClient — endpoints the TUI drives', () => {
     await expect(new ApiClient(server.port).setRunnerEnabled('opencode', true)).rejects.toThrow('nope');
   });
 
+  it('reads a structured task’s saved log: its attempts, then one attempt’s events', async () => {
+    const urls: string[] = [];
+    const server = await startCustomServer((req, res) => {
+      urls.push(req.url ?? '');
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(req.url?.includes('/log/') ? { attempt: 2, events: [{ type: 'text', text: 'hi' }] } : { attempts: [1, 2] }));
+    });
+    servers.push(server);
+
+    const client = new ApiClient(server.port);
+    expect(await client.getTaskLogAttempts('s1', 't 1', '/ws')).toEqual([1, 2]);
+    expect(await client.getTaskLog('s1', 't 1', 2, '/ws')).toEqual([{ type: 'text', text: 'hi' }]);
+    expect(urls).toEqual(['/api/sessions/s1/tasks/t%201/log?workspace=%2Fws', '/api/sessions/s1/tasks/t%201/log/2?workspace=%2Fws']);
+  });
+
   it('updates a task through the generic plan mutation endpoint', async () => {
     let seen: { method?: string; url?: string; body?: unknown } = {};
     const server = await startCustomServer((req, res) => {

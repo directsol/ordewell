@@ -39,6 +39,7 @@ function tailOf(text: string, max: number): string {
 const ROLE_PREFIX: Record<MessageRole, Paint> = {
   user: (t) => `${style.cyan('❯')} ${t}`,
   planner: (t) => `${style.magenta('◆')} ${t}`,
+  agent: (t) => `${style.magenta('◆')} ${t}`,
   system: (t) => style.grey(`· ${t}`),
   error: (t) => `${style.red('✗')} ${style.red(t)}`,
 };
@@ -46,7 +47,7 @@ const ROLE_PREFIX: Record<MessageRole, Paint> = {
 function messageLines(block: MessageBlock, cols: number): string[] {
   const text = sanitize(block.text);
   const room = Math.max(1, cols - 2);
-  const wrapped = block.role === 'planner' ? renderMarkdown(text, room) : wrap(text, room);
+  const wrapped = block.role === 'planner' || block.role === 'agent' ? renderMarkdown(text, room) : wrap(text, room);
   return wrapped.map((line, i) => (i === 0 ? ROLE_PREFIX[block.role](line) : `  ${line}`));
 }
 

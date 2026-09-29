@@ -2,7 +2,7 @@ import http from 'http';
 import WebSocket from 'ws';
 import { DEFAULT_PORT } from './daemon';
 import { bearerHeaderValue, readDaemonToken, tokenSubprotocols, mintSessionId } from '@ordewell/core';
-import type { SerializedPlan, DiscoveredModel, SessionMessage, SessionNotice, RewindTarget, IsolationMergeResult, SessionMeta } from '@ordewell/core';
+import type { SerializedPlan, DiscoveredModel, SessionMessage, SessionNotice, RewindTarget, IsolationMergeResult, SessionMeta, TaskLogEvent } from '@ordewell/core';
 import type { RawCatalog } from './catalog';
 
 const DEFAULT_HTTP_TIMEOUT_MS = 15 * 60 * 1000;
@@ -541,6 +541,22 @@ export class ApiClient {
       throw new Error(res.data?.error || 'Session not found');
     }
     return res.data;
+  }
+
+  /** The attempts of a structured task that have a saved log, oldest first. */
+  async getTaskLogAttempts(sessionId: string, taskId: string, workspace?: string): Promise<number[]> {
+    const qs = workspace ? `?workspace=${encodeURIComponent(workspace)}` : '';
+    const res = await this.httpRequest<{ attempts: number[] } & ErrorResponse>('GET', `/api/sessions/${sessionId}/tasks/${encodeURIComponent(taskId)}/log${qs}`);
+    if (res.status !== 200) throw new Error(res.data?.error || 'Could not read the task log');
+    return res.data.attempts;
+  }
+
+  /** One attempt's saved log, for `replayTaskLog`. */
+  async getTaskLog(sessionId: string, taskId: string, attempt: number, workspace?: string): Promise<TaskLogEvent[]> {
+    const qs = workspace ? `?workspace=${encodeURIComponent(workspace)}` : '';
+    const res = await this.httpRequest<{ events: TaskLogEvent[] } & ErrorResponse>('GET', `/api/sessions/${sessionId}/tasks/${encodeURIComponent(taskId)}/log/${attempt}${qs}`);
+    if (res.status !== 200) throw new Error(res.data?.error || 'Could not read the task log');
+    return res.data.events;
   }
 
   /**

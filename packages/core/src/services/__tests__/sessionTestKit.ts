@@ -11,6 +11,8 @@ import type { TaskOutputSource } from '../../interfaces/TaskOutputSource';
 import type { IWorktreeIsolation } from '../../interfaces/IWorktreeIsolation';
 import { BufferedTaskOutputSource } from '../BufferedTaskOutputSource';
 import { flattenTasks, type Task } from '../../models/Task';
+import type { TaskLogEvent } from '../../models/TaskLog';
+import type { TaskLogFile, TaskLogLocation } from '../../utils/taskLogStore';
 
 import { fakeConfig, FakeTerminalSession } from '../../testing';
 
@@ -61,6 +63,21 @@ export interface SessionOverrides {
    * pass `saveSession` itself for a test that reads the store back.
    */
   saveSession?: SaveSession;
+  /** Defaults to attempt files held in memory, so a structured run never writes into the repo the suite runs in. */
+  openTaskLog?: SessionDeps['openTaskLog'];
+}
+
+/** Task-log files that live in memory, numbered per task as the real store numbers them. */
+export function memoryTaskLogs(): NonNullable<SessionDeps['openTaskLog']> & { files: Map<string, TaskLogEvent[][]> } {
+  const files = new Map<string, TaskLogEvent[][]>();
+  const open = (_location: TaskLogLocation, taskId: string): TaskLogFile => {
+    const attempts = files.get(taskId) ?? [];
+    files.set(taskId, attempts);
+    const events: TaskLogEvent[] = [];
+    attempts.push(events);
+    return { attempt: attempts.length, append: (batch) => { events.push(...batch); } };
+  };
+  return Object.assign(open, { files });
 }
 
 const saveFakes = new WeakMap<Session, Mock<SaveSession>>();
@@ -104,6 +121,7 @@ export function makeSession(overrides: SessionOverrides = {}): Session {
     taskOutput: overrides.taskOutput ?? new BufferedTaskOutputSource({ transcripts: { finalAssistantText: async () => null } }),
     isolation: overrides.isolation,
     saveSession: overrides.saveSession ?? save,
+    openTaskLog: overrides.openTaskLog ?? memoryTaskLogs(),
   });
   if (!overrides.saveSession) saveFakes.set(session, save);
   return session;
