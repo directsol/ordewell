@@ -32,6 +32,8 @@ interface SubTaskCardProps {
   onMarkComplete?: (taskId: string) => void;
   onMarkIncomplete?: (taskId: string) => void;
   onRunTask?: (taskId: string) => void;
+  /** Open (or focus) this structured subtask's log tab (ADR-0018, V1). */
+  onOpenLog?: (taskId: string) => void;
 }
 
 const STATUS_CONFIG: Record<string, { label: string; cls: string }> = {
@@ -54,7 +56,7 @@ const RUNNER_ABBREV: Record<string, string> = {
   'opencode': 'OC',
 };
 
-export default function SubTaskCard({ task, parentTask, models, modes, runners, effectiveRunner, configuredProviders, modelApiMapping, isExecuting, onRunnerChange, onModelChange, onModelsRefreshNeeded, onModeChange, onRemoveTask, onPromptChange, onRetry: _onRetry, onSkip, onCancel, onForceStart, onMarkComplete, onMarkIncomplete, onRunTask }: SubTaskCardProps) {
+export default function SubTaskCard({ task, parentTask, models, modes, runners, effectiveRunner, configuredProviders, modelApiMapping, isExecuting, onRunnerChange, onModelChange, onModelsRefreshNeeded, onModeChange, onRemoveTask, onPromptChange, onRetry: _onRetry, onSkip, onCancel, onForceStart, onMarkComplete, onMarkIncomplete, onRunTask, onOpenLog }: SubTaskCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [editingPrompt, setEditingPrompt] = useState<string | null>(null);
 
@@ -64,6 +66,7 @@ export default function SubTaskCard({ task, parentTask, models, modes, runners, 
   const runnerAbbrev = effectiveRunner ? (RUNNER_ABBREV[effectiveRunner] ?? effectiveRunner.slice(0, 2).toUpperCase()) : null;
   const baseStatus = STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending;
   const status = { ...baseStatus, label: awaitingLabel(task) ?? baseStatus.label };
+  const isStructured = task.transport?.kind === 'structured';
 
   const handlePromptSave = () => {
     if (editingPrompt !== null && editingPrompt !== task.prompt) {
@@ -87,7 +90,15 @@ export default function SubTaskCard({ task, parentTask, models, modes, runners, 
         </span>
         <span className="subtask-title-text">{task.title}</span>
 
-        {(isExecuting || task.status === 'failed') && (
+        {isStructured && onOpenLog && (
+          <button type="button" className="task-log-open-btn"
+            onClick={(e) => { e.stopPropagation(); onOpenLog(task.id); }}
+            title="Open this task's log in an editor tab">
+            Open log
+          </button>
+        )}
+
+        {(isExecuting || task.status === 'failed' || task.status === 'awaiting_user') && (
           <span className={`task-status-badge ${status.cls}`}>{status.label}</span>
         )}
 

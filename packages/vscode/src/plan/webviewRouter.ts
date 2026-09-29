@@ -17,6 +17,8 @@ export interface ExtensionHandlers {
   setPlannerModel(modelId: string, effort?: string): Promise<void>;
   toggleSkill(skillId: string, enabled: boolean): void;
   setRunnerTransport(transport: RunnerTransport): void;
+  /** Open (or focus) the on-demand task-log tab for a structured task (ADR-0018, V1). */
+  openTaskLog(taskId: string): void;
 }
 
 export interface WebviewRouterDeps extends PlanManagerDeps {
@@ -112,6 +114,10 @@ export async function routeWebviewMessage(msg: WebviewToHost, deps: WebviewRoute
       return;
     case 'setRunnerTransport':
       deps.extension.setRunnerTransport(msg.transport);
+      return;
+    // The panel is its own webview; the chat only asks for it to be opened.
+    case 'openTaskLog':
+      deps.extension.openTaskLog(msg.taskId);
       return;
     case 'setPlanner':
       await deps.extension.setPlanner(msg.provider);

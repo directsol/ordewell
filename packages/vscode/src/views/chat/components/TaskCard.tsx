@@ -62,6 +62,8 @@ interface TaskCardProps {
   onMarkComplete?: (taskId: string) => void;
   onMarkIncomplete?: (taskId: string) => void;
   onRunTask?: (taskId: string) => void;
+  /** Open (or focus) this structured task's log tab (ADR-0018, V1). */
+  onOpenLog?: (taskId: string) => void;
   /** Controlled expansion. When both are supplied the parent owns which card is
    *  open (an accordion); omitted, the card keeps its own state. */
   expanded?: boolean;
@@ -134,7 +136,7 @@ export function runnerOptionsFor(runners: RunnerOption[] | undefined, assignedRu
   return [...runners, { id: assignedRunner, displayName: assignedRunner }];
 }
 
-export default function TaskCard({ task, models, modes, modelsByRunner, modesByRunner, runners, effectiveRunner, configuredProviders, modelApiMapping, isExecuting, output, idleSince, isolation, onResolveConflict, taskOrderMap, dependentCount, siblings, onDependenciesChange, onRunnerChange, onModelChange, onModelsRefreshNeeded, onModeChange, onRemoveTask, onPromptChange, onRetry, onSkip, onCancel, onForceStart, onMarkComplete, onMarkIncomplete, onRunTask, expanded: expandedProp, onExpandedChange }: TaskCardProps) {
+export default function TaskCard({ task, models, modes, modelsByRunner, modesByRunner, runners, effectiveRunner, configuredProviders, modelApiMapping, isExecuting, output, idleSince, isolation, onResolveConflict, taskOrderMap, dependentCount, siblings, onDependenciesChange, onRunnerChange, onModelChange, onModelsRefreshNeeded, onModeChange, onRemoveTask, onPromptChange, onRetry, onSkip, onCancel, onForceStart, onMarkComplete, onMarkIncomplete, onRunTask, onOpenLog, expanded: expandedProp, onExpandedChange }: TaskCardProps) {
   const [internalExpanded, setInternalExpanded] = useState(false);
   const isControlled = expandedProp !== undefined;
   const expanded = isControlled ? expandedProp : internalExpanded;
@@ -205,6 +207,10 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
   // hardcoded mode names).
   const modeInfo = activeModes.find((m) => m.id === task.taskMode);
 
+  // A structured task has a log tab to open (ADR-0018, V1); a terminal one has
+  // none, so the card offers nothing that would lead nowhere.
+  const isStructured = task.transport?.kind === 'structured';
+
   const runnerOptions = runnerOptionsFor(runners, task.assignedRunner);
   const canEditDeps = !isExecuting && !!onDependenciesChange;
 
@@ -242,7 +248,18 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
           <span className="task-transport-badge fallback" title={`Ran in a terminal: ${task.transport.fallback}`}>Terminal: {task.transport.fallback}</span>
         )}
 
-        {(isExecuting || task.status === 'failed') && (
+        {isStructured && onOpenLog && (
+          <button type="button" className="task-log-open-btn"
+            onClick={(e) => { e.stopPropagation(); onOpenLog(task.id); }}
+            title="Open this task's log in an editor tab">
+            Open log
+          </button>
+        )}
+
+        {/* The awaiting reason is a badge in its own right (ADR-0018, W1): a
+            task held for the user must read as such whether or not a run is
+            still being drawn as active. */}
+        {(isExecuting || task.status === 'failed' || task.status === 'awaiting_user') && (
           <>
             <span className={`task-status-dot ${status.cls}`} title={status.label} />
             <span className={`task-status-badge ${status.cls}`}>{status.label}</span>
@@ -525,7 +542,7 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
                     onRetry={onRetry} onSkip={onSkip} onCancel={onCancel}
                     onForceStart={onForceStart} onMarkComplete={onMarkComplete}
                     onMarkIncomplete={onMarkIncomplete}
-                    onRunTask={onRunTask} />
+                    onRunTask={onRunTask} onOpenLog={onOpenLog} />
                 );
               })}
             </div>

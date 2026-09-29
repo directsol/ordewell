@@ -9,6 +9,9 @@ export default defineConfig({
     rollupOptions: {
       input: {
         chat: path.resolve(__dirname, 'src/views/chat/index.html'),
+        // A second entry, not a forked component set: the task-log tab (V1)
+        // draws the chat's own ConversationBlocks and stylesheet.
+        tasklog: path.resolve(__dirname, 'src/views/tasklog/index.html'),
       },
       output: {
         entryFileNames: '[name].js',

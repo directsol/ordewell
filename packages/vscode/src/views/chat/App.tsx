@@ -572,6 +572,12 @@ export default function App() {
     vscode.postMessage({ type: 'sendSystemCommand', command: 'runTask', taskId });
   }, []);
 
+  // The log tab is the host's webview panel (ADR-0018, V1); the chat only asks
+  // for it. Opening is idempotent host-side — an open tab is focused.
+  const handleOpenTaskLog = useCallback((taskId: string) => {
+    vscode.postMessage({ type: 'openTaskLog', taskId });
+  }, []);
+
   const handleMarkComplete = useCallback((taskId: string) => {
     const taskTitle = planRef.current?.tasks.find((t) => t.id === taskId)?.title ?? taskId;
     vscode.postMessage({ type: 'sendSystemCommand', command: 'markComplete', taskId });
@@ -884,6 +890,7 @@ export default function App() {
             onRunTask={handleRunTask}
             isolationByTask={taskIsolation}
             onResolveConflict={handleResolveConflict}
+            onOpenLog={handleOpenTaskLog}
           />
           {handoff && (
             <HandoffCard

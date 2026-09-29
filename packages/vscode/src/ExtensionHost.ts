@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import {
-  createSession, createSkillsService, createEmptyPlan, parseMaxParallel, sessionRuntimeSettings,
+  createSession, createSkillsService, createEmptyPlan, flattenTasks, parseMaxParallel, sessionRuntimeSettings,
   type AiProvider, type LegacyPlanState, type RunnerId, type Session, type SessionDeps,
 } from '@ordewell/core';
 import { registerCommands, type CommandDeps } from './commands/CommandRegistry';
@@ -12,6 +12,7 @@ import { saveCurrentSession, restoreState, persistState, type PersistenceDeps } 
 import { ModelDiscovery, sendModelConfig } from './ModelDiscovery';
 import { PlannerSelection } from './PlannerSelection';
 import type { ChatViewProvider } from './providers/ChatViewProvider';
+import { TaskLogRegistry } from './providers/TaskLogRegistry';
 import { SecretStore } from './adapters/SecretStore';
 import type { VsCodeConfig } from './adapters/VsCodeConfig';
 import type { VsCodeFileSystem } from './adapters/VsCodeFileSystem';
@@ -123,6 +124,17 @@ export function createExtension(services: ExtensionServices, vscodeApi: typeof v
     log,
   };
 
+  // The open task-log tabs (ADR-0018, V1), keyed by task. Built before the
+  // session so the broadcast handler below can hand it every event; the
+  // session getter is filled before anything can broadcast. A task is read
+  // from the Session — the plan's owner — not the host's cached copy.
+  const taskLogs = new TaskLogRegistry({
+    extensionUri: services.context.extensionUri,
+    session: () => requireSession(),
+    getTask: (taskId) => flattenTasks(requireSession().planTasks).find((t) => t.id === taskId),
+    log,
+  });
+
   sessionCell.current = (services.sessionFactory ?? createSession)({
     config: services.config,
     notifications: services.notifications,
@@ -130,7 +142,12 @@ export function createExtension(services: ExtensionServices, vscodeApi: typeof v
     registry: services.pluginRegistry,
     workspaceRoot: () => services.fsAdapter.getWorkspaceRoot(),
     fsAdapter: services.fsAdapter,
-    broadcast: (msg) => handleSessionMessage(msg, managerDeps),
+    // A panel is a second surface on the same session: it sees the event first
+    // and filters to its own task, the chat handler then draws it as before.
+    broadcast: (msg) => {
+      taskLogs.receive(msg);
+      handleSessionMessage(msg, managerDeps);
+    },
     modelResolver: services.modelResolver,
     settings: () => sessionRuntimeSettings(services.settingsService.getAll()),
   });
@@ -185,6 +202,7 @@ export function createExtension(services: ExtensionServices, vscodeApi: typeof v
       setPlannerModel: (modelId, effort) => planner.setModel(modelId, effort),
       toggleSkill: (skillId, enabled) => planner.toggleSkill(skillId, enabled),
       setRunnerTransport: (transport) => planner.setRunnerTransport(transport),
+      openTaskLog: (taskId) => taskLogs.open(taskId),
     },
     getPendingRunners: () => state.pendingRunners,
     setPendingRunners: (runners) => { state.pendingRunners = runners; },
@@ -329,6 +347,7 @@ export function createExtension(services: ExtensionServices, vscodeApi: typeof v
 
   function dispose(): void {
     log('Ordewell deactivating...');
+    taskLogs.dispose();
     persistState(persistenceDeps());
     services.terminalRunner.stopAll();
     log('Ordewell deactivated');
