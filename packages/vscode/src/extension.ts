@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { createSession, RunnerRegistry, ModelResolver, RunnerInstallation, SettingsService, PlannerModelMemory } from '@ordewell/core';
+import { createSession, RunnerRegistry, ModelResolver, RunnerInstallation, SettingsService, PlannerModelMemory, StructuredRunner, TransportRouter } from '@ordewell/core';
 import { ChatViewProvider } from './providers/ChatViewProvider';
 import { VsCodeConfig } from './adapters/VsCodeConfig';
 import { VsCodeFileSystem } from './adapters/VsCodeFileSystem';
@@ -40,7 +40,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       runnerInstallation: new RunnerInstallation(pluginRegistry),
       fsAdapter: new VsCodeFileSystem(),
       notifications: new VsCodeNotification(),
-      terminalRunner: new VsCodeTerminalRunner(),
+      // A plan on the structured transport (ADR-0018) runs its Claude Code
+      // tasks as plain child processes; every other task keeps its terminal.
+      terminalRunner: new TransportRouter({ terminal: new VsCodeTerminalRunner(), structured: new StructuredRunner() }),
       settingsService,
       plannerModelMemory: new PlannerModelMemory(settingsService),
       modelResolver: new ModelResolver(pluginRegistry, config),

@@ -1,4 +1,4 @@
-import type { LegacyPlanState, QueuedMessage, ResearchStep, RunnerId, SubagentOutcome, Task, Verdict } from '../models/Task';
+import type { LegacyPlanState, QueuedMessage, ResearchStep, RunnerId, SubagentOutcome, Task, TaskTransport, Verdict } from '../models/Task';
 import type { UsageTotals } from '../models/Usage';
 import type { ApprovalKind } from '../interfaces/IApproval';
 import type { ApprovalSource } from './ApprovalPolicy';
@@ -12,6 +12,8 @@ export type SerializedTaskStatus = {
   idleSince?: string | null;
   /** Absent unless the plan has an isolation run, so a shared-root plan's updates are unchanged. */
   isolation?: TaskIsolation;
+  /** Absent unless the task's plan asked for the structured transport (ADR-0018): what it ran on, or why it fell back. */
+  transport?: Pick<TaskTransport, 'kind' | 'fallback'>;
 };
 
 export type SerializedTask = {
@@ -234,6 +236,7 @@ export function serializeTaskStatus(t: Task, idleSince: string | null = null, is
       : null,
     idleSince,
     ...(isolation ? { isolation } : {}),
+    ...(t.transport ? { transport: t.transport.fallback ? { kind: t.transport.kind, fallback: t.transport.fallback } : { kind: t.transport.kind } } : {}),
   };
 }
 

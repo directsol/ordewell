@@ -2,6 +2,7 @@ import { applyKey, emptyEditor, type EditorState } from '../editor';
 import { taskEditorRoom } from '../geometry';
 import { findTask, planRows, selectedPlanRow, type TaskView, type TuiState } from '../state';
 import type { Key } from '../keys';
+import { say } from '../transcript';
 import { scrollDelta, scrollPlan, settlePlan } from './pointer';
 import {
   addTask, confirmRemoveTask, openTaskDepsPicker, openTaskEffortPicker, openTaskModePicker, openTaskModelPicker,
@@ -29,6 +30,18 @@ export function taskActionEffect(state: TuiState, sessionId: string, taskId: str
   return watch
     ? { type: 'taskAction', sessionId, taskId, action, watch: true }
     : { type: 'taskAction', sessionId, taskId, action };
+}
+
+/**
+ * A structured task is a plain child process with no terminal behind it
+ * (ADR-0018, W2), so the launcher would only fail to find its tmux window.
+ */
+export function openTerminal(state: TuiState, sessionId: string, taskId: string): Step {
+  const task = findTask(state.tasks, taskId);
+  if (task?.transport?.kind === 'structured') {
+    return step(say(state, 'system', `Task ${task.order} runs on the structured transport (experimental), so it has no terminal to open.`));
+  }
+  return step(state, [{ type: 'openTaskTerminal', sessionId, taskId }]);
 }
 
 /**
@@ -105,9 +118,7 @@ export function handlePlanKey(state: TuiState, key: Key): Step {
     return step(state, [taskActionEffect(state, state.sessionId, task.id, action)]);
   }
   if (key.char === 'd') return confirmRemoveTask(state, task);
-  if (key.char === 't') {
-    return step(state, [{ type: 'openTaskTerminal', sessionId: state.sessionId, taskId: task.id }]);
-  }
+  if (key.char === 't') return openTerminal(state, state.sessionId, task.id);
   // Adds a task, so it is asked for by name — and only where a conflict exists.
   if (key.char === 'x' && task.isolation?.state === 'conflict') {
     return step(state, [{ type: 'resolveConflict', sessionId: state.sessionId, taskId: task.id }]);

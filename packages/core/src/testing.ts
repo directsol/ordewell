@@ -1,6 +1,6 @@
 import type { IConfig } from './interfaces/IConfig';
 import type { IFileSystem, ToolOutcome } from './interfaces/IFileSystem';
-import type { ITerminalSession } from './interfaces/ITerminalRunner';
+import type { ITerminalSession, QueuedTaskMessage, StructuredEvent, StructuredSessionCapability, StructuredTurnEnd } from './interfaces/ITerminalRunner';
 import type {
   IsolationAvailability,
   IsolationHandoff,
@@ -103,6 +103,48 @@ export class FakeTerminalSession implements ITerminalSession {
   }
   emitExit(code: number): void {
     for (const cb of this.exitCbs) cb(code);
+  }
+}
+
+/**
+ * A {@link FakeTerminalSession} that is feature-detected as structured
+ * (ADR-0018): the turn, queue and native-session calls a test drives, with
+ * no protocol behind them.
+ */
+export class FakeStructuredSession extends FakeTerminalSession implements StructuredSessionCapability {
+  readonly transport = 'structured' as const;
+  state: 'working' | 'idle' = 'working';
+  messages: QueuedTaskMessage[] = [];
+  private turnEndCbs: Array<(reason: StructuredTurnEnd) => void> = [];
+  private eventCbs: Array<(event: StructuredEvent) => void> = [];
+
+  constructor(id = 's1', taskId = 't1', public sessionId: string | null = 'native-1') {
+    super(id, taskId);
+  }
+
+  turnState(): 'working' | 'idle' { return this.state; }
+  onTurnEnd(cb: (reason: StructuredTurnEnd) => void): void { this.turnEndCbs.push(cb); }
+  onEvent(cb: (event: StructuredEvent) => void): void { this.eventCbs.push(cb); }
+  sendMessage(text: string): string {
+    const id = `msg-${this.messages.length + 1}`;
+    this.messages.push({ id, text });
+    return id;
+  }
+  removeQueued(id: string): boolean {
+    const before = this.messages.length;
+    this.messages = this.messages.filter((m) => m.id !== id);
+    return this.messages.length < before;
+  }
+  queued(): QueuedTaskMessage[] { return [...this.messages]; }
+  async interrupt(): Promise<void> { this.emitTurnEnd('interrupted'); }
+  nativeSessionId(): string | null { return this.sessionId; }
+
+  emitEvent(event: StructuredEvent): void {
+    for (const cb of this.eventCbs) cb(event);
+  }
+  emitTurnEnd(reason: StructuredTurnEnd): void {
+    this.state = 'idle';
+    for (const cb of this.turnEndCbs) cb(reason);
   }
 }
 

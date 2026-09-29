@@ -24,6 +24,16 @@ export interface ITerminalSession {
   writeControl?(text: string): void;
 }
 
+/**
+ * How Ordewell drives a task's runner (ADR-0018): through its screen and
+ * keyboard, or through its programmatic protocol.
+ */
+export type RunnerTransport = 'terminal' | 'structured';
+
+export function isRunnerTransport(value: unknown): value is RunnerTransport {
+  return value === 'terminal' || value === 'structured';
+}
+
 /** How a structured turn ended. `failed` carries the agent's own words in the preceding `error` event. */
 export type StructuredTurnEnd = 'completed' | 'interrupted' | 'failed';
 
@@ -104,6 +114,11 @@ export interface ITerminalRunner {
      * manifest's env still wins over them.
      */
     env?: Record<string, string>;
+    /**
+     * The transport the plan asks for (ADR-0018, S1). A router decides per
+     * task whether the runner can honour it; any other runner ignores it.
+     */
+    transport?: RunnerTransport;
   }): Promise<ITerminalSession>;
 
   stop(sessionId: string): void;

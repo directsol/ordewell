@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { saveSession, type LegacyPlanState, type ITerminalRunner } from '@ordewell/core';
+import { RunnerRegistry, saveSession, TransportRouter, type ITerminalRunner, type ITerminalSession, type LegacyPlanState } from '@ordewell/core';
 
 const poolAwareRunnerCtor = vi.fn();
 vi.mock('../../adapters/PoolAwareRunner', () => ({
@@ -37,22 +37,52 @@ describe('OrchestratorPool shared runner injection', () => {
     rmSync(workspace, { recursive: true, force: true });
   });
 
-  it('passes an injected shared runner into every session it creates', () => {
-    const runner = { activeCount: 0, spawn: vi.fn(), stop: vi.fn(), stopAll: vi.fn() } as ITerminalRunner;
-    const pool = new OrchestratorPool({ runner });
+  /** The runner the pool handed the one session it created; a router over the terminal and structured runners. */
+  function routerOf(): ITerminalRunner {
+    const [, , inner] = poolAwareRunnerCtor.mock.calls.at(-1) as [string, unknown, ITerminalRunner];
+    expect(inner).toBeInstanceOf(TransportRouter);
+    return inner;
+  }
+
+  function fakeRunner(): ITerminalRunner {
+    return { activeCount: 0, spawn: vi.fn(async () => ({}) as ITerminalSession), stop: vi.fn(), stopAll: vi.fn() };
+  }
+
+  const spawnOpts = { taskId: 't1', prompt: 'p', cwd: '/repo', registry: new RunnerRegistry() };
+
+  it('routes every session\'s terminal tasks to an injected shared runner', async () => {
+    const runner = fakeRunner();
+    const structuredRunner = fakeRunner();
+    const pool = new OrchestratorPool({ runner, structuredRunner });
 
     const meta = saveSession(savedPlan(), 'Rate limiting', workspace, 'session-shared');
     pool.adoptSavedSession(meta.id, workspace);
+    await routerOf().spawn({ ...spawnOpts, runner: 'opencode', transport: 'structured' });
 
-    expect(poolAwareRunnerCtor).toHaveBeenCalledWith(expect.any(String), expect.any(Function), runner);
+    expect(runner.spawn).toHaveBeenCalledOnce();
+    expect(structuredRunner.spawn).not.toHaveBeenCalled();
   });
 
-  it('defaults to no injected runner, preserving today\'s per-session HeadlessRunner behavior', () => {
+  it('routes a structured Claude Code task to the shared structured runner', async () => {
+    const runner = fakeRunner();
+    const structuredRunner = fakeRunner();
+    const pool = new OrchestratorPool({ runner, structuredRunner });
+
+    const meta = saveSession(savedPlan(), 'Rate limiting', workspace, 'session-structured');
+    pool.adoptSavedSession(meta.id, workspace);
+    await routerOf().spawn({ ...spawnOpts, runner: 'claude-code', transport: 'structured' });
+
+    expect(structuredRunner.spawn).toHaveBeenCalledOnce();
+    expect(runner.spawn).not.toHaveBeenCalled();
+  });
+
+  it('gives each session a router of its own when no runner is injected, preserving the per-session HeadlessRunner', () => {
     const pool = new OrchestratorPool();
 
-    const meta = saveSession(savedPlan(), 'Rate limiting', workspace, 'session-default');
-    pool.adoptSavedSession(meta.id, workspace);
+    pool.adoptSavedSession(saveSession(savedPlan(), 'One', workspace, 'session-a').id, workspace);
+    const first = routerOf();
+    pool.adoptSavedSession(saveSession(savedPlan(), 'Two', workspace, 'session-b').id, workspace);
 
-    expect(poolAwareRunnerCtor).toHaveBeenCalledWith(expect.any(String), expect.any(Function), undefined);
+    expect(routerOf()).not.toBe(first);
   });
 });

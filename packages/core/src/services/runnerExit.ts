@@ -1,3 +1,5 @@
+import type { RunnerTransport } from '../interfaces/ITerminalRunner';
+
 /**
  * What a stopped runner says about why it stopped, and what ending an attempt
  * does to the runner it leaves behind. TaskOrchestrator acts on the answers;
@@ -32,16 +34,21 @@ export function classifyRunnerStop(output: string): RunnerStop {
 export type AttemptEnd = 'verdict' | 'cancel' | 'release' | 'complete' | 'retry' | 'spawn-failed' | 'stop' | 'load';
 
 /**
- * A verdict leaves the runner up so its terminal stays readable. Every other
- * reason lets it go — cancel, complete, retry and a failed spawn stop it here,
- * while stop and load reset every runner at once.
+ * A verdict leaves a terminal runner up so its screen stays readable. Every
+ * other reason lets it go — cancel, complete, retry and a failed spawn stop it
+ * here, while stop and load reset every runner at once.
  */
-export function keepsTerminalReadable(reason: AttemptEnd): boolean {
-  return reason === 'verdict';
+export function keepsTerminalReadable(reason: AttemptEnd, transport: RunnerTransport): boolean {
+  return reason === 'verdict' && transport === 'terminal';
 }
 
-/** Whether ending an attempt with this reason has to stop its own runner now. */
-export function stopsRunner(reason: AttemptEnd): boolean {
+/**
+ * Whether ending an attempt with this reason has to stop its own runner now.
+ * A structured runner also ends on its verdict (ADR-0018, L1): its log lives
+ * in Ordewell, and whatever it did after the verdict would go unverified.
+ */
+export function stopsRunner(reason: AttemptEnd, transport: RunnerTransport): boolean {
+  if (reason === 'verdict') return transport === 'structured';
   return reason === 'cancel' || reason === 'release' || reason === 'complete' || reason === 'retry' || reason === 'spawn-failed';
 }
 

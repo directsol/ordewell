@@ -1,4 +1,4 @@
-import type { DisplayBlock, SessionMessage } from '@ordewell/core';
+import { isRunnerTransport, type DisplayBlock, type SessionMessage } from '@ordewell/core';
 import { sanitize } from '../ansi';
 import {
   isTaskRunning, plannerInFlight, SKILL_IDS, type SkillId, type TaskView, type TuiState,
@@ -125,6 +125,7 @@ export function applySettings(state: TuiState, settings: Record<string, unknown>
     plannerEffort:
       typeof settings.plannerThinkingEffort === 'string' ? settings.plannerThinkingEffort : state.plannerEffort,
     maxParallel: typeof settings.maxParallel === 'number' ? settings.maxParallel : state.maxParallel,
+    runnerTransport: isRunnerTransport(settings.runnerTransport) ? settings.runnerTransport : state.runnerTransport,
     allowlist:
       settings.modelAllowlist && typeof settings.modelAllowlist === 'object'
         ? (settings.modelAllowlist as Record<string, string[]>)

@@ -12,7 +12,7 @@ import HandoffCard from './components/HandoffCard';
 import CheckpointPanel from './components/CheckpointPanel';
 import type { RunnerMode } from './components/TaskCard';
 import type { TaskDraft } from './components/NewTaskCard';
-import type { LegacyPlanState, DiscoveredModel, Task, TaskModelAssignment, RunnerId, IsolationHandoff, IsolationMergeResult, TaskIsolation } from '@ordewell/core';
+import type { LegacyPlanState, DiscoveredModel, Task, TaskModelAssignment, RunnerId, RunnerTransport, IsolationHandoff, IsolationMergeResult, TaskIsolation } from '@ordewell/core';
 import type { AiProvider } from '@ordewell/core';
 import { isPlanRevision, planSummaryLabel, nextDock } from './planDock';
 import { DetailContext } from './detail';
@@ -80,6 +80,7 @@ export default function App() {
   const [setupCollapsed, setSetupCollapsed] = useState(false);
   const [tddEnabled, setTddEnabled] = useState(true);
   const [verifyEnabled, setVerifyEnabled] = useState(false);
+  const [runnerTransport, setRunnerTransport] = useState<RunnerTransport>('terminal');
   /** Discovered skills (~/.ordewell/skills/ + .ordewell/skills/) for the /skill-name suggestion dropdown. */
   const [skills, setSkills] = useState<{ name: string; description: string }[]>([]);
   const [checkpoint, setCheckpoint] = useState<{ taskId: string; taskTitle: string; summary: string; pausedAt: number } | null>(null);
@@ -346,6 +347,10 @@ export default function App() {
 
         case 'setSkills':
           setSkills(msg.skills ?? []);
+          break;
+
+        case 'runnerTransport':
+          setRunnerTransport(msg.transport);
           break;
 
         case 'checkpoint':
@@ -654,6 +659,12 @@ export default function App() {
       vscode.postMessage({ type: 'toggleSkill', skillId, enabled: next });
     }
   }, [tddEnabled, verifyEnabled]);
+
+  const handleToggleTransport = useCallback(() => {
+    const next: RunnerTransport = runnerTransport === 'structured' ? 'terminal' : 'structured';
+    setRunnerTransport(next);
+    vscode.postMessage({ type: 'setRunnerTransport', transport: next });
+  }, [runnerTransport]);
 
   const handleApproveCheckpoint = useCallback(() => {
     if (!checkpoint) return;
@@ -1017,6 +1028,10 @@ export default function App() {
         <button className={`skill-toggle-pill ${verifyEnabled ? 'on' : 'off'}`}
           onClick={() => handleToggleSkill('verify')} title="Verify (run tests): adds a final evidence-based task that runs the full suite, writes missing spec checks, and must exit green">
           <span className="skill-toggle-dot" /> Verify
+        </button>
+        <button className={`skill-toggle-pill ${runnerTransport === 'structured' ? 'on' : 'off'}`}
+          onClick={handleToggleTransport} title="Structured (experimental): run Claude Code tasks through its protocol instead of a terminal. Applies from the next run; other runners keep their terminal.">
+          <span className="skill-toggle-dot" /> Structured <span className="skill-toggle-experimental">experimental</span>
         </button>
       </div>
 

@@ -1,6 +1,6 @@
 import type {
   AiProvider, DisplayBlock, DiscoveredModel, IsolationHandoff, IsolationMergeResult, LegacyPlanState, PromptHold, RunnerId,
-  TaskIsolation, TaskModelAssignment,
+  RunnerTransport, TaskIsolation, TaskModelAssignment,
 } from '@ordewell/core';
 
 /*
@@ -135,6 +135,8 @@ export type WebviewToHost =
   /** A notice the webview raised (a task action, the watchdog) — the conversation belongs to the host. */
   | { type: 'addNote'; text: string }
   | { type: 'toggleSkill'; skillId: string; enabled: boolean }
+  /** The experimental runner transport (ADR-0018); a run copies it when it starts. */
+  | { type: 'setRunnerTransport'; transport: RunnerTransport }
   /** Who plans (ADR-0009) — a vendor provider id or one of the harness planners. */
   | { type: 'setPlanner'; provider: string }
   /** The planner's own model and thinking effort, a pair so neither can outlive the other. */
@@ -168,6 +170,7 @@ export type HostToWebview =
   // `unavailable` lists toggles that have no meaning for the current planner
   // backend — hidden rather than silently ignored (ADR-0009, T8).
   | { type: 'setSkillToggles'; toggles: { tdd: boolean; verify: boolean }; unavailable?: string[] }
+  | { type: 'runnerTransport'; transport: RunnerTransport }
   /** Discovered skills (global ~/.ordewell/skills/ + workspace .ordewell/skills/, workspace shadows global) for the /skill-name suggestion dropdown. */
   | { type: 'setSkills'; skills: { name: string; description: string }[] }
   | { type: 'setConfiguredProviders'; providers: AiProvider[] }

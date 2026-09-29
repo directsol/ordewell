@@ -108,6 +108,26 @@ describe('POST /api/commands/:name', () => {
     expect(pool.updateSettings).toHaveBeenCalledWith({ verification: { enabled: false } });
   });
 
+  it.each(['terminal', 'structured'])('sets the runner transport to %s via the transport command', async (action) => {
+    const res = await app.request('/api/commands/transport', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ args: { action } }),
+    });
+    expect(res.status).toBe(200);
+    expect(pool.updateSettings).toHaveBeenCalledWith({ runnerTransport: action });
+  });
+
+  it('refuses a transport that does not exist, changing nothing', async () => {
+    const res = await app.request('/api/commands/transport', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ args: { action: 'telepathy' } }),
+    });
+    expect(res.status).toBe(400);
+    expect(pool.updateSettings).not.toHaveBeenCalled();
+  });
+
   it('returns 404 for unknown command', async () => {
     const res = await app.request('/api/commands/nonexistent', {
       method: 'POST',

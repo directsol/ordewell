@@ -6,7 +6,7 @@ import { activeToken, findCommand, parseSlash, tokenCompletions } from './slash'
 import { applyKey, commit } from './editor';
 import { say, wiped } from './transcript';
 import { blockedPicker, clearIsolation, handoffArrived, isolationForPlan, sameIsolation, showDiff } from './handoff';
-import { findTask, isTaskRunning, planRows, plannerInFlight, type RunStatus, type TaskView, type TuiState } from './state';
+import { findTask, isTaskRunning, planRows, plannerInFlight, type RunStatus, type TaskTransportView, type TaskView, type TuiState } from './state';
 import type { Key } from './keys';
 import { handleOverlayKey } from './reducers/overlays';
 import { handlePlanKey } from './reducers/planPane';
@@ -129,9 +129,12 @@ export function reduce(state: TuiState, action: Action): Step {
         if (update === undefined) return t;
         const idleSince = update.idleSince ?? null;
         const isolation = update.isolation ?? t.isolation;
-        if (update.status !== t.status || idleSince !== (t.idleSince ?? null) || !sameIsolation(isolation, t.isolation)) {
+        // Unlike isolation, every status carries the transport whole: absent
+        // means the task's latest attempt was not asked to run structured.
+        const transport = update.transport;
+        if (update.status !== t.status || idleSince !== (t.idleSince ?? null) || !sameIsolation(isolation, t.isolation) || !sameTransport(transport, t.transport)) {
           changed = true;
-          return { ...t, status: update.status, idleSince, isolation };
+          return { ...t, status: update.status, idleSince, isolation, transport };
         }
         return t;
       });
@@ -307,6 +310,10 @@ export function reduce(state: TuiState, action: Action): Step {
 }
 
 /** The run indicator after a task-status change: a run is active only while a task is. */
+function sameTransport(a: TaskTransportView | undefined, b: TaskTransportView | undefined): boolean {
+  return a?.kind === b?.kind && a?.fallback === b?.fallback;
+}
+
 function runStatus(state: TuiState, tasks: TaskView[]): RunStatus {
   if (tasks.some(isTaskRunning)) return 'executing';
   // A task waiting on the user is not executing, but the run is not over

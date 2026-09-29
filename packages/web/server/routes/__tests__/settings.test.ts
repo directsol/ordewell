@@ -24,6 +24,7 @@ function settingsState(overrides: Partial<SettingsState> = {}): SettingsState {
     verification: { enabled: false },
     modelAllowlist: undefined,
     plannerModels: undefined,
+    runnerTransport: 'terminal',
     ...overrides,
   };
 }
@@ -58,6 +59,7 @@ describe('GET /api/settings', () => {
       maxParallel: 3,
       tdd: { enabled: true },
       verification: { enabled: false },
+      runnerTransport: 'terminal',
     });
   });
 });

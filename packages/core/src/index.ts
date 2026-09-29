@@ -126,6 +126,8 @@ export type { TmuxRunnerDeps, ExecFileFn } from './services/TmuxRunner';
 export { AbstractTerminalSession, AbstractRunner } from './services/AbstractRunner';
 export { StructuredRunner, StructuredSession } from './services/StructuredRunner';
 export type { StructuredRunnerDeps, StructuredSpawnOptions } from './services/StructuredRunner';
+export { TransportRouter, routeTransport } from './services/TransportRouter';
+export type { TransportRoute } from './services/TransportRouter';
 export * from './utils/shell';
 export {
   planDirectLaunch,

@@ -90,6 +90,7 @@ function harness() {
       setPlanner: vi.fn(async () => {}),
       setPlannerModel: vi.fn(async () => {}),
       toggleSkill: vi.fn(),
+      setRunnerTransport: vi.fn(),
     },
     getPendingRunners: () => pending,
     setPendingRunners: (r) => { pending = r; },
@@ -262,6 +263,7 @@ describe('webview messages reach the session through one entry point each', () =
     [{ type: 'setPlanner', provider: 'codex' }, 'setPlanner', ['codex']],
     [{ type: 'setPlannerModel', modelId: 'gpt-5', effort: 'high' }, 'setPlannerModel', ['gpt-5', 'high']],
     [{ type: 'toggleSkill', skillId: 'tdd', enabled: true }, 'toggleSkill', ['tdd', true]],
+    [{ type: 'setRunnerTransport', transport: 'structured' }, 'setRunnerTransport', ['structured']],
   ] as const)('hands %o to the extension', async (msg, handler, args) => {
     await h.route(msg as WebviewToHost);
 

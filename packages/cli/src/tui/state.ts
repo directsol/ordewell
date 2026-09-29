@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, type ConversationView, type PromptHold, type TurnGate } from '@ordewell/core';
+import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, type ConversationView, type PromptHold, type RunnerTransport, type TaskTransport, type TurnGate } from '@ordewell/core';
 import { emptyEditor, type EditorState } from './editor';
 
 export type RunStatus = 'idle' | 'planning' | 'researching' | 'executing';
@@ -24,9 +24,13 @@ export interface TaskView {
   };
   /** Absent until the daemon reports a task's isolation; quiet in the pane unless there is a conflict. */
   isolation?: TaskIsolationView;
+  /** Absent unless the task's plan asked for the structured transport: what it ran on, or why it fell back. */
+  transport?: TaskTransportView;
   /** Child tasks, recursively shaped the same way; absent until populated by `toTaskView`. */
   subtasks?: TaskView[];
 }
+
+export type TaskTransportView = Pick<TaskTransport, 'kind' | 'fallback'>;
 
 /** Where a task's isolated work stands (ADR-0013); `none` is a task with no worktree in a run that has some. */
 export type TaskIsolationState = 'none' | 'active' | 'integrated' | 'conflict' | 'repairing' | 'kept';
@@ -330,6 +334,8 @@ export interface TuiState {
   configuredProviders: string[];
   allowlist: Record<string, string[]>;
   autonomous: boolean;
+  /** The experimental `runnerTransport` setting (ADR-0018), as the daemon reports it. */
+  runnerTransport: RunnerTransport;
   /**
    * Whether the terminal's mouse is captured for wheel scrolling. On by
    * default; `/mouse off` hands it back when selecting text out of the
@@ -483,6 +489,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
     configuredProviders: [],
     allowlist: {},
     autonomous: true,
+    runnerTransport: 'terminal',
     mouseCapture: true,
     selection: null,
     workspace: process.cwd(),

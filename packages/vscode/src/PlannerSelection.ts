@@ -1,7 +1,7 @@
 import {
   CLI_PROVIDERS, getProviderMeta, PROVIDER_PRIORITY, runnerForProvider,
   type AiProvider, type ModelResolver, type PlannerModelMemory,
-  type RunnerInstallation, type SettingsService,
+  type RunnerInstallation, type RunnerTransport, type SettingsService,
 } from '@ordewell/core';
 import type { ApiProvider } from './adapters/SecretStore';
 import type { VsCodeConfig } from './adapters/VsCodeConfig';
@@ -90,6 +90,11 @@ export class PlannerSelection {
     this.deps.plannerModelMemory.remember(this.deps.config.aiProvider, modelId, effort);
     this.deps.sendModelConfig();
     await this.sendState();
+  }
+
+  setRunnerTransport(transport: RunnerTransport): void {
+    this.deps.settingsService.setRunnerTransport(transport);
+    this.deps.chatProvider.setRunnerTransport(this.deps.settingsService.getRunnerTransport());
   }
 
   toggleSkill(skillId: string, enabled: boolean): void {

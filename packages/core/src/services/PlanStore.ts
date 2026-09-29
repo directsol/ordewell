@@ -307,6 +307,11 @@ export class PlanStore {
     if (task) task.outputSummary = summary;
   }
 
+  setTaskTransport(id: string, transport: Task['transport']): void {
+    const task = this._taskMap.get(id);
+    if (task) task.transport = transport;
+  }
+
   getPlanVisualization(): { tasks: { id: string; title: string; dependencies: string[]; parallelGroups: number[][] }[]; parallelGroups: number[][] } {
     const unscheduled = new Set(this._planTasks.map(t => t.id));
     const completed = new Set<string>();

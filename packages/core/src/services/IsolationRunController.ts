@@ -28,6 +28,11 @@ export type IsolationNoticeLevel = 'info' | 'warn' | 'error';
 export interface IsolationRunListener {
   /** The run record changed and should be persisted with the plan. */
   changed(): void;
+  /**
+   * A run opened — the one moment shared by Execute, a manual task run and
+   * a force start, so whatever a run pins for its whole length is read here.
+   */
+  opened(): void;
   /** A run did not start: `repos` of the group have tracked changes. */
   blocked(repos: string[]): void;
   /** An isolated run closed and handed its integration branches over. */
@@ -235,7 +240,7 @@ export class IsolationRunController {
         ? `Stashed your uncommitted changes in ${this.blockedRepos.join(', ')} — \`git stash pop\` in each brings them back.`
         : 'Stashed your uncommitted changes — `git stash pop` brings them back.');
     } else {
-      this.mode = 'shared';
+      this.begin('shared');
       this.tell('info', 'Running without worktree isolation — tasks share the workspace root for this run.');
     }
     return resume;
@@ -429,7 +434,7 @@ export class IsolationRunController {
     }
     if (decision.mode === 'shared') {
       this.tell('info', sharedRootNotice(decision.reason, decision.repos));
-      this.mode = 'shared';
+      this.begin('shared');
       return true;
     }
     if (!decision.continuing) {
@@ -439,13 +444,18 @@ export class IsolationRunController {
         // Git can still refuse every repo of the group once a run is minted — the one check `isActive` cannot make.
         this.tell('info', `${err instanceof Error ? err.message : String(err)} — ${SHARED_ROOT_TAIL}`);
         this.listener.changed();
-        this.mode = 'shared';
+        this.begin('shared');
         return true;
       }
     }
-    this.mode = 'isolated';
+    this.begin('isolated');
     await this.sweep();
     return true;
+  }
+
+  private begin(mode: 'isolated' | 'shared'): void {
+    this.mode = mode;
+    this.listener.opened();
   }
 
   /** What earlier runs left merged in the group goes; a failure here is worth a word, never a stopped run. */

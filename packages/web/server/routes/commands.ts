@@ -9,6 +9,7 @@ interface CommandDescriptor {
 const COMMANDS: CommandDescriptor[] = [
   { name: 'tdd', description: 'Toggle Test-Driven Development mode (on|off|status)' },
   { name: 'verify', description: 'Toggle verification mode — adds a final evidence-based verification task that runs the full suite (on|off|status)' },
+  { name: 'transport', description: 'Experimental: drive Claude Code tasks through its protocol instead of a terminal, from the next run (terminal|structured|status)' },
 ];
 
 export function commandsRoute(pool: OrchestratorPool) {
@@ -44,6 +45,16 @@ export function commandsRoute(pool: OrchestratorPool) {
         pool.updateSettings({ verification: { enabled: true } });
       } else if (action === 'off') {
         pool.updateSettings({ verification: { enabled: false } });
+      }
+      return c.json({ ok: true, settings: pool.getSettings() });
+    }
+
+    if (name === 'transport') {
+      const action = args.action || 'status';
+      if (action === 'terminal' || action === 'structured') {
+        pool.updateSettings({ runnerTransport: action });
+      } else if (action !== 'status') {
+        return c.json({ error: `Unknown transport: ${action} (terminal|structured)` }, 400);
       }
       return c.json({ ok: true, settings: pool.getSettings() });
     }

@@ -1,4 +1,4 @@
-import { HeadlessRunner, type ITerminalRunner, type ITerminalSession, type RunnerId } from '@ordewell/core';
+import { HeadlessRunner, type ITerminalRunner, type ITerminalSession, type RunnerSpawnOptions } from '@ordewell/core';
 import type { SessionBroadcaster } from '@ordewell/core';
 
 export class PoolAwareRunner implements ITerminalRunner {
@@ -21,7 +21,7 @@ export class PoolAwareRunner implements ITerminalRunner {
 
   get activeCount(): number { return this.owned.size; }
 
-  async spawn(opts: { taskId: string; runner: RunnerId; prompt: string; modelId?: string; thinkingEffort?: string; modelVariants?: string[]; mode?: 'build' | 'plan'; headless?: boolean; cwd: string; order?: number; title?: string }): Promise<ITerminalSession> {
+  async spawn(opts: RunnerSpawnOptions): Promise<ITerminalSession> {
     const session = await this.inner.spawn({ ...opts, planSessionId: this.sessionId });
     this.owned.add(session.id);
     session.onExit(() => this.owned.delete(session.id));

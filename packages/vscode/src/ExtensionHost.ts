@@ -16,8 +16,7 @@ import { SecretStore } from './adapters/SecretStore';
 import type { VsCodeConfig } from './adapters/VsCodeConfig';
 import type { VsCodeFileSystem } from './adapters/VsCodeFileSystem';
 import type { VsCodeNotification } from './adapters/VsCodeNotification';
-import type { VsCodeTerminalRunner } from './adapters/VsCodeTerminalRunner';
-import type { RunnerInstallation, RunnerRegistry, ModelResolver, SettingsService, PlannerModelMemory } from '@ordewell/core';
+import type { ITerminalRunner, RunnerInstallation, RunnerRegistry, ModelResolver, SettingsService, PlannerModelMemory } from '@ordewell/core';
 
 /**
  * What one extension window holds between webview messages. The host owns this
@@ -47,7 +46,7 @@ export interface ExtensionServices {
   runnerInstallation: RunnerInstallation;
   fsAdapter: VsCodeFileSystem;
   notifications: VsCodeNotification;
-  terminalRunner: VsCodeTerminalRunner;
+  terminalRunner: ITerminalRunner;
   settingsService: SettingsService;
   plannerModelMemory: PlannerModelMemory;
   modelResolver: ModelResolver;
@@ -185,6 +184,7 @@ export function createExtension(services: ExtensionServices, vscodeApi: typeof v
       setPlanner: (provider) => planner.apply(provider as AiProvider),
       setPlannerModel: (modelId, effort) => planner.setModel(modelId, effort),
       toggleSkill: (skillId, enabled) => planner.toggleSkill(skillId, enabled),
+      setRunnerTransport: (transport) => planner.setRunnerTransport(transport),
     },
     getPendingRunners: () => state.pendingRunners,
     setPendingRunners: (runners) => { state.pendingRunners = runners; },
@@ -232,6 +232,7 @@ export function createExtension(services: ExtensionServices, vscodeApi: typeof v
   function onWebviewReady(): void {
     services.chatProvider.resendAllState();
     services.chatProvider.setSkillToggles(services.settingsService.getTdd(), services.settingsService.getVerification(), []);
+    services.chatProvider.setRunnerTransport(services.settingsService.getRunnerTransport());
     sendSkills();
     // Activation-time discovery can catch a runner CLI cold (server spawn,
     // catalog fetch, auth store still loading) and cache a degraded model

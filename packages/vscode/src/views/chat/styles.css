@@ -804,6 +804,13 @@ body {
   opacity: 0.5;
 }
 
+.skill-toggle-experimental {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
 .skill-toggle-pill:hover {
   background: var(--bg-hover);
 }
@@ -4461,6 +4468,26 @@ body {
 /* A repair in flight (ADR-0015) is still running, so it reads as progress,
    not a blocker like `.conflict` above. */
 .task-isolation-badge.repairing {
+  background: var(--orange-subtle);
+  color: var(--orange);
+}
+
+.task-transport-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  font-weight: 500;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--purple-subtle);
+  color: var(--purple);
+}
+
+.task-transport-badge.fallback {
   background: var(--orange-subtle);
   color: var(--orange);
 }

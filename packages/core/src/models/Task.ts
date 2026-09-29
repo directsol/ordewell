@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { PlanIsolation } from '../interfaces/IWorktreeIsolation';
+import type { RunnerTransport } from '../interfaces/ITerminalRunner';
 import type { PlannerUsage, UsageRecord, UsageTotals } from './Usage';
 
 export interface UserStep {
@@ -50,6 +51,19 @@ export interface TaskModelAssignment {
 
 export type RunnerId = string;
 
+/**
+ * How a task's latest attempt was driven (ADR-0018). Recorded only when its
+ * plan asked for the structured transport, so a terminal plan's tasks carry
+ * nothing new.
+ */
+export interface TaskTransport {
+  kind: RunnerTransport;
+  /** Why a plan that asked for structured ran this task on the terminal — never a silent downgrade (S3). */
+  fallback?: string;
+  /** The runner's own session id of a structured attempt, once it ends: what a continue resumes (K1). */
+  nativeSessionId?: string;
+}
+
 export interface Task {
   id: string;
   order: number;
@@ -71,6 +85,7 @@ export interface Task {
   autonomy?: 'AFK' | 'HITL';
   sliceType?: 'HITL' | 'AFK';
   userStoriesCovered?: string[];
+  transport?: TaskTransport;
 }
 
 export interface DiscoveredMode {
@@ -298,6 +313,11 @@ export interface LegacyPlanState {
    * must leave it behind rather than share it.
    */
   isolation?: PlanIsolation;
+  /**
+   * The `runnerTransport` setting as the plan's latest run copied it when it
+   * started (ADR-0018, S1): the plan, not the live setting, says what runs.
+   */
+  runnerTransport?: RunnerTransport;
   /** Kept so a reopened session shows the same token line (#49). */
   plannerUsage?: PlannerUsage;
 }
@@ -634,6 +654,7 @@ export function keepExecutionState(current: readonly Task[], rewrite: Task[]): T
         status: prior?.status ?? 'pending',
         verdict: prior?.verdict,
         outputSummary: prior?.outputSummary,
+        transport: prior?.transport,
         subtasks: overlay(t.subtasks ?? [], prior?.subtasks ?? []),
       };
     });

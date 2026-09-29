@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { globalDataDir, migrateOldConfigDir } from '../utils/globalDataDir';
+import { isRunnerTransport, type RunnerTransport } from '../interfaces/ITerminalRunner';
 
 export interface UserSettings {
   tdd: { enabled: boolean };
@@ -13,11 +14,17 @@ export interface UserSettings {
    * back to the environment's defaults; `[]` is a deliberate "none of them".
    */
   enabledRunners?: string[];
+  /**
+   * How tasks' runners are driven (ADR-0018). Experimental; a run copies it
+   * onto its plan when it starts, so a change applies from the next run.
+   */
+  runnerTransport: RunnerTransport;
 }
 
 const DEFAULTS: UserSettings = {
   tdd: { enabled: true },
   verification: { enabled: false },
+  runnerTransport: 'terminal',
 };
 
 /**
@@ -105,6 +112,16 @@ export class SettingsService {
     this.persist();
   }
 
+  getRunnerTransport(): RunnerTransport {
+    return this.getAll().runnerTransport;
+  }
+
+  setRunnerTransport(transport: RunnerTransport): void {
+    this.getAll();
+    this.cache!.runnerTransport = transport;
+    this.persist();
+  }
+
   getModelAllowlist(runner: string): string[] | undefined {
     return this.getAll().modelAllowlist?.[runner];
   }
@@ -171,6 +188,7 @@ export class SettingsService {
         const settings: UserSettings = {
           tdd: { enabled: raw.tdd?.enabled ?? DEFAULTS.tdd.enabled },
           verification: { enabled: raw.verification?.enabled ?? DEFAULTS.verification.enabled },
+          runnerTransport: isRunnerTransport(raw.runnerTransport) ? raw.runnerTransport : DEFAULTS.runnerTransport,
         };
         if (raw.modelAllowlist !== undefined) {
           settings.modelAllowlist = raw.modelAllowlist;
