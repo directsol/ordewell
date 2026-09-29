@@ -22,6 +22,11 @@ function harness(api: Partial<OrdewellApi> = {}, over: Partial<EffectDeps> = {})
       taskControl: vi.fn().mockResolvedValue({ ok: true }),
       markTaskComplete: vi.fn().mockResolvedValue({ ok: true }),
       markTaskIncomplete: vi.fn().mockResolvedValue({ ok: true }),
+      getTaskLogAttempts: vi.fn().mockResolvedValue([]),
+      getTaskLog: vi.fn().mockResolvedValue([]),
+      sendTaskMessage: vi.fn().mockResolvedValue({ id: 'm1' }),
+      removeQueuedTaskMessage: vi.fn().mockResolvedValue({ removed: true }),
+      interruptTask: vi.fn().mockResolvedValue({ ok: true }),
       addTask: vi.fn().mockResolvedValue({ ok: true }),
       updateTask: vi.fn().mockResolvedValue({ ok: true }),
       removeTask: vi.fn().mockResolvedValue({ ok: true }),
@@ -1706,5 +1711,60 @@ describe('worktree isolation', () => {
     await runEffect({ type: 'isolationDiscard', sessionId: 's1', branch: 'b' }, h.deps);
 
     expect(messageOf(h.actions, 'failed')).toBe('The run is still running — stop it first');
+  });
+});
+
+describe('a structured task\'s log, messages and interrupt', () => {
+  it('opens with the latest saved attempt and reports it to the reducer', async () => {
+    const getTaskLogAttempts = vi.fn().mockResolvedValue([1, 2]);
+    const getTaskLog = vi.fn().mockResolvedValue([{ type: 'text', text: 'hi' }]);
+    const h = harness({ getTaskLogAttempts, getTaskLog } as Partial<OrdewellApi>);
+
+    await runEffect({ type: 'openTaskLog', sessionId: 's1', taskId: 't1' }, h.deps);
+
+    expect(getTaskLog).toHaveBeenCalledWith('s1', 't1', 2, '/ws');
+    expect(h.actions).toEqual([
+      { type: 'taskLogLoaded', taskId: 't1', attempts: [1, 2], attempt: 2, events: [{ type: 'text', text: 'hi' }], sessionId: 's1' },
+    ]);
+  });
+
+  it('answers an attempt switch with just that attempt', async () => {
+    const getTaskLog = vi.fn().mockResolvedValue([{ type: 'turn_start', message: 'x' }]);
+    const h = harness({ getTaskLog } as Partial<OrdewellApi>);
+
+    await runEffect({ type: 'loadTaskAttempt', sessionId: 's1', taskId: 't1', attempt: 1 }, h.deps);
+
+    expect(getTaskLog).toHaveBeenCalledWith('s1', 't1', 1, '/ws');
+    expect(h.actions).toEqual([
+      { type: 'taskLogLoaded', taskId: 't1', attempt: 1, events: [{ type: 'turn_start', message: 'x' }], sessionId: 's1' },
+    ]);
+  });
+
+  it('sends a message and leaves the queue to the stream', async () => {
+    const sendTaskMessage = vi.fn().mockResolvedValue({ id: 'm1' });
+    const h = harness({ sendTaskMessage } as Partial<OrdewellApi>);
+
+    await runEffect({ type: 'sendTaskMessage', sessionId: 's1', taskId: 't1', text: 'use Postgres' }, h.deps);
+
+    expect(sendTaskMessage).toHaveBeenCalledWith('s1', 't1', 'use Postgres');
+    expect(h.actions).toEqual([]);
+  });
+
+  it('says when a taken-back message had already gone out', async () => {
+    const h = harness({ removeQueuedTaskMessage: vi.fn().mockResolvedValue({ removed: false }) } as Partial<OrdewellApi>);
+
+    await runEffect({ type: 'removeTaskMessage', sessionId: 's1', taskId: 't1', messageId: 'm1' }, h.deps);
+
+    expect(messageOf(h.actions, 'notice')).toMatch(/already delivered/);
+  });
+
+  it('interrupts the task and says so', async () => {
+    const interruptTask = vi.fn().mockResolvedValue({ ok: true });
+    const h = harness({ interruptTask } as Partial<OrdewellApi>);
+
+    await runEffect({ type: 'interruptTask', sessionId: 's1', taskId: 't1' }, h.deps);
+
+    expect(interruptTask).toHaveBeenCalledWith('s1', 't1');
+    expect(messageOf(h.actions, 'notice')).toMatch(/Interrupting/);
   });
 });

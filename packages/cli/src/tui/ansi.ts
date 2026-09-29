@@ -253,4 +253,10 @@ export const style = {
   magenta: colour('35'),
   cyan: colour('36'),
   grey: colour('90'),
+  /**
+   * The task view's accent: a bright blue, separate from the planner chat's
+   * cyan and magenta. Bright rather than the plain 34, which reads as black on
+   * a dark background.
+   */
+  accent: colour('94'),
 };

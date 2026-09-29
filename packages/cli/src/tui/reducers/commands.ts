@@ -7,7 +7,8 @@ import { findTask, plannerInFlight, SKILL_IDS, type PickerItem, type SkillId, ty
 import { modelsForRunner } from '../taskAssignment';
 import { say } from '../transcript';
 import { DEFAULT_EFFORT, picker, pickerItemsFor, plannerEffortItems, plannerItems, providerErrorHint } from './pickers';
-import { openTerminal, taskActionEffect } from './planPane';
+import { taskActionEffect } from './planPane';
+import { openTaskTerminalOrView } from './taskView';
 import {
   addTask, openTaskDepsPicker, taskCommand, taskEffortCommand, taskModeCommand, taskModelCommand, taskRunnerCommand,
 } from './taskEdits';
@@ -106,7 +107,7 @@ export function runCommand(state: TuiState, { name, args }: ParsedCommand): Step
         step(state, [{ type: 'removeTask', sessionId, taskId }]),
       );
     case 'terminal':
-      return taskCommand(state, args[0], (sessionId, taskId) => openTerminal(state, sessionId, taskId));
+      return taskCommand(state, args[0], (sessionId, taskId) => openTaskTerminalOrView(state, sessionId, taskId));
     case 'task-runner':
       return taskRunnerCommand(state, args);
     case 'task-model':
@@ -186,6 +187,7 @@ export function newSession(state: TuiState): Step {
     handoff: null,
     sessionId: null,
     goal: '',
+    taskView: null,
     tasks: [],
     planApproved: false,
     conversation: EMPTY_CONVERSATION,

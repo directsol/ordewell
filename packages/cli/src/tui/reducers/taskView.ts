@@ -1,0 +1,161 @@
+import { EMPTY_TASK_LOG, reduceTaskLog, replayTaskLog, type TaskLogEvent } from '@ordewell/core';
+import type { Key } from '../keys';
+import { findTask, type TaskLogState, type TuiState } from '../state';
+import { say } from '../transcript';
+import { step, type Step, type Action } from './shared';
+
+/*
+ * The chat pane swapped for one structured task's log (ADR-0018, V1). Opening
+ * reads the saved log so the view has its history; the live `task_log` stream
+ * then folds into the same core view, deduped against what the file already
+ * held. Terminal tasks never reach here — they keep their OS terminal.
+ */
+
+/** Open a task's log in the chat pane, reading its latest saved attempt first. */
+export function openTaskView(state: TuiState, sessionId: string, taskId: string): Step {
+  const task = findTask(state.tasks, taskId);
+  if (!task) return step(say(state, 'system', `No task ${taskId} in this plan.`));
+  const taskView: TaskLogState = {
+    taskId,
+    view: EMPTY_TASK_LOG,
+    attempts: [],
+    attempt: 0,
+    pending: [],
+    loaded: false,
+    followLatest: true,
+    queuedIndex: 0,
+  };
+  // Focus the composer: the task view's whole point is talking to the runner.
+  return step({ ...state, taskView, focus: 'chat', scroll: 0 }, [{ type: 'openTaskLog', sessionId, taskId }]);
+}
+
+/**
+ * `t` and `/terminal` on a structured task open its view; every other task
+ * still opens its own terminal, exactly as before.
+ */
+export function openTaskTerminalOrView(state: TuiState, sessionId: string, taskId: string): Step {
+  const task = findTask(state.tasks, taskId);
+  if (task?.transport?.kind === 'structured') return openTaskView(state, sessionId, taskId);
+  return step(state, [{ type: 'openTaskTerminal', sessionId, taskId }]);
+}
+
+function clampQueueIndex(tv: TaskLogState): TaskLogState {
+  const max = Math.max(0, tv.view.queued.length - 1);
+  return tv.queuedIndex <= max ? tv : { ...tv, queuedIndex: max };
+}
+
+/**
+ * Fold a live batch into the shown attempt. A newer attempt either takes over
+ * (the reader is following the latest) or is only recorded, so a pinned view
+ * stays put while a retry runs. Batches for an attempt already left behind are
+ * ignored.
+ */
+function applyLive(tv: TaskLogState, attempt: number, events: TaskLogEvent[]): TaskLogState {
+  if (attempt <= 0) return tv;
+  let next = tv;
+  if (attempt > next.attempt) {
+    if (!next.followLatest) {
+      return next.attempts.includes(attempt) ? next : { ...next, attempts: [...next.attempts, attempt] };
+    }
+    next = {
+      ...next,
+      view: EMPTY_TASK_LOG,
+      attempt,
+      attempts: next.attempts.includes(attempt) ? next.attempts : [...next.attempts, attempt],
+    };
+  }
+  if (attempt < next.attempt) return next;
+  return clampQueueIndex({ ...next, view: events.reduce(reduceTaskLog, next.view) });
+}
+
+/**
+ * The saved log could not be read (the view's opening call failed). Stop
+ * buffering and fold what the live stream did send, so the view still works
+ * rather than waiting forever for a read that is not coming.
+ */
+export function taskLogAbandoned(state: TuiState): TuiState {
+  const tv = state.taskView;
+  if (!tv || tv.loaded) return state;
+  let next: TaskLogState = { ...tv, pending: [], loaded: true };
+  for (const batch of tv.pending) next = applyLive(next, batch.attempt, batch.events);
+  return { ...state, taskView: clampQueueIndex(next) };
+}
+
+/** One live `task_log` batch: buffered until the saved log lands, then folded. */
+export function taskLogArrived(state: TuiState, action: Extract<Action, { type: 'taskLog' }>): TuiState {
+  const tv = state.taskView;
+  if (!tv || tv.taskId !== action.taskId) return state;
+  if (!tv.loaded) {
+    return { ...state, taskView: { ...tv, pending: [...tv.pending, { attempt: action.attempt, events: action.events }] } };
+  }
+  return { ...state, taskView: applyLive(tv, action.attempt, action.events) };
+}
+
+/**
+ * A saved log (or its absence): replay it, then catch up on buffered live
+ * batches. A batch for the attempt just replayed is dropped — the recorder
+ * appends before it broadcasts, so the file already holds it; a batch for any
+ * other attempt (a retry that raced the read) is folded on top.
+ */
+export function taskLogLoaded(state: TuiState, action: Extract<Action, { type: 'taskLogLoaded' }>): TuiState {
+  const tv = state.taskView;
+  if (!tv || tv.taskId !== action.taskId) return state;
+  const loaded: TaskLogState = action.attempt >= 1
+    ? {
+        ...tv,
+        view: replayTaskLog(action.events),
+        attempts: action.attempts ?? tv.attempts,
+        attempt: action.attempt,
+      }
+    : { ...tv, attempts: action.attempts ?? tv.attempts };
+  let next: TaskLogState = { ...loaded, pending: [], loaded: true };
+  for (const batch of tv.pending) {
+    if (batch.attempt === action.attempt) continue;
+    next = applyLive(next, batch.attempt, batch.events);
+  }
+  return { ...state, taskView: clampQueueIndex(next) };
+}
+
+/**
+ * The task view's own keys. Everything else — enter, escape, the editor, the
+ * page keys — falls through to the normal chat-pane handling, so typing and
+ * scrolling work exactly as in the planner chat.
+ */
+export function handleTaskViewKey(state: TuiState, key: Key): Step | null {
+  const tv = state.taskView;
+  if (!tv || !state.sessionId) return null;
+
+  if (key.name === 'alt-left' || key.name === 'alt-right') {
+    const index = tv.attempts.indexOf(tv.attempt);
+    if (index < 0) return null;
+    const target = key.name === 'alt-left' ? index - 1 : index + 1;
+    const attempt = tv.attempts[target];
+    if (attempt === undefined) {
+      return step(say(state, 'system', target < 0 ? 'This is the first attempt.' : 'This is the latest attempt.'));
+    }
+    return step(
+      { ...state, taskView: { ...tv, followLatest: false } },
+      [{ type: 'loadTaskAttempt', sessionId: state.sessionId, taskId: tv.taskId, attempt }],
+    );
+  }
+
+  if (key.name === 'ctrl-r') {
+    const queued = tv.view.queued[tv.queuedIndex];
+    if (!queued) return step(say(state, 'system', 'No queued message to remove.'));
+    return step(state, [{ type: 'removeTaskMessage', sessionId: state.sessionId, taskId: tv.taskId, messageId: queued.id }]);
+  }
+
+  if (key.name === 'ctrl-x') {
+    return step(state, [{ type: 'interruptTask', sessionId: state.sessionId, taskId: tv.taskId }]);
+  }
+
+  if (key.name === 'ctrl-n' || key.name === 'ctrl-p') {
+    const count = tv.view.queued.length;
+    if (count === 0) return null;
+    const delta = key.name === 'ctrl-n' ? 1 : -1;
+    const queuedIndex = Math.max(0, Math.min(count - 1, tv.queuedIndex + delta));
+    return step({ ...state, taskView: { ...tv, queuedIndex } });
+  }
+
+  return null;
+}

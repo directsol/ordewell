@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, type AwaitingReason, type ConversationView, type PromptHold, type RunnerTransport, type TaskTransport, type TurnGate } from '@ordewell/core';
+import { DEFAULT_MAX_PARALLEL, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, type AwaitingReason, type ConversationView, type PromptHold, type RunnerTransport, type TaskLogEvent, type TaskLogView, type TaskTransport, type TurnGate } from '@ordewell/core';
 import { emptyEditor, type EditorState } from './editor';
 
 export type RunStatus = 'idle' | 'planning' | 'researching' | 'executing';
@@ -267,6 +267,33 @@ export interface Selection {
   pane: Focus;
 }
 
+/**
+ * What the chat pane shows when it has been swapped for a structured task's
+ * log (ADR-0018, V1). `view` is core's own block view, folded from the saved
+ * log on open and then from the live `task_log` stream, so a reload and a live
+ * run draw identically.
+ */
+export interface TaskLogState {
+  taskId: string;
+  view: TaskLogView;
+  /** Attempts with a saved log, oldest first, as last read. */
+  attempts: number[];
+  /** The attempt `view` holds; 0 until the saved log or a live event names one. */
+  attempt: number;
+  /**
+   * Live batches that arrived while the saved log was still loading. A batch
+   * for the loaded attempt is a copy the file already holds and is dropped; a
+   * batch for a different attempt (a retry that raced the read) is folded.
+   */
+  pending: { attempt: number; events: TaskLogEvent[] }[];
+  /** The saved log has been read (or found absent). Until then live batches wait in `pending`. */
+  loaded: boolean;
+  /** Keep following the newest attempt as the task retries; a manual switch turns this off. */
+  followLatest: boolean;
+  /** Which queued message the remove key targets. */
+  queuedIndex: number;
+}
+
 export interface TuiState {
   editor: EditorState;
   /**
@@ -274,6 +301,8 @@ export interface TuiState {
    * `SessionMessage` and every line the TUI adds itself as a `LocalEntry`.
    */
   conversation: ConversationView;
+  /** Set while the chat pane is drawing a structured task's log; null is the planner chat. */
+  taskView: TaskLogState | null;
   /** The planner turn the conversation has open, and the one the user stopped — core's stop rule. */
   turnGate: TurnGate;
   /**
@@ -462,6 +491,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
   return {
     editor: emptyEditor(),
     conversation: EMPTY_CONVERSATION,
+    taskView: null,
     turnGate: NO_TURN,
     detailAll: false,
     status: 'idle',
