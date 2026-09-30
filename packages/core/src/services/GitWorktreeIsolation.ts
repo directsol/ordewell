@@ -359,6 +359,7 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     return this.admin(workspaceRoot, async () => {
       const scan = await this.scanGroup(workspaceRoot);
       const paths = 'paths' in scan ? scan.paths : [SELF_REPO];
+      const nested = 'paths' in scan ? scan.nested : [];
       const run: IsolationRun = { id: this.mintRunId(), workspaceRoot, repos: [], shared: [], sharedRepos: [], tasks: {} };
       for (const repoPath of paths) {
         const repo = await this.startRepo(run, repoPath);
@@ -368,7 +369,7 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
       if (run.repos.length === 0) throw new Error(`No repository could be isolated: ${run.sharedRepos.join(', ')}`);
       // A lone repository shares the repositories nested in it; a folder shares its loose entries.
       run.shared = paths.includes(SELF_REPO)
-        ? ('paths' in scan ? scan.nested : [])
+        ? nested
         : this.sharedPaths(workspaceRoot, run.repos.map((r) => r.path));
       return run;
     });
@@ -473,10 +474,14 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
         // so they are recorded like its bootstrapped artifacts and kept out of
         // its commit.
         for (const rel of run.shared) {
+          const source = path.join(run.workspaceRoot, rel);
           const target = path.join(cwd, rel);
-          if (lexists(target)) continue;
+          // A shared path that vanished mid-run is left out rather than failing
+          // the task: a group re-scans for every task, a lone repository's
+          // nested repositories are fixed for the run.
+          if (!resolves(source) || lexists(target)) continue;
           fs.mkdirSync(path.dirname(target), { recursive: true });
-          if (linkPath(path.join(run.workspaceRoot, rel), target, this.platform) === 'copy') copied.push(rel);
+          if (linkPath(source, target, this.platform) === 'copy') copied.push(rel);
           const entry = self ? record.repos[SELF_REPO] : undefined;
           if (entry) entry.linked.push(rel);
         }

@@ -386,6 +386,17 @@ describe.skipIf(!hasGit)('WorktreeIsolation over a repository with nested reposi
     expect(existsSync(join(root, 'services', 'billing', '.git'))).toBe(true);
   });
 
+  it('does not fail a later task when a nested repo disappears mid-run', async () => {
+    const root = repo();
+    const nested = initRepo(join(root, 'services', 'billing'));
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    await iso.prepare(task(1, 'First'), run);
+    rmSync(nested, { recursive: true, force: true });
+    const { cwd } = await iso.prepare(task(2, 'Second'), run);
+    expect(lexists(join(cwd, 'services', 'billing'))).toBe(false);
+  });
+
   it('does not link again a nested repo a linked artifact already covers', async () => {
     const root = repo();
     initRepo(join(root, 'vendor', 'lib'));

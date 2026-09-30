@@ -49,9 +49,11 @@ export interface IsolationTaskRepo {
   /** Absolute path of this repo's worktree: the task workspace joined with the repo's path. */
   worktree: string;
   /**
-   * Paths bootstrapped from the real repo (symlinks, junctions, copies).
-   * Recorded so the commit step can leave them out — a symlink is not matched
-   * by a `node_modules/` ignore rule and would otherwise be committed.
+   * Paths linked from the real workspace and kept out of the task's commit:
+   * the artifacts bootstrapped from the real repo, and a lone repository's
+   * nested repositories (`run.shared`). Recorded because a symlink is not
+   * matched by an ignore rule such as `node_modules/` and would otherwise be
+   * committed.
    */
   linked: string[];
   /** Whether the task brought commits to this repo; unknown until it first integrates. */

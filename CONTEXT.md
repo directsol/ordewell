@@ -514,7 +514,7 @@ of the group, or a repo that cannot be isolated (no commits, or git refuses a
 worktree), linked live into every task workspace (ADR-0014). For a repository
 that is the workspace, the repositories nested inside it that are not submodules
 are shared paths too, linked live at their real relative paths (ADR-0019); one
-the workspace's own repository ignores is shared like any other, so a nested
+that the workspace's own repository ignores is shared like any other, so a nested
 repository never vanishes from a task without a word. Edits to a shared path are
 live and not reviewable, so the planner prompt lists them and does not run
 parallel tasks that edit one. `.ordewell/` is never one. Symlinks on POSIX;
