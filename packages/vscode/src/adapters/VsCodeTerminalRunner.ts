@@ -6,9 +6,11 @@ const DEFAULT_COLUMNS = 120;
 const DEFAULT_ROWS = 30;
 const OPEN_TIMEOUT_MS = 3000;
 // Below roughly 45 columns OpenCode's TUI dies with SIGILL (exit 132) at start
-// or on the resize that narrows it, failing the task for want of a marker. A
-// narrow tab now shows the agent wrapped instead of losing it.
-const MIN_COLUMNS = 80;
+// or on the resize that narrows it, failing the task for want of a marker. The
+// floor sits at that limit, not higher: an agent laid out wider than its tab is
+// clipped on the right and wraps mid-line, which is what a narrow tab showed
+// with the old 80-column floor.
+const MIN_COLUMNS = 45;
 const MIN_ROWS = 10;
 
 function agentSize(columns: number, rows: number): { cols: number; rows: number } {
