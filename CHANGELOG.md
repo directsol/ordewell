@@ -8,6 +8,8 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-09-30
+
 ### Added
 
 - **CI runs the VS Code integration test and reports coverage.** Every push
@@ -55,6 +57,23 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
   itself is down to one composition root.
 
 ### Fixed
+
+- **OpenCode's terminal fits its tab.** The agent was floored at 80 columns, so
+  in a narrower tab its TUI was clipped on the right and its lines wrapped
+  mid-word. The floor is now 45 columns, the limit below which OpenCode exits.
+
+- **`/model set` with an API model while a coding agent plans.** Naming an
+  OpenRouter (or other vendor) model such as `deepseek/deepseek-v4-flash` used
+  to open a picker of the agent's own Claude models and set nothing. It now
+  offers to switch the planner to that provider and sets the model. The
+  `/model set` suggestions also follow the planner now: with a coding agent
+  planning they list that agent's models, not the whole API catalog.
+
+- **An API planner now uses the model you set last.** A planner conversation
+  on OpenRouter (or any OpenAI-compatible provider) kept calling the model it
+  started with, so `/model` and the model picker changed the setting but not
+  the running conversation. The model is now read on every API call, as the key
+  already is.
 
 - **An API planner now uses the key you set last.** The planner kept the
   client it built with the first key, so after a wrong key gave

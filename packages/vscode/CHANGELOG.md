@@ -2,7 +2,25 @@
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-09-30
+
 ### Fixed
+
+- **OpenCode's terminal fits its tab.** The agent was floored at 80 columns, so
+  in a narrower tab its TUI was clipped on the right and its lines wrapped
+  mid-word. The floor is now 45 columns, the limit below which OpenCode exits.
+
+- **`/model set` with an API model while a coding agent plans.** Naming an
+  OpenRouter (or other vendor) model such as `deepseek/deepseek-v4-flash` used
+  to open a picker of the agent's own Claude models and set nothing. It now
+  offers to switch the planner to that provider and sets the model. The
+  `/model set` suggestions also follow the planner now: with a coding agent
+  planning they list that agent's models, not the whole API catalog.
+
+- **An API planner now uses the model you set last.** A planner conversation
+  on OpenRouter (or any OpenAI-compatible provider) kept calling the model it
+  started with, so the picker changed the setting but not the running
+  conversation. The model is now read on every API call.
 
 - **A session saves into the workspace after Execute, not the extension
   host's own directory.** Approving a plan had handed the session an empty
