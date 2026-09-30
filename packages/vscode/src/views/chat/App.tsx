@@ -755,6 +755,13 @@ export default function App() {
     [planner.runner, modelsByRunner, vendorModels],
   );
 
+  const harnessPlannerModels = useMemo(
+    () => (planner.runner
+      ? orchestratorModels.map((m) => ({ id: m.modelId, label: m.modelLabel, provider: planner.runner as string }))
+      : undefined),
+    [planner.runner, orchestratorModels],
+  );
+
   const orchestratorModelApiMapping = useMemo<Record<string, AiProvider[]>>(() => {
     const mapping: Record<string, AiProvider[]> = {};
     for (const opt of modelOptions) {
@@ -1165,6 +1172,7 @@ export default function App() {
         disabledReason={conversationBusy ? 'Compacting the conversation...' : undefined}
         placeholder={getPlaceholder()}
         modelOptions={modelOptions}
+        harnessPlannerModels={harnessPlannerModels}
         configuredProviders={configuredProviders}
         isProcessing={isGenerating}
         pendingEdits={pendingEdits}

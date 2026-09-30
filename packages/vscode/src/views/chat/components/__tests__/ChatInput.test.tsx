@@ -49,6 +49,17 @@ function typeAt(value: string, cursor: number) {
 }
 
 describe('ChatInput two-step model picker', () => {
+  it('/model set lists only the coding agent\'s models while one plans', () => {
+    renderInput({
+      configuredProviders: ['openrouter'],
+      harnessPlannerModels: [{ id: 'opus', label: 'Opus', provider: 'claude-code' }],
+    });
+    type('/model set ');
+    expect(screen.getByText('Opus')).toBeTruthy();
+    expect(screen.queryByText('DeepSeek Chat')).toBeNull();
+    expect(screen.queryByText('Use OpenRouter models')).toBeNull();
+  });
+
   it('/model set with two providers shows provider entries, not models', () => {
     renderInput({ configuredProviders: ['openrouter', 'google'] });
     type('/model set ');

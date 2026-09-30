@@ -37,6 +37,8 @@ interface ChatInputProps {
   disabled: boolean;
   placeholder?: string;
   modelOptions?: ModelOption[];
+  /** Set while a coding agent plans: `/model set` then lists only that agent's models, not the API catalog. */
+  harnessPlannerModels?: ModelOption[];
   configuredProviders?: ApiProvider[];
   isProcessing?: boolean;
   onStop?: () => void;
@@ -252,6 +254,7 @@ export default function ChatInput({
   disabled,
   placeholder,
   modelOptions,
+  harnessPlannerModels,
   configuredProviders = [],
   isProcessing = false,
   onStop,
@@ -317,6 +320,13 @@ export default function ChatInput({
     }
     const lower = text.toLowerCase();
 
+    if (isModelCommand && harnessPlannerModels) {
+      const searchTerm = modelFilterTerm.toLowerCase();
+      return harnessPlannerModels
+        .map((o): SlashSuggestion => ({ label: o.label, detail: o.id, insertText: o.label, id: o.id, provider: o.provider, kind: 'model' }))
+        .filter((s) => matchesSearch(s, searchTerm));
+    }
+
     if (isModelCommand) {
       const searchTerm = modelFilterTerm.toLowerCase();
       const allModels = (modelOptions ?? []).map(toModelSuggestion);
@@ -354,7 +364,7 @@ export default function ChatInput({
 
     const all = [...COMMAND_SUGGESTIONS, ...skills.map(toSkillSuggestion)];
     return all.filter((s) => s.label.toLowerCase().startsWith(lower));
-  }, [text, midToken, isModelCommand, modelFilterTerm, modelOptions, configuredProviders, pickerProvider, skills]);
+  }, [text, midToken, isModelCommand, modelFilterTerm, modelOptions, harnessPlannerModels, configuredProviders, pickerProvider, skills]);
 
   // Command names (without the leading slash) plus discovered skill names —
   // the set the leading `/word` of the input is checked against to decide

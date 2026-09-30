@@ -105,6 +105,45 @@ describe('/model set records the pick against the current provider', () => {
   });
 });
 
+describe('/model set with a vendor model while a coding agent plans', () => {
+  const vendorDeps = (over: Partial<SlashDeps> = {}) => makeDeps({
+    modelResolver: {
+      pickerOptions: async () => [], refresh: async () => undefined, invalidate: () => {}, refreshRunnerModels: () => {},
+      modelsForRunners: async () => ({ 'claude-code': [harnessModel('opus')] }),
+    },
+    discoverOrchestratorModelOptions: async () => [{ id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', provider: 'deepseek', apiProvider: 'openrouter' }],
+    ...over,
+  });
+
+  it('switches the planner to the vendor and sets the model once confirmed', async () => {
+    const recordPlannerModel = vi.fn();
+    const updateConfig = vi.fn(async () => {});
+    window.showQuickPick = vi.fn() as never;
+    window.showInformationMessage = vi.fn(async () => 'Switch planner') as never;
+    (commands.executeCommand as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    await handleSlashCommand('/model set deepseek/deepseek-v4-flash', vendorDeps({ recordPlannerModel, updateConfig }));
+
+    expect(commands.executeCommand).toHaveBeenCalledWith('ordewell.setPlanner', 'openrouter');
+    expect(updateConfig).toHaveBeenCalledWith('orchestratorModel', 'deepseek/deepseek-v4-flash');
+    expect(recordPlannerModel).toHaveBeenCalledWith('deepseek/deepseek-v4-flash');
+    expect(window.showQuickPick).not.toHaveBeenCalled();
+  });
+
+  it('leaves the planner and its model alone when the switch is declined', async () => {
+    const updateConfig = vi.fn(async () => {});
+    window.showQuickPick = vi.fn() as never;
+    window.showInformationMessage = vi.fn(async () => undefined) as never;
+    (commands.executeCommand as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    await handleSlashCommand('/model set deepseek/deepseek-v4-flash', vendorDeps({ updateConfig }));
+
+    expect(commands.executeCommand).not.toHaveBeenCalled();
+    expect(updateConfig).not.toHaveBeenCalled();
+    expect(window.showQuickPick).not.toHaveBeenCalled();
+  });
+});
+
 describe('/planner-effort records the effort against the current model', () => {
   it('records the model with the newly chosen effort by exact id', async () => {
     const recordPlannerModel = vi.fn();

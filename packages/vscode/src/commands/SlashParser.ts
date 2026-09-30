@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import {
-  enabledRunners, listSessions, loadSession, knownModelId, runnerForProvider,
+  enabledRunners, listSessions, loadSession, knownModelId, runnerForProvider, getProviderMeta,
   ORCHESTRATOR_SHORTCUTS,
 } from '@ordewell/core';
 import type { AiProvider, IConfig, RunnerRegistry, ModelResolver, SettingsService, RunnerModeInfo, DiscoveredModel } from '@ordewell/core';
@@ -71,14 +71,41 @@ async function pickPlanner(arg: string | undefined, deps: SlashDeps): Promise<vo
   await vscode.commands.executeCommand('ordewell.setPlanner', chosen.id);
 }
 
+/**
+ * A vendor model named while a coding agent plans. The agent can't run it, and
+ * showing the agent's own picker instead reads as the command being ignored, so
+ * offer the one action that makes the request true. Switching who plans changes
+ * what the user is billed, hence the explicit confirmation.
+ */
+async function switchPlannerToVendorModel(arg: string, runner: string, deps: SlashDeps): Promise<boolean> {
+  const options = await deps.discoverOrchestratorModelOptions();
+  const known = knownModelId(arg, options.map((o) => o.id), ORCHESTRATOR_SHORTCUTS);
+  const provider = options.find((o) => o.id === known)?.apiProvider;
+  if (!known || !provider) return false;
+  const label = getProviderMeta(provider).label;
+  const choice = await vscode.window.showInformationMessage(
+    `${known} is a ${label} model, but the planner is ${runner}. Switch the planner to ${label}?`,
+    'Switch planner',
+  );
+  if (choice !== 'Switch planner') return true;
+  await vscode.commands.executeCommand('ordewell.setPlanner', provider);
+  await deps.updateConfig('orchestratorModel', known);
+  await deps.updateConfig('plannerThinkingEffort', '');
+  deps.recordPlannerModel(known);
+  await deps.refreshPlannerState();
+  vscode.window.showInformationMessage(`Planner set to ${label}, model ${known}`);
+  return true;
+}
+
 /** The planner's own model, from the coding agent's catalog rather than a vendor's. */
 async function pickHarnessPlannerModel(runner: string, arg: string, deps: SlashDeps): Promise<void> {
   const models = (await deps.modelResolver.modelsForRunners([runner]))[runner] ?? [];
+  let modelId = arg.trim() && models.some((m) => m.modelId === arg.trim()) ? arg.trim() : '';
+  if (!modelId && arg.trim() && await switchPlannerToVendorModel(arg.trim(), runner, deps)) return;
   if (models.length === 0) {
     vscode.window.showWarningMessage(`No ${runner} models discovered yet. Run /refresh.`);
     return;
   }
-  let modelId = arg.trim() && models.some((m) => m.modelId === arg.trim()) ? arg.trim() : '';
   if (!modelId) {
     const picked = await vscode.window.showQuickPick(
       models.map((m) => ({
