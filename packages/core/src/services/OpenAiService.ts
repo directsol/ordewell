@@ -46,7 +46,8 @@ class OpenAiResearchChat implements ResearchChat {
     private messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
     /** Resolved per API call, never captured: a key or endpoint changed mid-conversation must reach the next turn. */
     private getClient: () => OpenAI,
-    private model: string,
+    /** Resolved per API call like the client: a model picked mid-conversation must reach the next turn. */
+    private getModel: () => string,
     private tools: OpenAI.Chat.Completions.ChatCompletionTool[],
     /** Live reasoning deltas during a turn, so the UI isn't frozen while a reasoning
      * model thinks for tens of seconds before it emits any tool call or content. */
@@ -55,7 +56,7 @@ class OpenAiResearchChat implements ResearchChat {
      * are produced instead of appearing all at once when the turn completes. */
     private onContent?: (delta: string, segmentId: string) => void,
     /** The serving provider id, stamped on usage records. */
-    private source = 'openai',
+    private getSource: () => string = () => 'openai',
     /** One report per API call — the only way a call's usage leaves this chat. */
     private onUsage?: (record: UsageRecord) => void,
     /** The model's context window when the catalog knows it; omitted from records otherwise. */
@@ -98,7 +99,7 @@ class OpenAiResearchChat implements ResearchChat {
     // a long time" symptom on reasoning models. Tool-call deltas are reassembled by
     // index into the final message the loop acts on.
     const stream = await this.getClient().chat.completions.create({
-      model: this.model,
+      model: this.getModel(),
       messages: this.messages,
       tools: this.tools,
       tool_choice: 'auto',
@@ -169,7 +170,7 @@ class OpenAiResearchChat implements ResearchChat {
    */
   private usageRecord(reported: StreamUsage | undefined): UsageRecord | undefined {
     if (!reported) return undefined;
-    const record: UsageRecord = { source: this.source, model: this.model };
+    const record: UsageRecord = { source: this.getSource(), model: this.getModel() };
     let hasMeasure = false;
     if (reported.prompt_tokens !== undefined) { record.inputTokens = reported.prompt_tokens; hasMeasure = true; }
     if (reported.completion_tokens !== undefined) { record.outputTokens = reported.completion_tokens; hasMeasure = true; }
@@ -272,11 +273,11 @@ export class OpenAiService extends BaseAiService implements IAiService {
     return new OpenAiResearchChat(
       messages,
       () => this.getClient(),
-      this.requireModel('researchSubagentModel', this.config.researchSubagentModel),
+      () => this.requireModel('researchSubagentModel', this.config.researchSubagentModel),
       toOpenAiSubagentTools(),
       onReasoning,
       undefined,
-      this.config.aiProvider,
+      () => this.config.aiProvider,
       onUsage,
     );
   }
@@ -311,11 +312,11 @@ export class OpenAiService extends BaseAiService implements IAiService {
     const chat = new OpenAiResearchChat(
       messages,
       () => this.getClient(),
-      this.requireModel('orchestratorModel', this.config.orchestratorModel),
+      () => this.requireModel('orchestratorModel', this.config.orchestratorModel),
       toOpenAiTools(),
       (delta, segmentId) => currentProgress({ type: 'thinking', text: delta, segmentId }),
       (delta, segmentId) => currentProgress({ type: 'text_delta', text: delta, segmentId }),
-      this.config.aiProvider,
+      () => this.config.aiProvider,
       (record) => currentProgress({ type: 'usage', record }),
       req.contextWindow,
     );
@@ -373,11 +374,11 @@ export class OpenAiService extends BaseAiService implements IAiService {
     const researchChat: ResearchChat = new OpenAiResearchChat(
       messages,
       () => this.getClient(),
-      this.requireModel('orchestratorModel', this.config.orchestratorModel),
+      () => this.requireModel('orchestratorModel', this.config.orchestratorModel),
       toOpenAiTools(),
       (delta) => onProgress({ type: 'thinking', text: delta }),
       undefined,
-      this.config.aiProvider,
+      () => this.config.aiProvider,
       (record) => onProgress({ type: 'usage', record }),
     );
 

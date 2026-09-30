@@ -244,6 +244,20 @@ describe('OpenAiService credentials', () => {
     expect(clientSpy.mock.calls.map((c) => (c[0] as { apiKey: string }).apiKey)).toEqual(['sk-old', 'sk-new']);
   });
 
+  it('carries a model picked mid-conversation into the next turn', async () => {
+    const config = cfg({ aiProvider: 'openrouter', orchestratorModel: 'openai/gpt-4o' } as Partial<IConfig>);
+    const service = new OpenAiService(config);
+    createSpy.mockImplementation(() => streamOf([{ choices: [{ delta: { content: 'ok' } }], finish_reason: 'stop' }]));
+
+    await service.startConversation({
+      goal: 'add a cache', runners: ['claude-code'], modelsByRunner: {}, fs: fakeFileSystem(), onProgress: () => {},
+    });
+    (config as { orchestratorModel: string }).orchestratorModel = 'deepseek/deepseek-v4-flash:free';
+    await service.continueConversation('go on', () => {});
+
+    expect(createSpy.mock.calls.map((c) => (c[0] as { model: string }).model)).toEqual(['openai/gpt-4o', 'deepseek/deepseek-v4-flash:free']);
+  });
+
   it('names the configured provider and its variable when the key is missing', () => {
     const service = new OpenAiService(cfg({ aiProvider: 'openrouter', getProviderApiKey: () => '' } as Partial<IConfig>));
     expect(() => service.ensureInit()).toThrow('OpenRouter API key not configured. Set OPENROUTER_API_KEY.');
