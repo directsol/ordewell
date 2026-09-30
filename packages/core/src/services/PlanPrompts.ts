@@ -163,13 +163,25 @@ const SHARED_APPEND_FILE_RULE =
 
 /**
  * What a planner must know about a repo group (ADR-0014), as a section of its
- * own; nothing for tasks in the shared root or a lone repository, whose
- * prompts stay as they were. The repos are named as the workspace has them:
- * no name or role is assumed. Shared paths are the one place isolation does
- * not keep parallel tasks apart, and the planner is the only thing that can.
+ * own; nothing for tasks in the shared root or a lone repository with nothing
+ * shared, whose prompts stay as they were. The repos are named as the workspace
+ * has them: no name or role is assumed. Shared paths are the one place
+ * isolation does not keep parallel tasks apart, and the planner is the only
+ * thing that can.
  */
 function repoGroupSection(isolated: IsolatedExecution | undefined): string[] {
-  if (!isolated || (isolated.repos.length === 1 && isolated.repos[0] === SELF_REPO)) return [];
+  if (!isolated) return [];
+  // A lone repository isolates, but the repositories nested in it cannot; they
+  // are linked live, and the planner must keep parallel tasks off the same one.
+  if (isolated.repos.length === 1 && isolated.repos[0] === SELF_REPO) {
+    if (isolated.shared.length === 0) return [];
+    return [
+      '',
+      'NESTED REPOSITORIES:',
+      `- The workspace is a git repository, isolated per task. Repositories nested inside it are not isolated with it: they are linked live into every task at these same relative paths: ${isolated.shared.join(', ')}.`,
+      '- Edits to them take effect at once and are never merged or reviewed, so two tasks that edit the same one must not run in parallel — make one depend on the other.',
+    ];
+  }
   return [
     '',
     'REPO GROUP:',

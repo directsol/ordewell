@@ -44,6 +44,11 @@ code path, not a single-repo path and a multi-repo one.
   directory counts as a nested repo when it holds its own `.git` (directory or
   file) and is not a gitlink of the outer repo (mode 160000) or a path listed in
   its `.gitmodules`.
+  *Update (2026-09-30), ADR-0019: the refusal is gone. The outer repo isolates
+  as a group of one, and the nested repos are linked live into every task at
+  their real relative paths rather than being left out; an ignored nested repo is
+  linked too, so it cannot vanish silently. `nested-repos` is no longer an
+  `IsolationInactiveReason`.*
 - **Git submodules are out of scope.** A submodule is owned by its outer repo,
   which already decides what commit it is at; it is neither refused nor
   isolated separately.
@@ -195,6 +200,9 @@ Version 1 covers core, daemon, TUI, CLI and VS Code.
 - This slice also had a `not-git` folder name the repos directly inside it,
   while such a folder still ran in the workspace root. The next slice made
   those folders isolate, and the naming went with it (below).
+
+*Update (2026-09-30), ADR-0019: the refusal this section records was replaced by
+sharing the nested repos live. Read the rest of this section as history.*
 
 ### As implemented: detection, shared paths and bootstrap
 

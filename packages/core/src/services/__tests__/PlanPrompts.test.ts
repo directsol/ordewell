@@ -292,6 +292,20 @@ describe('planner rules for a repo group (ADR-0014)', () => {
     expect(p).not.toMatch(/shared path/i);
   });
 
+  it('tells the planner about repositories nested in a lone repository, linked live', () => {
+    const nested: RepoGroupLayout = { repos: ['.'], shared: ['services/billing'] };
+    const p = conversation(nested);
+    expect(p).toContain('\n\nNESTED REPOSITORIES:\n');
+    expect(p).toContain('services/billing');
+    expect(p).toMatch(/two tasks that edit the same one must not run in parallel/i);
+  });
+
+  it('says nothing extra for a lone repository with no nested repositories', () => {
+    for (const build of Object.values(builders)) {
+      expect(build(LONE_REPO)).not.toMatch(/NESTED REPOSITORIES|REPO GROUP/);
+    }
+  });
+
   it('never tells a planner whose tasks share the workspace root about a group', () => {
     for (const build of Object.values(builders)) expect(build(false)).not.toContain('REPO GROUP');
   });

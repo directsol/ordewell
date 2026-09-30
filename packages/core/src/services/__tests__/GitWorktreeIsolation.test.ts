@@ -146,11 +146,11 @@ describe('WorktreeIsolation.isActive', () => {
       expect(await iso.isActive(dir)).toEqual({ active: false, reason: 'not-git' });
     });
 
-    it('refuses a repository that contains a nested repository that is not a submodule, naming it', async () => {
+    it('stays active for a repository that contains a nested repository that is not a submodule, and shares it live', async () => {
       const root = repo();
       initRepo(join(root, 'services', 'billing'));
       const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
-      expect(await iso.isActive(root)).toEqual({ active: false, reason: 'nested-repos', repos: ['services/billing'] });
+      expect(await iso.isActive(root)).toEqual({ active: true, shared: ['services/billing'] });
     });
 
     it('does not treat a submodule as a nested repository', async () => {
@@ -176,7 +176,7 @@ describe('WorktreeIsolation.isActive', () => {
       git(elsewhere, 'worktree', 'add', '-q', join(root, 'tools', 'linked'));
       initRepo(join(root, 'a', 'b', 'too-deep'));
       const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
-      expect(await iso.isActive(root)).toEqual({ active: false, reason: 'nested-repos', repos: ['tools/linked'] });
+      expect(await iso.isActive(root)).toEqual({ active: true, shared: ['tools/linked'] });
     });
 
     it('resolves submodules against the repository top level when the workspace is a subdirectory', async () => {
@@ -186,15 +186,15 @@ describe('WorktreeIsolation.isActive', () => {
       git(root, 'commit', '-q', '-m', 'add submodule');
       initRepo(join(root, 'app', 'tools', 'extra'));
       const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
-      expect(await iso.isActive(join(root, 'app'))).toEqual({ active: false, reason: 'nested-repos', repos: ['tools/extra'] });
+      expect(await iso.isActive(join(root, 'app'))).toEqual({ active: true, shared: ['tools/extra'] });
     });
 
-    it('skips a nested repository the outer repository ignores, at either depth', async () => {
+    it('shares a nested repository the outer repository ignores too, so it cannot vanish silently', async () => {
       const root = repo({ 'README.md': 'hello\n', '.gitignore': 'scratch/\ncache/\n' });
       initRepo(join(root, 'scratch'));
       initRepo(join(root, 'cache', 'clone'));
       const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
-      expect(await iso.isActive(root)).toEqual({ active: true });
+      expect(await iso.isActive(root)).toEqual({ active: true, shared: ['cache/clone', 'scratch'] });
     });
 
     it('does not look for nested repositories inside .ordewell or node_modules', async () => {
@@ -358,6 +358,47 @@ describe.skipIf(!hasGit)('WorktreeIsolation run lifecycle', () => {
     const run = await iso.startRun(root);
     const prepared = await Promise.all([1, 2, 3].map((n) => iso.prepare(task(n, `Task ${n}`), run)));
     for (const { cwd } of prepared) expect(worktreePaths(root)).toContain(cwd);
+  });
+});
+
+describe.skipIf(!hasGit)('WorktreeIsolation over a repository with nested repositories', () => {
+  it('shares the nested repo live into every task and keeps it out of the task commit', async () => {
+    const root = repo();
+    const nested = initRepo(join(root, 'services', 'billing'), { 'billing.txt': 'v1\n' });
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    expect(run.repos.map((r) => r.path)).toEqual(['.']);
+    expect(run.shared).toEqual(['services/billing']);
+
+    const { cwd } = await iso.prepare(task(1, 'Touch both'), run);
+    expect(lstatSync(join(cwd, 'services', 'billing')).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(cwd, 'services', 'billing', 'billing.txt'), 'utf8')).toBe('v1\n');
+    writeFileSync(join(cwd, 'services', 'billing', 'billing.txt'), 'v2\n');
+
+    writeFileSync(join(cwd, 'app.txt'), 'a\n');
+    expect(await iso.integrate(task(1, 'Touch both'), run)).toBe('merged');
+    const branch = run.repos[0].integrationBranch;
+    expect(git(root, 'show', `${branch}:app.txt`)).toBe('a');
+    expect(() => git(root, 'cat-file', '-e', `${branch}:services/billing`)).toThrow();
+
+    // The edit went through the live link to the real nested repo, which survives cleanup.
+    expect(readFileSync(join(nested, 'billing.txt'), 'utf8')).toBe('v2\n');
+    expect(existsSync(join(root, 'services', 'billing', '.git'))).toBe(true);
+  });
+
+  it('does not link again a nested repo a linked artifact already covers', async () => {
+    const root = repo();
+    initRepo(join(root, 'vendor', 'lib'));
+    writeFileSync(join(root, '.gitignore'), 'vendor/\n');
+    git(root, 'add', '.gitignore');
+    git(root, 'commit', '-q', '-m', 'ignore vendor');
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    expect(run.shared).toEqual(['vendor/lib']);
+    const { cwd } = await iso.prepare(task(1, 'Vendored'), run);
+    // `vendor` is a linked artifact: the whole thing is live, nested repo included.
+    expect(lstatSync(join(cwd, 'vendor')).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(cwd, 'vendor', 'lib', 'README.md'), 'utf8')).toBe('hello\n');
   });
 });
 

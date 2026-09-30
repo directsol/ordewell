@@ -85,8 +85,12 @@ const GITLINK_MODE = '160000';
 
 interface GitResult { ok: boolean; stdout: string; stderr: string; code?: string | number }
 
-/** The repo group a workspace forms, or the reason it forms none. */
-type GroupScan = { paths: string[] } | { refused: IsolationAvailability };
+/**
+ * The repo group a workspace forms, or the reason it forms none. `nested` is
+ * the repositories found inside a lone repository, which cannot be isolated
+ * with it and are shared live instead; empty for a folder group.
+ */
+type GroupScan = { paths: string[]; nested: string[] } | { refused: IsolationAvailability };
 
 interface QueuedMerge {
   task: Task;
@@ -247,23 +251,22 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
       if (tracked) dirty.push(repoPath);
     }
     if (dirty.length > 0) return inactive('dirty', dirty);
-    return committed.includes(SELF_REPO) ? { active: true } : { active: true, repos: committed, shared: this.sharedPaths(workspaceRoot, committed) };
+    if (committed.includes(SELF_REPO)) return scan.nested.length > 0 ? { active: true, shared: scan.nested } : { active: true };
+    return { active: true, repos: committed, shared: this.sharedPaths(workspaceRoot, committed) };
   }
 
   /**
-   * A workspace inside a repository is a group of one at `.`. A folder that is
-   * not forms a group from `workspaceRepos` when set, otherwise from the
-   * repositories directly inside it.
+   * A workspace inside a repository is a group of one at `.`, and any
+   * repositories nested in it are shared live. A folder that is not forms a
+   * group from `workspaceRepos` when set, otherwise from the repositories
+   * directly inside it.
    */
   private async scanGroup(workspaceRoot: string): Promise<GroupScan> {
     // cwd may not exist; any failure here is "not a repository" as far as the caller can act on it.
     const toplevel = await this.tryGit(workspaceRoot, ['rev-parse', '--show-toplevel']);
-    if (toplevel.ok) {
-      const nested = await this.nestedRepos(workspaceRoot, toplevel.stdout.trim());
-      return nested.length > 0 ? { refused: { active: false, reason: 'nested-repos', repos: nested } } : { paths: [SELF_REPO] };
-    }
+    if (toplevel.ok) return { paths: [SELF_REPO], nested: await this.nestedRepos(workspaceRoot, toplevel.stdout.trim()) };
     const paths = this.groupPaths(workspaceRoot);
-    return paths.length > 0 ? { paths } : { refused: { active: false, reason: 'not-git' } };
+    return paths.length > 0 ? { paths, nested: [] } : { refused: { active: false, reason: 'not-git' } };
   }
 
   private groupPaths(workspaceRoot: string): string[] {
@@ -307,7 +310,9 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
   /**
    * Repositories below the workspace that the outer repository does not own as
    * submodules. Isolating the outer one would leave them out of every task
-   * worktree, so the agents would edit them live.
+   * worktree, so they are linked live into each task instead. A nested repo the
+   * outer repo ignores is shared too: no linked artifact stands in for it, and
+   * leaving it out would make it vanish with no word.
    */
   private async nestedRepos(workspaceRoot: string, toplevel: string): Promise<string[]> {
     const found: string[] = [];
@@ -321,14 +326,9 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     walk('', 1);
     if (found.length === 0) return [];
 
-    // One call each rather than a batch: `-z` needs `--stdin`, and unquoted output is not guaranteed for odd names.
-    const ignored = new Set(
-      (await Promise.all(found.map(async (rel) => ((await this.tryGit(workspaceRoot, ['check-ignore', '-q', '--', rel])).ok ? rel : null))))
-        .filter((rel): rel is string => rel !== null),
-    );
     const owned = await this.submodulePaths(workspaceRoot, toplevel);
     const prefix = (await this.tryGit(workspaceRoot, ['rev-parse', '--show-prefix'])).stdout.trim();
-    return found.filter((rel) => !ignored.has(rel) && !owned.has(`${prefix}${rel}`));
+    return found.filter((rel) => !owned.has(`${prefix}${rel}`));
   }
 
   /** Paths, relative to the repository's top level, that are submodules: staged gitlinks and `.gitmodules` entries. */
@@ -358,14 +358,18 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
   startRun(workspaceRoot: string): Promise<IsolationRun> {
     return this.admin(workspaceRoot, async () => {
       const scan = await this.scanGroup(workspaceRoot);
+      const paths = 'paths' in scan ? scan.paths : [SELF_REPO];
       const run: IsolationRun = { id: this.mintRunId(), workspaceRoot, repos: [], shared: [], sharedRepos: [], tasks: {} };
-      for (const repoPath of 'paths' in scan ? scan.paths : [SELF_REPO]) {
+      for (const repoPath of paths) {
         const repo = await this.startRepo(run, repoPath);
         if (repo) run.repos.push(repo);
         else run.sharedRepos.push(repoPath);
       }
       if (run.repos.length === 0) throw new Error(`No repository could be isolated: ${run.sharedRepos.join(', ')}`);
-      run.shared = this.sharedPaths(workspaceRoot, run.repos.map((r) => r.path));
+      // A lone repository shares the repositories nested in it; a folder shares its loose entries.
+      run.shared = paths.includes(SELF_REPO)
+        ? ('paths' in scan ? scan.nested : [])
+        : this.sharedPaths(workspaceRoot, run.repos.map((r) => r.path));
       return run;
     });
   }
@@ -448,13 +452,11 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
           record.repos[repo.path] = { worktree, linked: [] };
         }
 
-        // Taken afresh for every task: a loose file the user adds mid-run is shared from the next one on.
-        run.shared = this.sharedPaths(run.workspaceRoot, run.repos.map((r) => r.path));
-        for (const rel of run.shared) {
-          const target = path.join(dir, rel);
-          fs.mkdirSync(path.dirname(target), { recursive: true });
-          if (linkPath(path.join(run.workspaceRoot, rel), target, this.platform) === 'copy') copied.push(rel);
-        }
+        // A group re-takes its loose paths for every task, so a file the user
+        // adds mid-run is shared from the next task on; a lone repository's
+        // shared paths are the repositories nested in it, fixed for the run.
+        const self = run.repos.find((r) => r.path === SELF_REPO);
+        if (!self) run.shared = this.sharedPaths(run.workspaceRoot, run.repos.map((r) => r.path));
 
         for (const repo of run.repos) {
           const entry = record.repos[repo.path];
@@ -463,6 +465,20 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
           const boot = await this.bootstrap(repo, inRepo);
           entry.linked = boot.linked;
           copied.push(...boot.copied.map((name) => path.posix.join(repo.path, name)));
+        }
+
+        // After the bootstrap: a nested repo already live through a linked
+        // artifact (`vendor/`, `.venv/`) is left as it is, so the whole artifact
+        // stays linked. A lone repository's shared paths sit inside its worktree,
+        // so they are recorded like its bootstrapped artifacts and kept out of
+        // its commit.
+        for (const rel of run.shared) {
+          const target = path.join(cwd, rel);
+          if (lexists(target)) continue;
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          if (linkPath(path.join(run.workspaceRoot, rel), target, this.platform) === 'copy') copied.push(rel);
+          const entry = self ? record.repos[SELF_REPO] : undefined;
+          if (entry) entry.linked.push(rel);
         }
       } catch (err) {
         record.status = 'failed';

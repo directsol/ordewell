@@ -460,8 +460,8 @@ the shared workspace root, then integrating the results deterministically
 group* — a git repository, or a folder of them — with a clean tracked tree in
 each repository and `worktreeIsolation` on; otherwise every task runs in the
 workspace root exactly as before, and `WorktreeIsolation.isActive` says which of
-`disabled`, `git-missing`, `not-git`, `no-commits`, `dirty` or `nested-repos`
-applied (the last three may name the repositories behind them). `not-git` is
+`disabled`, `git-missing`, `not-git`, `no-commits` or `dirty`
+applied (the last two may name the repositories behind them). `not-git` is
 left for a folder with no repository in it. A group's task integrates by an
 atomic *landing*. The
 Runner is only ever handed a `cwd` (ADR-0007) — git never enters
@@ -500,16 +500,22 @@ runs once per repo with `ORDEWELL_REPO` and `ORDEWELL_MAIN_REPO` set.
 repositories directly inside it, or, when `workspaceRepos` is set, from exactly
 the repositories it lists, at any depth; a workspace
 that is one repository is a group of one, with the repo at path `.`, so there is
-one code path. A repository that contains nested repositories that are not
-submodules is not a group but a refusal (`nested-repos`). Repo names and roles
-are arbitrary and nothing may depend on them; a group is a set of paths.
+one code path. A repository that contains repositories nested inside it that
+are not submodules is still a group of one: the nested repositories cannot be
+isolated with it, so they are shared live and named, never silently dropped
+(ADR-0019). Repo names and roles are arbitrary and nothing may depend on them;
+a group is a set of paths.
 *Avoid:* "monorepo" (one repository holding many projects — a group is many
 repositories), "multi-root workspace" (a VS Code notion, a later slice), "project"
 or "package" for a repo.
 
 **Shared path** — a loose file or folder in the workspace root that is in no repo
 of the group, or a repo that cannot be isolated (no commits, or git refuses a
-worktree), linked live into every task workspace (ADR-0014). Edits to it are
+worktree), linked live into every task workspace (ADR-0014). For a repository
+that is the workspace, the repositories nested inside it that are not submodules
+are shared paths too, linked live at their real relative paths (ADR-0019); one
+the workspace's own repository ignores is shared like any other, so a nested
+repository never vanishes from a task without a word. Edits to a shared path are
 live and not reviewable, so the planner prompt lists them and does not run
 parallel tasks that edit one. `.ordewell/` is never one. Symlinks on POSIX;
 junctions for directories and hard links for files on Windows, with a copy and a

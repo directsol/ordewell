@@ -329,7 +329,6 @@ describe('TaskOrchestrator with worktree isolation', () => {
       ['git-missing', /git was not found/i],
       ['disabled', /isolation is off/i],
       ['no-commits', /no commits/i],
-      ['nested-repos', /nested repositories/i],
     ] as const)('runs in the workspace root when the workspace is %s, and says so once', async (reason, notice) => {
       const isolation = new FakeWorktreeIsolation();
       isolation.availability = { active: false, reason };
@@ -364,9 +363,14 @@ describe('TaskOrchestrator with worktree isolation', () => {
       );
     });
 
-    it('names the nested repositories that keep a repository from isolating', async () => {
-      expect(await noticesFor({ active: false, reason: 'nested-repos', repos: ['services/billing', 'tools/cli'] })).toContain(
-        'This repository contains nested repositories that are not submodules (services/billing, tools/cli) — tasks run in the workspace root without worktree isolation. Ignore them in git or make them submodules to isolate this repository.',
+    it('names the repositories nested in a lone repository, shared live', async () => {
+      const isolation = new FakeWorktreeIsolation();
+      isolation.shared = ['services/billing', 'tools/cli'];
+      const { orchestrator, notifications } = setup({ isolation });
+      orchestrator.loadPlan([task('t1', 1)]);
+      await orchestrator.approveReview();
+      expect(vi.mocked(notifications.info).mock.calls.map((c) => String(c[0]))).toContain(
+        'services/billing, tools/cli are repositories nested inside this one — linked live into every task, so edits there are not isolated.',
       );
     });
 
@@ -380,6 +384,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
   describe('a run over a repo group', () => {
     it('names the repositories and paths every task shares live, once per run', async () => {
       const isolation = new FakeWorktreeIsolation();
+      isolation.repos = ['api', 'web'];
       isolation.shared = ['NOTES.md', 'design', 'scratch'];
       isolation.sharedRepos = ['scratch'];
       const { orchestrator, notifications } = setup({ isolation, workspace: '/group' });
@@ -395,6 +400,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
     it('names loose paths alone when every repository isolated', async () => {
       const isolation = new FakeWorktreeIsolation();
+      isolation.repos = ['api', 'web'];
       isolation.shared = ['NOTES.md'];
       const { orchestrator, notifications } = setup({ isolation, workspace: '/group' });
       orchestrator.loadPlan([task('t1', 1)]);
@@ -693,7 +699,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
     it('hands over the fallback to the workspace root, which the notification channel may drop', async () => {
       const isolation = new FakeWorktreeIsolation();
-      isolation.availability = { active: false, reason: 'nested-repos', repos: ['services/billing'] };
+      isolation.availability = { active: false, reason: 'not-git' };
       const { orchestrator } = setup({ isolation, workspace: '/plain' });
       const notices = heard(orchestrator);
       orchestrator.loadPlan([task('t1', 1)]);
@@ -702,12 +708,13 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
       expect(notices).toEqual([{
         level: 'info',
-        message: 'This repository contains nested repositories that are not submodules (services/billing) — tasks run in the workspace root without worktree isolation. Ignore them in git or make them submodules to isolate this repository.',
+        message: 'Not a git repository — tasks run in the workspace root without worktree isolation.',
       }]);
     });
 
     it('hands over the shared paths of a group and the copies a task got', async () => {
       const isolation = new FakeWorktreeIsolation();
+      isolation.repos = ['api', 'web'];
       isolation.shared = ['NOTES.md'];
       isolation.copied = ['api/.env'];
       const { orchestrator } = setup({ isolation, workspace: '/group' });

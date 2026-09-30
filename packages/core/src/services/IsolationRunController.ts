@@ -73,13 +73,18 @@ function sharedRootNotice(reason: SharedRootReason, repos: string[]): string {
         ? `No repository in this folder has commits yet (${repos.join(', ')}) — ${SHARED_ROOT_TAIL}`
         : `The repository has no commits yet — ${SHARED_ROOT_TAIL}`;
     case 'not-git': return `Not a git repository — ${SHARED_ROOT_TAIL}`;
-    case 'nested-repos':
-      return `This repository contains nested repositories that are not submodules (${repos.join(', ')}) — ${SHARED_ROOT_TAIL} Ignore them in git or make them submodules to isolate this repository.`;
   }
 }
 
 /** What a new run shares live instead of isolating, as one line; null when it shares nothing. */
 function sharedPathsNotice(run: IsolationRun): string | null {
+  // A lone repository shares the repositories nested inside it: they cannot be
+  // isolated with it, so they are linked live rather than left to vanish.
+  if (run.repos.some((r) => r.path === SELF_REPO)) {
+    if (run.shared.length === 0) return null;
+    const one = run.shared.length === 1;
+    return `${run.shared.join(', ')} ${one ? 'is a repository nested inside this one' : 'are repositories nested inside this one'} — linked live into every task, so edits there are not isolated.`;
+  }
   const loose = run.shared.filter((p) => !run.sharedRepos.includes(p));
   if (run.sharedRepos.length === 0) {
     if (loose.length === 0) return null;

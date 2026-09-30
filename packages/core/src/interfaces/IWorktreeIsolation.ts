@@ -6,14 +6,15 @@ import type { Task } from '../models/Task';
  * "run without isolation", while the others fall back to the shared
  * workspace root with a one-line notice.
  */
-export type IsolationInactiveReason = 'disabled' | 'git-missing' | 'not-git' | 'no-commits' | 'dirty' | 'nested-repos';
+export type IsolationInactiveReason = 'disabled' | 'git-missing' | 'not-git' | 'no-commits' | 'dirty';
 
 /**
  * `repos` names, relative to the workspace, the repositories behind the answer:
  * when active, the ones that will isolate, with `shared` the paths every task
- * will share live; otherwise the nested ones `nested-repos` refuses, the dirty
- * ones of a `dirty` group, or the commitless ones of a `no-commits` group. A
- * group of one names none.
+ * will share live — loose entries of the workspace root, or, for a lone
+ * repository, the repositories nested inside it; otherwise the dirty ones of a
+ * `dirty` group, or the commitless ones of a `no-commits` group. A group of one
+ * names none.
  */
 export type IsolationAvailability =
   | { active: true; repos?: string[]; shared?: string[] }
@@ -22,7 +23,8 @@ export type IsolationAvailability =
 /**
  * Where a run's tasks work, as the planner is told it: the repos of the group
  * and the paths shared live between tasks. A lone repository is `['.']` with
- * nothing shared.
+ * nothing shared, unless it holds nested repositories, which are shared live
+ * and named in `shared`.
  */
 export interface RepoGroupLayout {
   repos: string[];
@@ -144,7 +146,9 @@ export interface IsolationRun {
   /**
    * Workspace paths outside every isolated repo, linked live into each task
    * workspace: loose entries of the workspace root, the entries beside a deeper
-   * repo, and `sharedRepos`. Empty for a group of one.
+   * repo, and `sharedRepos`. For a lone repository, the repositories nested
+   * inside it, which cannot be isolated with it and so are linked live instead.
+   * Empty when a group of one holds no nested repositories.
    */
   shared: string[];
   /** Repos of the group that could not be isolated — no commits, or git refused a worktree — and are among `shared`. */
