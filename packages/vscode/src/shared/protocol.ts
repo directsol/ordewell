@@ -145,6 +145,8 @@ export type WebviewToHost =
   | { type: 'setRunnerTransport'; transport: RunnerTransport }
   /** Open (or focus) the on-demand task-log tab for a structured task (ADR-0018, V1). */
   | { type: 'openTaskLog'; taskId: string }
+  /** The plan dock's dragged height in px, saved on release so every later session opens at it. */
+  | { type: 'setPlanDockHeight'; height: number }
   /** Who plans (ADR-0009) — a vendor provider id or one of the harness planners. */
   | { type: 'setPlanner'; provider: string }
   /** The planner's own model and thinking effort, a pair so neither can outlive the other. */
@@ -181,6 +183,8 @@ export type HostToWebview =
   // backend — hidden rather than silently ignored (ADR-0009, T8).
   | { type: 'setSkillToggles'; toggles: { tdd: boolean; verify: boolean }; unavailable?: string[] }
   | { type: 'runnerTransport'; transport: RunnerTransport }
+  /** The remembered plan dock height in px; absent until the user first drags it. */
+  | { type: 'planDockHeight'; height?: number }
   /** Discovered skills (global ~/.ordewell/skills/ + workspace .ordewell/skills/, workspace shadows global) for the /skill-name suggestion dropdown. */
   | { type: 'setSkills'; skills: { name: string; description: string }[] }
   | { type: 'setConfiguredProviders'; providers: AiProvider[] }

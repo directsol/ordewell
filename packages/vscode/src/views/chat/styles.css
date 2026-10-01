@@ -144,8 +144,9 @@ body {
   /* `flex: 1` is `flex: 1 1 0%`, so the list will shrink to nothing when the
      setup panel and a tall plan dock both want room — which clipped the newest
      revision chip, the one thing that says the plan just changed. Capping the
-     dock is not enough on its own; the conversation needs its own floor. */
-  min-height: 116px;
+     dock is not enough on its own; the conversation needs its own floor. It is
+     one chip row and no more, because a dragged dock may cover the rest. */
+  min-height: 56px;
 }
 
 .chat-msg {
@@ -4336,11 +4337,36 @@ body {
    they type a modification, and it keeps its own scroll so a long plan never
    pushes the conversation off screen. */
 .plan-dock {
+  position: relative;
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
+  /* A dragged height is in px, so a panel resized smaller would otherwise push
+     the input off screen. The tiny weight keeps the settings panel the first
+     to give way: flex hands the overflow to the dock only once settings hit 0. */
+  flex-shrink: 0.01;
+  min-height: 0;
   border-top: 1px solid var(--border-subtle);
   background: var(--bg-primary);
+}
+
+/* Sits over the border instead of adding height, so the bar does not move
+   between the expanded and collapsed dock. */
+.plan-dock-resize {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  z-index: 1;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.plan-dock-resize:hover,
+.plan-dock-resize:focus-visible,
+.plan-dock-resize.dragging {
+  outline: none;
+  background: linear-gradient(var(--vscode-sash-hoverBorder, var(--accent-emphasis)), var(--vscode-sash-hoverBorder, var(--accent-emphasis))) center / 100% 2px no-repeat;
 }
 
 .plan-dock-bar {
@@ -4356,6 +4382,7 @@ body {
   font-size: 11px;
   cursor: pointer;
   text-align: left;
+  flex-shrink: 0;
 }
 
 .plan-dock-bar:hover {
@@ -4400,9 +4427,11 @@ body {
 
 /* Capped rather than fixed: the dock takes what a short plan needs and no more,
    and stops at 45% of the panel so the conversation always keeps a share. The
-   floor on `.message-list` is the other half of that bargain. */
+   floor on `.message-list` is the other half of that bargain. A height the user
+   dragged replaces the 45% inline and stays a cap. */
 .plan-dock-body {
   overflow-y: auto;
+  min-height: 0;
   max-height: 45vh;
   margin: 0 14px 8px;
   width: auto;

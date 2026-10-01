@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **The plan dock can be resized.** Drag its top edge (or focus it and use the
+  arrow keys) to make the plan taller or shorter, up to nearly the whole chat.
+  The height is remembered across sessions and VS Code restarts. It is a
+  ceiling, not a fixed size: a plan shorter than it, or one with its tasks
+  collapsed, still shrinks to where its content ends.
+
 ## [0.5.6] — 2026-09-30
 
 ### Fixed

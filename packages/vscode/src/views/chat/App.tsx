@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import EmptyState from './components/EmptyState';
 import GetStarted from './components/GetStarted';
 import ChatInput from './components/ChatInput';
+import DockResizeHandle from './components/DockResizeHandle';
 import { ConversationBlocks } from './components/ChatMessage';
 import { appendTaskOutput, type TaskOutputMap } from './taskOutput';
 import ModelSelector, { API_PROVIDER_LABELS } from './components/ModelSelector';
@@ -96,9 +97,12 @@ export default function App() {
   const [mergeResult, setMergeResult] = useState<IsolationMergeResult | null>(null);
   /** Is the plan dock open? See planDock.ts for when this flips. */
   const [dockExpanded, setDockExpanded] = useState(false);
+  /** The dock's dragged cap in px, remembered by the host; undefined keeps the stylesheet's default. */
+  const [dockHeight, setDockHeight] = useState<number | undefined>(undefined);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
+  const dockBodyRef = useRef<HTMLDivElement>(null);
   const processingRef = useRef(false);
   const stoppedRef = useRef(false);
   const sessionClearedRef = useRef(false);
@@ -357,6 +361,10 @@ export default function App() {
 
         case 'runnerTransport':
           setRunnerTransport(msg.transport);
+          break;
+
+        case 'planDockHeight':
+          setDockHeight(msg.height);
           break;
 
         case 'checkpoint':
@@ -715,6 +723,10 @@ export default function App() {
     vscode.postMessage({ type: 'isolationAction', action, taskId });
   }, []);
 
+  const handleDockResize = useCallback((height: number) => {
+    setDockHeight(height);
+    vscode.postMessage({ type: 'setPlanDockHeight', height });
+  }, []);
   const handleShowPlan = useCallback(() => setDockExpanded((v) => nextDock(v, 'user-expanded')), []);
 
   const handleResolveConflict = useCallback((taskId: string) => {
@@ -844,6 +856,7 @@ export default function App() {
     if (!plan || plan.tasks.length === 0) return null;
     return (
       <div className={`plan-dock ${dockExpanded ? 'expanded' : 'collapsed'}`}>
+        {dockExpanded && <DockResizeHandle bodyRef={dockBodyRef} listRef={messageListRef} onCommit={handleDockResize} />}
         <button
           type="button"
           className="plan-dock-bar"
@@ -862,7 +875,12 @@ export default function App() {
               unseen behind it. */}
           {checkpoint && <span className="plan-dock-approval">1 awaiting approval</span>}
         </button>
-        <div className="plan-dock-body" hidden={!dockExpanded}>
+        <div
+          className="plan-dock-body"
+          hidden={!dockExpanded}
+          ref={dockBodyRef}
+          style={dockHeight === undefined ? undefined : { maxHeight: dockHeight }}
+        >
           {checkpoint && (
             <CheckpointPanel
               taskTitle={checkpoint.taskTitle}

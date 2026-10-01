@@ -92,6 +92,7 @@ function harness() {
       toggleSkill: vi.fn(),
       setRunnerTransport: vi.fn(),
       openTaskLog: vi.fn(),
+      setPlanDockHeight: vi.fn(),
     },
     getPendingRunners: () => pending,
     setPendingRunners: (r) => { pending = r; },
@@ -292,6 +293,7 @@ describe('webview messages reach the session through one entry point each', () =
     [{ type: 'toggleSkill', skillId: 'tdd', enabled: true }, 'toggleSkill', ['tdd', true]],
     [{ type: 'setRunnerTransport', transport: 'structured' }, 'setRunnerTransport', ['structured']],
     [{ type: 'openTaskLog', taskId: 't1' }, 'openTaskLog', ['t1']],
+    [{ type: 'setPlanDockHeight', height: 320 }, 'setPlanDockHeight', [320]],
   ] as const)('hands %o to the extension', async (msg, handler, args) => {
     await h.route(msg as WebviewToHost);
 

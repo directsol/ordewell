@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Task } from '@ordewell/core';
-import { isPlanRevision, planSummaryLabel, nextDock } from '../planDock';
+import { isPlanRevision, planSummaryLabel, nextDock, dragDockHeight, DOCK_MIN_HEIGHT } from '../planDock';
 
 function task(overrides: Partial<Task> = {}): Task {
   return {
@@ -108,5 +108,30 @@ describe('nextDock', () => {
 
   it('collapses on a new session so the next plan opens fresh', () => {
     expect(nextDock(true, 'session-reset')).toBe(false);
+  });
+});
+
+/**
+ * The dragged height is a cap: it follows the pointer up to wherever the plan
+ * ends or the conversation runs out of room, whichever comes first.
+ */
+describe('dragDockHeight', () => {
+  const roomy = { content: 900, available: 900 };
+
+  it('follows the pointer between its bounds', () => {
+    expect(dragDockHeight(320.4, roomy)).toBe(320);
+  });
+
+  it('stops where the plan ends', () => {
+    expect(dragDockHeight(600, { content: 240, available: 900 })).toBe(240);
+  });
+
+  it('stops where the conversation reaches its floor', () => {
+    expect(dragDockHeight(600, { content: 900, available: 410 })).toBe(410);
+  });
+
+  it('never collapses below the minimum, even for a tiny plan', () => {
+    expect(dragDockHeight(10, roomy)).toBe(DOCK_MIN_HEIGHT);
+    expect(dragDockHeight(300, { content: 40, available: 900 })).toBe(DOCK_MIN_HEIGHT);
   });
 });

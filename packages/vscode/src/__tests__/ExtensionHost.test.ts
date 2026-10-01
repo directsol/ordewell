@@ -53,6 +53,7 @@ function fakeChat() {
     planApproved: vi.fn(),
     setSkillToggles: vi.fn(),
     setRunnerTransport: vi.fn(),
+    setPlanDockHeight: vi.fn(),
     setSkills: vi.fn(),
     setModels: vi.fn(),
     setModelsByRunner: vi.fn(),
@@ -218,9 +219,14 @@ function harness(overrides: {
   const resolver = overrides.modelResolver ?? fakeResolver();
   const installation = overrides.runnerInstallation ?? fakeRunnerInstallation(['claude-code']);
   const pluginRegistry = new RunnerRegistry();
+  const stored = new Map<string, unknown>();
+  const globalState = {
+    get: (key: string) => stored.get(key),
+    update: vi.fn(async (key: string, value: unknown) => { stored.set(key, value); }),
+  };
 
   const services: ExtensionServices = {
-    context: { subscriptions: [], extensionUri: { toString: () => 'file:///ext' } } as unknown as vscode.ExtensionContext,
+    context: { subscriptions: [], extensionUri: { toString: () => 'file:///ext' }, globalState } as unknown as vscode.ExtensionContext,
     outputChannel: { appendLine: vi.fn() } as unknown as vscode.OutputChannel,
     secretStore: { set: vi.fn(), get: vi.fn() } as unknown as SecretStore,
     config: config.config,
@@ -293,6 +299,18 @@ describe('the extension host wires one state, one deps bag and one lifecycle', (
       expect.arrayContaining([expect.objectContaining({ id: 'claude-code', usable: true })]),
       'openrouter', undefined, '',
     ));
+  });
+
+  it('remembers the dragged plan dock height for the next webview to open', async () => {
+    await h.host.start();
+    h.chat.messages.fire({ type: 'ready' });
+    await vi.waitFor(() => expect(h.chat.provider.setPlanDockHeight).toHaveBeenCalledWith(undefined));
+
+    h.chat.messages.fire({ type: 'setPlanDockHeight', height: 340 });
+    h.chat.provider.setPlanDockHeight.mockClear();
+    h.chat.messages.fire({ type: 'ready' });
+
+    await vi.waitFor(() => expect(h.chat.provider.setPlanDockHeight).toHaveBeenCalledWith(340));
   });
 
   it('resets the AI service, invalidates the resolver and reschedules on a config change', async () => {

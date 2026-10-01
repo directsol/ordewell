@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, fireEvent, screen } from '@testing-library/react';
+import { act, render, fireEvent, screen } from '@testing-library/react';
 import type { ConversationMessage, SessionMessage } from '@ordewell/core';
 import App from '../App';
 import { api, hostBridge, post as send, rowKinds } from './hostBridge';
@@ -158,5 +158,64 @@ describe('plan dock', () => {
 
     expect(document.querySelector('.plan-dock')).toBeNull();
     expect(document.querySelector('.plan-revision-chip')).toBeNull();
+  });
+
+  describe('resizing', () => {
+    function sized(el: Element, box: { offset: number; client?: number; scroll?: number }): void {
+      Object.defineProperty(el, 'offsetHeight', { configurable: true, value: box.offset });
+      Object.defineProperty(el, 'clientHeight', { configurable: true, value: box.client ?? box.offset });
+      Object.defineProperty(el, 'scrollHeight', { configurable: true, value: box.scroll ?? box.offset });
+    }
+    // jsdom has no PointerEvent, and fireEvent's fallback drops clientY.
+    function pointer(target: EventTarget, type: string, clientY = 0): void {
+      act(() => { target.dispatchEvent(new MouseEvent(type, { bubbles: true, button: 0, clientY })); });
+    }
+    const body = () => document.querySelector('.plan-dock-body') as HTMLElement;
+    const handle = () => document.querySelector('.plan-dock-resize')!;
+
+    beforeEach(() => {
+      api.postMessage.mockClear();
+      send({ type: 'planUpdated', plan });
+      sized(body(), { offset: 200, scroll: 700 });
+      const list = document.querySelector('.message-list') as HTMLElement;
+      sized(list, { offset: 400 });
+      // jsdom loads no stylesheet; this stands in for the list's CSS floor.
+      list.style.minHeight = '56px';
+    });
+
+    it('drags the top edge up into the conversation and saves the height on release', () => {
+      pointer(handle(), 'pointerdown', 500);
+      pointer(document, 'pointermove', 350);
+      expect(body().style.maxHeight).toBe('350px');
+      expect(api.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'setPlanDockHeight' }));
+
+      pointer(document, 'pointerup');
+      expect(api.postMessage).toHaveBeenCalledWith({ type: 'setPlanDockHeight', height: 350 });
+    });
+
+    it('can cover nearly the whole conversation, keeping its floor', () => {
+      pointer(handle(), 'pointerdown', 500);
+      pointer(document, 'pointermove', -2000);
+      pointer(document, 'pointerup');
+
+      expect(api.postMessage).toHaveBeenCalledWith({ type: 'setPlanDockHeight', height: 200 + 400 - 56 });
+    });
+
+    it('does not save anything for a click that never moved', () => {
+      pointer(handle(), 'pointerdown', 500);
+      pointer(document, 'pointerup');
+
+      expect(api.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'setPlanDockHeight' }));
+    });
+
+    it('opens at the height the host remembered', () => {
+      send({ type: 'planDockHeight', height: 420 });
+      expect(body().style.maxHeight).toBe('420px');
+    });
+
+    it('offers no handle while the dock is collapsed', () => {
+      fireEvent.click(document.querySelector('.plan-dock-bar')!);
+      expect(document.querySelector('.plan-dock-resize')).toBeNull();
+    });
   });
 });

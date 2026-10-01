@@ -19,6 +19,10 @@ import type { VsCodeFileSystem } from './adapters/VsCodeFileSystem';
 import type { VsCodeNotification } from './adapters/VsCodeNotification';
 import type { ITerminalRunner, RunnerInstallation, RunnerRegistry, ModelResolver, SettingsService, PlannerModelMemory } from '@ordewell/core';
 
+// A VS Code layout preference, not a run setting: it lives in globalState rather
+// than SettingsService, whose file the CLI and web surfaces also read.
+const PLAN_DOCK_HEIGHT_KEY = 'ordewell.planDockHeight';
+
 /**
  * What one extension window holds between webview messages. The host owns this
  * alone; the command, router and slash layers read it through the one
@@ -203,6 +207,7 @@ export function createExtension(services: ExtensionServices, vscodeApi: typeof v
       toggleSkill: (skillId, enabled) => planner.toggleSkill(skillId, enabled),
       setRunnerTransport: (transport) => planner.setRunnerTransport(transport),
       openTaskLog: (taskId) => taskLogs.open(taskId),
+      setPlanDockHeight: (height) => { void services.context.globalState.update(PLAN_DOCK_HEIGHT_KEY, height); },
     },
     getPendingRunners: () => state.pendingRunners,
     setPendingRunners: (runners) => { state.pendingRunners = runners; },
@@ -251,6 +256,7 @@ export function createExtension(services: ExtensionServices, vscodeApi: typeof v
     services.chatProvider.resendAllState();
     services.chatProvider.setSkillToggles(services.settingsService.getTdd(), services.settingsService.getVerification(), []);
     services.chatProvider.setRunnerTransport(services.settingsService.getRunnerTransport());
+    services.chatProvider.setPlanDockHeight(services.context.globalState.get<number>(PLAN_DOCK_HEIGHT_KEY));
     sendSkills();
     // Activation-time discovery can catch a runner CLI cold (server spawn,
     // catalog fetch, auth store still loading) and cache a degraded model
