@@ -214,6 +214,42 @@ describe('conversation-editing slash commands', () => {
     expect(executeCommand.mock.calls).toEqual([['ordewell.setMaxParallel', '8'], ['ordewell.setMaxParallel', undefined]]);
   });
 
+  describe('/auto', () => {
+    const mocked = (name: 'showInformationMessage' | 'showWarningMessage' | 'showQuickPick') =>
+      window[name] as unknown as ReturnType<typeof vi.fn>;
+
+    it.each([
+      ['full', true, 'Full auto'],
+      ['auto', false, 'Auto'],
+      ['on', true, 'Full auto'],
+      ['off', false, 'Auto'],
+    ])('/auto %s stores %s and names the level %s', async (arg, stored, label) => {
+      const updateConfig = vi.fn(async () => {});
+      mocked('showInformationMessage').mockClear();
+      await handleSlashCommand(`/auto ${arg}`, makeDeps({ updateConfig }));
+      expect(updateConfig).toHaveBeenCalledWith('autonomousMode', stored);
+      expect(mocked('showInformationMessage').mock.calls[0][0]).toContain(`Autonomy level: ${label}.`);
+    });
+
+    it('a bare /auto offers the two levels by name, picking the current one', async () => {
+      const updateConfig = vi.fn(async () => {});
+      mocked('showQuickPick').mockReset().mockResolvedValue(undefined);
+      await handleSlashCommand('/auto', makeDeps({ updateConfig }));
+      const items = mocked('showQuickPick').mock.calls[0][0] as { label: string; picked: boolean }[];
+      expect(items.map((i) => i.label)).toEqual(['Full auto (recommended)', 'Auto']);
+      expect(items.map((i) => i.picked)).toEqual([true, false]);
+      expect(updateConfig).not.toHaveBeenCalled();
+    });
+
+    it('an unknown level warns with the usage and changes nothing', async () => {
+      const updateConfig = vi.fn(async () => {});
+      mocked('showWarningMessage').mockClear();
+      await handleSlashCommand('/auto maybe', makeDeps({ updateConfig }));
+      expect(mocked('showWarningMessage').mock.calls[0][0]).toBe('Usage: /auto [full|auto]');
+      expect(updateConfig).not.toHaveBeenCalled();
+    });
+  });
+
   it('/compact runs the compact command', async () => {
     executeCommand.mockClear();
     await handleSlashCommand('/compact', makeDeps());

@@ -59,6 +59,10 @@ export interface PluginFeatures {
   thinkingValueAdaptive?: string;
   /** Maps mode IDs to the CLI --permission-mode value. Used by {{feature:permissionModeVal}}. */
   permissionModeValues?: Record<string, string>;
+  /** Maps mode IDs to the runner's approval policy (Codex `-a` / `approval_policy`). Unlisted modes carry none. */
+  approvalPolicyValues?: Record<string, string>;
+  /** Maps mode IDs to the runner's approvals reviewer (Codex `approvals_reviewer`). Unlisted modes have no reviewer. */
+  approvalsReviewerValues?: Record<string, string>;
 }
 
 export type PluginParser = 'claude-help' | 'opencode-models' | 'opencode-models-verbose' | 'anthropic-models' | 'line-by-line' | 'json' | 'json-table';

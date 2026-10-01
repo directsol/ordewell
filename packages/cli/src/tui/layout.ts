@@ -682,7 +682,7 @@ function taskLines(state: TuiState, row: PlanRow, index: number, cols: number): 
       }
     }
     if (modeInfo?.autonomous) {
-      lines.push(...taskText('Autonomy', 'Runs without permission prompts. Toggle with /auto.', cols, bodyPad));
+      lines.push(...taskText('Autonomy', 'Runs without permission prompts (Full auto). Change the level with /auto.', cols, bodyPad));
     }
     // The prompt editor is seeded from prompt ?? description ?? title, so only
     // show the static description when it carries information the editor won't.

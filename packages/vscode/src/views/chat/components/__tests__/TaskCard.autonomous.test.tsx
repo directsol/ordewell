@@ -26,7 +26,7 @@ const emptyModels: DiscoveredModel[] = [];
 
 const modes: RunnerMode[] = [
   { id: 'default', label: 'Ask before edits', description: 'Standard mode' },
-  { id: 'bypassPermissions', label: 'Auto mode', description: 'Skips all permission prompts', autonomous: true },
+  { id: 'bypassPermissions', label: 'Bypass permissions', description: 'Skips all permission prompts', autonomous: true },
 ];
 
 describe('TaskCard — autonomous mode marking', () => {

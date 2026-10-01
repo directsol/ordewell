@@ -168,6 +168,22 @@ function permissionModeValue(manifest: RunnerPluginManifest, mode: string | unde
   return id;
 }
 
+export interface ModeApprovalSettings {
+  approvalPolicy?: string;
+  approvalsReviewer?: string;
+}
+
+/** The approval policy and reviewer a manifest gives a mode; both absent for a runner that declares neither. */
+export function resolveModeApprovalSettings(manifest: RunnerPluginManifest, mode: string | undefined): ModeApprovalSettings {
+  if (!mode) return {};
+  const approvalPolicy = manifest.features.approvalPolicyValues?.[mode];
+  const approvalsReviewer = manifest.features.approvalsReviewerValues?.[mode];
+  return {
+    ...(approvalPolicy !== undefined && { approvalPolicy }),
+    ...(approvalsReviewer !== undefined && { approvalsReviewer }),
+  };
+}
+
 /**
  * The manifest's meaning of a task's mode and effort, for a runner driven over
  * its programmatic protocol rather than a command line built from
@@ -241,6 +257,26 @@ function resolveToken(token: string, manifest: RunnerPluginManifest, ctx: Resolv
   }
 
   if (token === '{{feature:permissionModeVal}}') return permissionModeValue(manifest, ctx.mode);
+
+  // An unmapped mode keeps the interactive default from before approvals were
+  // per-mode: never ask, since nobody is at the window to answer.
+  if (token === '{{feature:approvalPolicyVal}}') {
+    return resolveModeApprovalSettings(manifest, ctx.mode).approvalPolicy ?? 'never';
+  }
+
+  // `exec` is non-interactive and already implies `never`, so only a policy
+  // that asks needs restating. Under `on-request` the reviewer subagent answers
+  // each request, which keeps a headless task unattended without turning
+  // approvals off.
+  if (token === '{{feature:approvalPolicyConfig}}') {
+    const { approvalPolicy } = resolveModeApprovalSettings(manifest, ctx.mode);
+    return approvalPolicy && approvalPolicy !== 'never' ? `-c approval_policy=${approvalPolicy}` : '';
+  }
+
+  if (token === '{{feature:approvalsReviewerConfig}}') {
+    const { approvalsReviewer } = resolveModeApprovalSettings(manifest, ctx.mode);
+    return approvalsReviewer ? `-c approvals_reviewer=${approvalsReviewer}` : '';
+  }
 
   if (token === '{{feature:planMode}}') {
     return manifest.features.planModeFlag || '';

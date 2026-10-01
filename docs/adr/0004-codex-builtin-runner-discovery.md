@@ -68,3 +68,11 @@ falling back to hardcoded `fallbackModels` in the manifest.
   list; `enabledRunners` defaults include `codex`.
 - Installation detection is unchanged: `codex --version` answers, so absent installs
   filter out everywhere.
+
+## Update 2026-10-01: approvals are per mode
+
+"The sandbox axis is the entire permission story" no longer holds: `agent` now
+carries approval policy `on-request` with the `auto_review` reviewer, and only
+`plan` and `fullAccess` run with approvals `never` (ADR-0001, update of
+2026-10-01). `exec` accepts both as `-c` overrides, which is how a headless
+`agent` task gets them.

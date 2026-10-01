@@ -87,3 +87,35 @@ Concretely:
 - A future runner whose `plan` mode is not read-only must still be reachable
   by manual selection in the UI. The toggle steers the planner; it never
   overrides a human's explicit choice.
+
+## Update 2026-10-01: two named levels
+
+The toggle is unchanged in shape and still a boolean (`autonomousMode`,
+`autonomousDefault`, TUI `autonomous`, VS Code `ordewell.autonomousMode`); what
+changed is what users call its states and what the `safe` tag points at.
+
+- **Full auto** is ON: each runner's `autonomous`-tagged mode. **Auto** is OFF:
+  each runner's `safe`-tagged mode. `/auto full` and `/auto auto` select them
+  (`ordewell auto full|auto` likewise); `on` and `off` stay as aliases, and a
+  bare `/auto` in the TUI reports the current level instead of flipping it. The
+  rule above is untouched — the level is read at plan generation, and a task's
+  mode is never rewritten at spawn.
+- **Claude Code.** `safe` moves from `default` to a new mode `auto` (`--permission-mode
+  auto`), where Claude's own classifier approves or blocks each action. `default`
+  ("Ask before edits") stays selectable but carries no level tag, so it is
+  offered under both. `bypassPermissions` keeps `autonomous` and is relabelled
+  "Bypass permissions": its old label, "Auto mode", collided with Claude's real
+  auto mode. Claude Code 2.1.286 still accepts `--permission-mode default`
+  although it no longer lists it, so no remapping to `manual` was needed.
+- **Codex.** `agent` (`safe`) is the workspace-write sandbox with approval policy
+  `on-request` and `approvals_reviewer=auto_review`, Codex's risk-assessing
+  subagent; `fullAccess` (`autonomous`) stays `danger-full-access` with approvals
+  `never`. The manifest expresses both per mode (`approvalPolicyValues`,
+  `approvalsReviewerValues`). The interactive shape passes them as `-a` and
+  `-c approvals_reviewer=…`; `exec` has no `-a`, so it takes the same values as
+  `-c approval_policy=…` and `-c approvals_reviewer=…`.
+- **OpenCode** is unchanged: `build` wears both tags, so the two levels resolve
+  to the same mode there.
+- **Consequence.** "Auto" is no longer the least-privileged choice on every
+  runner: it trades a prompt for a reviewer's judgement. A person who wants every
+  action to wait for them picks `default` (Claude) by hand, which no level selects.

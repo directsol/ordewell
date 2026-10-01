@@ -1,4 +1,4 @@
-import type { RunnerModeInfo } from '@ordewell/core';
+import { autonomyLevelLabel, type RunnerModeInfo } from '@ordewell/core';
 
 export type ModeTag = 'autonomous' | 'safe';
 
@@ -44,13 +44,13 @@ export function resolveAutonomousQuickPickItems(
 ): AutonomousQuickPickItem[] {
   return [
     {
-      label: 'Autonomous (recommended)',
+      label: `${autonomyLevelLabel(true)} (recommended)`,
       detail: detailFor(runners, modesByRunner, true),
       picked: currentValue === true,
       value: true,
     },
     {
-      label: 'Standard',
+      label: autonomyLevelLabel(false),
       detail: detailFor(runners, modesByRunner, false),
       picked: currentValue === false,
       value: false,
@@ -64,6 +64,5 @@ export function applyAutonomousChoice(
   modesByRunner: Record<string, RunnerModeInfo[]>,
 ): string {
   const resolved = detailFor(runners, modesByRunner, choice);
-  const head = choice ? 'Autonomous mode enabled.' : 'Autonomous mode disabled.';
-  return `${head} New plans will default to: ${resolved}`;
+  return `Autonomy level: ${autonomyLevelLabel(choice)}. New plans will default to: ${resolved}`;
 }
