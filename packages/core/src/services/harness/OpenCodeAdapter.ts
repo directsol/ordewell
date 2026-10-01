@@ -151,6 +151,8 @@ interface TaskTurn {
    * counter guards against.
    */
   live: boolean;
+  /** The user messages the server echoed back: storing the prompt is not the model working on it. */
+  userMessages: Set<string>;
   /** `session.error` for the task's session, in OpenCode's own words. */
   failure: string | null;
   /** The newest assistant message's own error, cleared by a later message that has none. */
@@ -488,7 +490,7 @@ export class OpenCodeAdapter implements TaskModeAgentAdapter {
     this.interruptRequested = false;
     let markDone: () => void = () => {};
     const ended = new Promise<void>((resolve) => { markDone = resolve; });
-    const turn: TaskTurn = { live: false, failure: null, messageError: null, done: false, ended, finish: () => { turn.done = true; markDone(); } };
+    const turn: TaskTurn = { live: false, userMessages: new Set(), failure: null, messageError: null, done: false, ended, finish: () => { turn.done = true; markDone(); } };
     this.taskTurn = turn;
     const closeStream = await this.openStream(state, onEvent, onActivity);
     const poll = new AbortController();
@@ -597,7 +599,21 @@ export class OpenCodeAdapter implements TaskModeAgentAdapter {
       void this.confirmIdle(turn);
       return;
     }
-    turn.live = true;
+    if (frame.type === 'message.updated' && props.info?.role === 'user') {
+      if (props.info.id) turn.userMessages.add(props.info.id);
+      return;
+    }
+    // Only the model's work counts: the session is retitled and the prompt
+    // stored before it is scheduled, and a poll in that gap reads "not busy".
+    const partOf = frame.type === 'message.part.updated' || frame.type === 'message.part.delta'
+      ? props.part?.messageID ?? props.messageID
+      : undefined;
+    const working =
+      (frame.type === 'session.status' && props.status?.type !== undefined) ||
+      (frame.type === 'message.updated' && props.info?.role === 'assistant') ||
+      frame.type === 'session.error' ||
+      (partOf !== undefined && !turn.userMessages.has(partOf));
+    if (working) turn.live = true;
     if (frame.type === 'message.updated' && props.info?.role === 'assistant') {
       turn.messageError = props.info.error ? errorText(props.info.error) : null;
     } else if (frame.type === 'session.error' && props.error) {

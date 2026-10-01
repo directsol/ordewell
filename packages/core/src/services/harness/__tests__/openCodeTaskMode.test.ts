@@ -266,6 +266,35 @@ describe('OpenCodeAdapter task mode — when a turn ends', () => {
     adapter.dispose();
   });
 
+  it('does not take the session\'s bookkeeping for the turn\'s work, whatever the status poll says', async () => {
+    const server = fakeServer();
+    const { adapter } = await startTask(server);
+    const events: AgentEvent[] = [];
+    let settled = false;
+    const turn = adapter.send('do the task', (e) => events.push(e)).then(() => { settled = true; });
+    const stream = await server.stream();
+
+    // `prompt_async` retitles the session and stores the user's message before
+    // the model is scheduled, so the session is still not busy when the status
+    // poll first looks.
+    stream.push({ type: 'session.updated', properties: { sessionID: SES, info: { id: SES } } });
+    stream.push({ type: 'session.diff', properties: { sessionID: SES, diff: [] } });
+    stream.push({ type: 'message.updated', properties: { sessionID: SES, info: { id: 'msg_u', role: 'user', sessionID: SES } } });
+    stream.push({ type: 'message.part.updated', properties: { sessionID: SES, part: { id: 'prt_u', messageID: 'msg_u', sessionID: SES, type: 'text', text: 'do the task' } } });
+    await new Promise<void>((resolve) => setTimeout(resolve, 1300));
+    expect(settled).toBe(false);
+
+    server.status[SES] = { type: 'busy' };
+    stream.push(status('busy'));
+    stream.push(assistant('msg_a'));
+    stream.push(textPart('prt_1', 'msg_a', 'ok'));
+    delete server.status[SES];
+    stream.push(status('idle'));
+    await turn;
+    expect(events).toContainEqual({ type: 'assistant_text', text: 'ok' });
+    adapter.dispose();
+  });
+
   it('ends on its own status poll when the stream drops the idle', async () => {
     const server = fakeServer();
     const { adapter } = await startTask(server);
