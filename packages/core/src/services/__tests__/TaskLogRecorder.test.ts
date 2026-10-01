@@ -133,7 +133,8 @@ describe('a structured run through the real Claude adapter', () => {
   beforeEach(() => { baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ordewell-tasklog-run-')); });
   afterEach(() => { fs.rmSync(baseDir, { recursive: true, force: true }); });
 
-  async function run(name: string) {
+  /** `mode` is the one the fixture was recorded under; the adapter holds the CLI to the mode asked for. */
+  async function run(name: string, mode = 'acceptEdits') {
     const spawned = fakeSpawn([fixture('claude-code', name)]);
     const structured = new StructuredRunner({
       process: { spawn: spawned.spawn, resolvePath: async () => '/usr/bin', platform: 'linux', isDirectory: () => true, exists: () => true },
@@ -142,7 +143,7 @@ describe('a structured run through the real Claude adapter', () => {
     const where = { baseDir, sessionId: 'session-live' };
     const recorder = new TaskLogRecorder({ broadcast: (m) => sent.push(m), location: () => where, flushMs: 1 });
     const raw: TaskLogEvent[] = [];
-    const session = await recorder.wrap(structured).spawn({ ...spawnOpts, taskId: 'task-live', registry: new RunnerRegistry(), mode: 'acceptEdits' });
+    const session = await recorder.wrap(structured).spawn({ ...spawnOpts, taskId: 'task-live', registry: new RunnerRegistry(), mode });
     if (!isStructuredSession(session)) throw new Error('expected a structured session');
     session.onEvent((e) => { const entry = toTaskLogEvent(e); if (entry) raw.push(entry); });
     await new Promise<void>((resolve) => session.onTurnEnd(() => resolve()));
@@ -154,7 +155,7 @@ describe('a structured run through the real Claude adapter', () => {
   it.each(['stream-subagent', 'stream-reasoning', 'stream-tool-rounds', 'task-marker'])(
     'draws the same blocks live as from the saved file (%s)',
     async (name) => {
-      const { live, raw, where } = await run(name);
+      const { live, raw, where } = await run(name, name === 'stream-subagent' ? 'plan' : 'acceptEdits');
       expect(listTaskLogAttempts(where, 'task-live')).toEqual([1]);
       const replayed = replayTaskLog(readTaskLog(where, 'task-live', 1));
       expect(replayed).toEqual(live);
@@ -164,7 +165,7 @@ describe('a structured run through the real Claude adapter', () => {
   );
 
   it('rebuilds a subagent with its own calls nested inside it', async () => {
-    const { live } = await run('stream-subagent');
+    const { live } = await run('stream-subagent', 'plan');
     const subagent = live.blocks.find((b) => b.type === 'subagent');
     expect(subagent).toMatchObject({ type: 'subagent', status: 'done' });
     expect(subagent?.type === 'subagent' && subagent.children.some((c) => c.type === 'tool' && c.headline.name === 'Read')).toBe(true);

@@ -181,6 +181,13 @@ export interface TaskModeAgentAdapter extends AgentAdapter {
    * within `timeoutMs`, and the caller must fall back to killing it.
    */
   interrupt(timeoutMs: number): Promise<boolean>;
+  /**
+   * Registers the listener for what the agent does after a turn has ended and
+   * before the next message — a turn it opens itself when background work
+   * finishes, most often. Without one that output is dropped, which is right
+   * for a planner and wrong for a task, whose marker may be said there.
+   */
+  onOutOfTurn?(listener: (event: AgentEvent) => void): void;
   /** Registers a listener for the process ending, for any reason. Fires at most once. */
   onProcessExit(listener: (code: number) => void): void;
   /**
