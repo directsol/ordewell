@@ -8,7 +8,22 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **The VS Code task log's message box works like the planner's.** Enter sends
+  and Shift+Enter starts a new line; one button sends what is typed, stops the
+  live turn when nothing is, and greys out when there is neither. Esc twice
+  stops the turn too, with a hint after the first press. The separate Interrupt
+  button is gone.
+
 ### Fixed
+
+- **Live logs in VS Code follow new output again.** The task log, the planner
+  conversation and a task card's runner output now stay on the newest lines
+  while you are at the bottom, and stop following as soon as you scroll up to
+  read back. Before, the task log never followed, the planner could lose its
+  place when a large block arrived, and the runner output pulled you back down
+  on every new line.
 
 - **Fewer pointless approval prompts from planner research.** A search pattern
   or filter program that starts with `/` — `grep "/api/users" src`,

@@ -17,6 +17,7 @@ import type { LegacyPlanState, DiscoveredModel, Task, TaskModelAssignment, Runne
 import type { AiProvider } from '@ordewell/core';
 import { isPlanRevision, planSummaryLabel, nextDock } from './planDock';
 import { DetailContext } from './detail';
+import { useFollowOutput } from './followOutput';
 import { slashHelp } from '../../commands/slashCommands';
 import type { HostToWebview, PendingPlanEdit, PlannerBackend, RunnerMeta, WebviewToHost } from '../../shared/protocol';
 import { EMPTY_HOLD, hasHiddenDetail, type PromptHold } from '@ordewell/core/plan-utils';
@@ -100,8 +101,7 @@ export default function App() {
   /** The dock's dragged cap in px, remembered by the host; undefined keeps the stylesheet's default. */
   const [dockHeight, setDockHeight] = useState<number | undefined>(undefined);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const messageListRef = useRef<HTMLDivElement>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
   const dockBodyRef = useRef<HTMLDivElement>(null);
   const processingRef = useRef(false);
   const stoppedRef = useRef(false);
@@ -111,7 +111,6 @@ export default function App() {
   planRef.current = plan;
   const blocksRef = useRef(blocks);
   blocksRef.current = blocks;
-  const userPinnedToBottomRef = useRef(true);
 
   const isGenerating = isResearchActive || isExecuting;
 
@@ -119,30 +118,14 @@ export default function App() {
     processingRef.current = isResearchActive || isExecuting;
   }, [isResearchActive, isExecuting]);
 
-  const isNearBottom = (el: HTMLElement) =>
-    el.scrollHeight - el.scrollTop - el.clientHeight < 50;
-
-  useEffect(() => {
-    const el = messageListRef.current;
-    if (!el) return;
-
-    const handleScroll = () => {
-      userPinnedToBottomRef.current = isNearBottom(el);
-    };
-
-    el.addEventListener('scroll', handleScroll, { passive: true });
-    return () => el.removeEventListener('scroll', handleScroll);
-  }, []);
-
-  // `held` (queued prompts) is its own timeline item below the conversation
-  // blocks, drawn between them and messagesEndRef — a prompt queued while
-  // already pinned to the bottom must scroll too, or it renders past the fold
-  // with nothing to bring it into view.
-  useEffect(() => {
-    if (userPinnedToBottomRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [blocks, held]);
+  // Queued prompts and the working line are drawn below the conversation
+  // blocks: each must be followed too, or it renders past the fold with
+  // nothing to bring it into view.
+  const followRef = useFollowOutput<HTMLDivElement>(blocks, held, isResearchActive);
+  const messageListCallbackRef = useCallback((el: HTMLDivElement | null) => {
+    messageListRef.current = el;
+    followRef(el);
+  }, [followRef]);
 
   useEffect(() => {
     const handler = (event: MessageEvent<HostToWebview>) => {
@@ -1134,7 +1117,7 @@ export default function App() {
         </div>
       )}
 
-      <div className="message-list" ref={messageListRef}>
+      <div className="message-list" ref={messageListCallbackRef}>
         {!hasContent && !isReady && (
           <div className="loading-state">
             <div className="loading-pulse" />
@@ -1172,8 +1155,6 @@ export default function App() {
             <span className="chat-msg-spinner" /> Working&hellip;
           </div>
         )}
-
-        <div ref={messagesEndRef} />
       </div>
 
       {renderPlanDock()}

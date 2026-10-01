@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { ConversationBlocks } from '../chat/components/ChatMessage';
+import { useFollowOutput } from '../chat/followOutput';
 import { hasHiddenDetail } from '@ordewell/core/plan-utils';
 import { applyConversationPatch, EMPTY_PATCHED_VIEW, patchedBlocks, type PatchedView } from '../../shared/conversationPatch';
 import type { HostToTaskLog, TaskLogStatus, TaskLogToHost } from '../../shared/taskLogProtocol';
@@ -29,6 +30,7 @@ export default function TaskLogApp() {
   const [stopArmed, setStopArmed] = useState(false);
 
   const blocks = useMemo(() => patchedBlocks(view), [view]);
+  const followRef = useFollowOutput<HTMLDivElement>(blocks);
   const state = status ? taskLogState(status) : null;
   const hasDetail = useMemo(() => hasHiddenDetail(blocks), [blocks]);
   const canSend = text.trim().length > 0;
@@ -143,7 +145,8 @@ export default function TaskLogApp() {
         </div>
       )}
 
-      <div className="task-log-body">
+      {/* Keyed by attempt so a switched-to attempt opens at its newest output. */}
+      <div className="task-log-body" key={status?.attempt} ref={followRef}>
         {blocks.length === 0
           ? <div className="task-log-empty">{status?.working ? 'Working…' : 'No output yet.'}</div>
           : <ConversationBlocks blocks={blocks} detailAll={detailAll} onShowPlan={noop}

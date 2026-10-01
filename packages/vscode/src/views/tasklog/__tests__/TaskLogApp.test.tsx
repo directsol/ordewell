@@ -143,6 +143,18 @@ describe('the task log tab (ADR-0018, V1)', () => {
     });
   });
 
+  it('follows a live patch into view', () => {
+    const { container } = render(<TaskLogApp />);
+    init({ working: true }, [message('b1', 'first')]);
+    const body = container.querySelector('.task-log-body') as HTMLElement;
+    let top = 0;
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 600 });
+    Object.defineProperty(body, 'scrollTop', { configurable: true, get: () => top, set: (v: number) => { top = v; } });
+
+    send({ type: 'patch', order: ['b1', 'b2'], changed: [message('b2', 'second')] });
+    expect(top).toBe(600);
+  });
+
   it('switches to an earlier attempt', () => {
     render(<TaskLogApp />);
     init({ attempts: [1, 2], attempt: 2 });

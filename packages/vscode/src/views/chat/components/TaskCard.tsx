@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState } from 'react';
 import SubTaskCard from './SubTaskCard';
 import ModelSelector, { getModelClass, providerLabel } from './ModelSelector';
 import DependencyPicker from './DependencyPicker';
 import { lastLine } from '../taskOutput';
 import { checkLabel } from '../checkLabel';
 import { awaitingLabel } from '../awaitingLabel';
+import { useFollowOutput } from '../followOutput';
 import { dependencyCandidates, capConflictFiles } from '@ordewell/core/plan-utils';
 import { Task, DiscoveredModel, TaskModelAssignment, TaskIsolation } from '@ordewell/core';
 
@@ -164,13 +165,7 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
   const repair = isolatedWork?.repair ?? null;
   const repairedFiles = isolatedWork?.repairedFiles ?? [];
 
-  // A live tail is only useful pinned to its newest line; left alone the pane
-  // holds the top of the buffer and the incoming output scrolls out of sight.
-  const outputRef = useRef<HTMLPreElement>(null);
-  useEffect(() => {
-    const pre = outputRef.current;
-    if (pre) pre.scrollTop = pre.scrollHeight;
-  }, [output, expanded]);
+  const outputRef = useFollowOutput<HTMLPreElement>(output);
 
   const modelClass = task.assignedModel ? getModelClass(task.assignedModel.modelId) : '';
   // Stalled overrides the spinning "Running" badge — same status, distinct
