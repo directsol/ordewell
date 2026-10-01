@@ -1,6 +1,7 @@
 import type { SubagentOutcome } from '../../models/Task';
 import { partedPromptUsage, type UsageRecord } from '../../models/Usage';
 import type { ApprovalDecision } from '../../interfaces/IApproval';
+import { claudeThinkingArgs } from '../../plugins/resolveArgs';
 import type { AgentEvent, AgentStartOptions, TaskModeAgentAdapter, TaskStartOptions } from './AgentAdapter';
 import { StdioAgentAdapter, type SpawnSpec } from './StdioAgentAdapter';
 
@@ -216,7 +217,7 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
       ...PROTOCOL_ARGS,
       '--permission-prompt-tool', 'stdio',
       '--permission-mode', opts.flags.permissionMode,
-      ...opts.flags.effortArgs,
+      ...(opts.flags.effort ? claudeThinkingArgs(opts.flags.effort) : []),
     ];
     if (opts.model) args.push('--model', opts.model);
     if (opts.resumeSessionId) {

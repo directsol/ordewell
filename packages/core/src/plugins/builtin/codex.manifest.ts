@@ -56,15 +56,17 @@ export const CODEX_MANIFEST: RunnerPluginManifest = {
       // Legacy alias used by older tasks
       'build': 'workspace-write',
     },
-    approvalPolicyValues: {
-      'agent': 'on-request',
-      'plan': 'never',
-      'fullAccess': 'never',
-      'build': 'on-request',
-    },
-    approvalsReviewerValues: {
-      'agent': 'auto_review',
-      'build': 'auto_review',
+    modeSettings: {
+      approvalPolicy: {
+        'agent': 'on-request',
+        'plan': 'never',
+        'fullAccess': 'never',
+        'build': 'on-request',
+      },
+      approvalsReviewer: {
+        'agent': 'auto_review',
+        'build': 'auto_review',
+      },
     },
   },
 

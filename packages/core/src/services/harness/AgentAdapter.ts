@@ -108,8 +108,10 @@ export interface PlannerStartOptions extends AgentStartCommon {
 export interface TaskRunnerFlags {
   /** The runner's own permission-mode value for the task's mode. */
   permissionMode: string;
-  /** Thinking/effort arguments, already split into argv entries. */
-  effortArgs: string[];
+  /** The task's raw effort id, present only alongside a model. Each adapter maps it to its own protocol. */
+  effort?: string;
+  /** The manifest's further settings for the task's mode, by setting name — see `PluginFeatures.modeSettings`. */
+  modeSettings: Record<string, string>;
 }
 
 /** A plan task driven over the runner's programmatic protocol (ADR-0018, C1). */

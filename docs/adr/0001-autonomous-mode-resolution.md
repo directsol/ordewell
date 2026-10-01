@@ -110,8 +110,8 @@ changed is what users call its states and what the `safe` tag points at.
 - **Codex.** `agent` (`safe`) is the workspace-write sandbox with approval policy
   `on-request` and `approvals_reviewer=auto_review`, Codex's risk-assessing
   subagent; `fullAccess` (`autonomous`) stays `danger-full-access` with approvals
-  `never`. The manifest expresses both per mode (`approvalPolicyValues`,
-  `approvalsReviewerValues`). The interactive shape passes them as `-a` and
+  `never`. The manifest expresses both per mode in `features.modeSettings`
+  (`approvalPolicy`, `approvalsReviewer`). The interactive shape passes them as `-a` and
   `-c approvals_reviewer=…`; `exec` has no `-a`, so it takes the same values as
   `-c approval_policy=…` and `-c approvals_reviewer=…`.
 - **OpenCode** is unchanged: `build` wears both tags, so the two levels resolve

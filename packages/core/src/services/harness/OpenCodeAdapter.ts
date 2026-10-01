@@ -1,9 +1,10 @@
 import type { ChildProcess } from 'child_process';
-import { augmentedPath, withPath } from '../../utils/shellPath';
+import { augmentedPath } from '../../utils/shellPath';
 import { planDirectLaunch, isExecutableResolved, ExecutableNotFoundError } from '../../utils/launch';
 import { assertWorkspaceExists } from '../../utils/workspace';
 import { killTree } from '../../utils/processTree';
 import { workspaceEnvOf } from '../workspaceEnv';
+import { runnerEnv } from './runnerEnv';
 import { partedPromptUsage, type UsageRecord } from '../../models/Usage';
 import { plannerOnly, type AgentAdapter, type AgentEvent, type AgentProcessDeps, type AgentStartOptions, type PlannerStartOptions } from './AgentAdapter';
 
@@ -257,11 +258,14 @@ export class OpenCodeAdapter implements AgentAdapter {
       throw new ExecutableNotFoundError('opencode', PATH);
     }
     this.process = this.deps.spawn(launch.file, launch.args, {
-      env: withPath(process.env, PATH, await (this.deps.workspaceEnv ?? workspaceEnvOf)(opts.cwd)),
+      env: runnerEnv(PATH, await (this.deps.workspaceEnv ?? workspaceEnvOf)(opts.cwd)),
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: opts.cwd,
       windowsVerbatimArguments: launch.verbatim,
     });
+    // Nothing is written here today, but an EPIPE on an unheard pipe crashes
+    // the host, and the exit path already reports a dead server.
+    this.process.stdin?.on('error', () => {});
 
     const banner = new Promise<string | null>((resolve) => {
       let seen = '';
