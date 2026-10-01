@@ -8,6 +8,18 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Fewer pointless approval prompts from planner research.** A search pattern
+  or filter program that starts with `/` — `grep "/api/users" src`,
+  `find . -path '/x/*'`, `sed -n '/start/,/end/p'`, `git log --grep=/fix/` — is
+  no longer mistaken for a file outside the workspace, and `/dev/null` and the
+  standard streams never ask. Files those commands read are still confined.
+- **One prompt per command.** A command that needs approval and also reaches
+  outside the workspace, or reads from several outside directories, now asks
+  once and lists everything it covers, instead of one prompt after another.
+  Each directory is still granted on its own.
+
 ## [0.5.6] — 2026-09-30
 
 ### Added

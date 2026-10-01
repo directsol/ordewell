@@ -10,7 +10,7 @@ import { PlanStore } from './PlanStore';
 import { ApprovalPolicy } from './ApprovalPolicy';
 import { PendingApprovals, type PendingApproval } from './PendingApprovals';
 import { RunnerApprovals } from './RunnerApprovals';
-import { isRunnerApproval, type ApprovalAnswer, type ApprovalRequest } from '../interfaces/IApproval';
+import { approvalScopes, isRunnerApproval, type ApprovalAnswer, type ApprovalRequest } from '../interfaces/IApproval';
 import { HttpWebFetcher } from './HttpWebFetcher';
 import { ModelResolver } from './ModelResolver';
 import { filterModelsForPrompt, coerceAssignments, effectiveAllowlist } from './ModelAllowlistResolver';
@@ -289,7 +289,7 @@ export function createSession(deps: SessionDeps): Session {
         id,
         kind: request.kind,
         subject: request.subject,
-        scope: request.scope,
+        scope: approvalScopes(request).join(', '),
         detail: request.detail,
         turnId: conversation?.currentTurnId,
       });
@@ -331,7 +331,7 @@ export function createSession(deps: SessionDeps): Session {
         type: 'approval_decided',
         kind: req.kind,
         subject: req.subject,
-        scope: req.scope,
+        scope: approvalScopes(req).join(', '),
         detail: req.detail,
         granted,
         source,

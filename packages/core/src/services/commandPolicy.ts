@@ -43,7 +43,7 @@
  */
 
 import type { ShellDialect } from './researchShell';
-import { AWK_FAMILY, SED_FAMILY, awkRefusal, sedRefusal } from './filterPrograms';
+import { AWK_FAMILY, SED_FAMILY, awkProgramArgs, awkRefusal, sedProgramArgs, sedRefusal } from './filterPrograms';
 
 /**
  * `env` is deliberately absent. Given a command it is a wrapper, classified by
@@ -1364,19 +1364,128 @@ function looksLikePath(arg: string): boolean {
  */
 export function pathLikeArgs(command: string, opts: CommandPolicyOptions = {}): string[] {
   const dialect = dialectFor(opts.dialect);
-  return lexAll(command, dialect).segments.flatMap((seg) => [...seg.args, ...seg.inputs].flatMap((a) => {
-    // `--flag=value` is excluded by the leading-dash filter but its value can
-    // still name an external path, so split it and check the value.
-    if (a.startsWith('--') && a.includes('=')) {
-      const v = a.slice(a.indexOf('=') + 1);
-      return looksLikePath(v) ? [v] : [];
+  return lexAll(command, dialect).segments.flatMap((seg) => {
+    const patterns = patternArgs(seg);
+    return [...seg.args.filter((_, i) => !patterns.has(i)), ...seg.inputs].flatMap(pathIn);
+  });
+}
+
+function pathIn(a: string): string[] {
+  // `--flag=value` is excluded by the leading-dash filter but its value can
+  // still name an external path, so split it and check the value.
+  if (a.startsWith('--') && a.includes('=')) {
+    const v = a.slice(a.indexOf('=') + 1);
+    return looksLikePath(v) ? [v] : [];
+  }
+  if (a.startsWith('-')) {
+    const glued = gluedValue(a);
+    return glued ? [glued] : [];
+  }
+  return looksLikePath(a) ? [a] : [];
+}
+
+/**
+ * Where a search binary takes a pattern rather than a file. A pattern is
+ * matched against text or names and never opened, so it is no reason to ask
+ * about leaving the workspace — `grep "/api/users" src` used to.
+ */
+interface PatternSpec {
+  /** Flags whose value is a pattern. */
+  flags: string[];
+  /** The first operand is the pattern, unless one of these flags was given. */
+  leadingUnless?: string[];
+  /** The leading-operand rule applies only under this subcommand. */
+  subcommand?: string;
+  /**
+   * Flags the binary's shared flag set reads as taking a value but which take
+   * none under {@link subcommand}: `git log -n 5`, but `git grep -n PATTERN`.
+   */
+  subcommandBooleans?: string[];
+}
+
+const PATTERN_ARGS: Record<string, PatternSpec> = {
+  grep: { flags: ['-e', '--regexp'], leadingUnless: ['-e', '--regexp', '-f', '--file'] },
+  rg: {
+    flags: ['-e', '--regexp', '-g', '--glob', '--iglob', '-r', '--replace'],
+    leadingUnless: ['-e', '--regexp', '-f', '--file', '--files', '--type-list'],
+  },
+  git: {
+    flags: ['-e', '-S', '-G', '--grep', '--author', '--committer'],
+    leadingUnless: ['-e', '-f'],
+    subcommand: 'grep',
+    subcommandBooleans: ['-n', '-W', '-L', '-x', '-G'],
+  },
+  find: {
+    flags: ['-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename', '-regex', '-iregex',
+      '-lname', '-ilname'],
+  },
+};
+
+/**
+ * Indices of `seg.args` that are patterns or filter programs, not paths.
+ *
+ * Fails closed: a flag outside the binary's declared set might take the next
+ * token or not, so past one nothing is called a pattern. Mistaking a path for a
+ * pattern would skip confinement; the reverse costs one prompt.
+ */
+function patternArgs(seg: Segment): Set<number> {
+  if (SED_FAMILY.includes(seg.binary)) return new Set(sedProgramArgs(seg.binary, seg.args));
+  if (AWK_FAMILY.includes(seg.binary)) return new Set(awkProgramArgs(seg.binary, seg.args));
+  const rule = PATTERN_ARGS[seg.binary];
+  const spec = FLAG_POLICY[seg.binary];
+  if (!rule || !spec) return new Set();
+
+  const booleans = new Set([...(spec.booleans ?? []), ...UNIVERSAL_FLAGS]);
+  const values = new Set(spec.values ?? []);
+  const found = new Set<number>();
+  const operands: number[] = [];
+  let patternGiven = false;
+
+  for (let i = 0; i < seg.args.length; i++) {
+    const token = seg.args[i];
+    if (token === '--' && !spec.expressionArgs) {
+      for (let j = i + 1; j < seg.args.length; j++) operands.push(j);
+      break;
     }
-    if (a.startsWith('-')) {
-      const glued = gluedValue(a);
-      return glued ? [glued] : [];
-    }
-    return looksLikePath(a) ? [a] : [];
-  }));
+    if (!/^-./.test(token)) { operands.push(i); continue; }
+
+    const inSubcommand = rule.subcommand !== undefined && seg.args[operands[0]] === rule.subcommand;
+    if (inSubcommand && rule.subcommandBooleans?.includes(token)) continue;
+    const shape = matchFlag(spec, booleans, values, token);
+    if (shape === undefined) return new Set();
+    const flag = valueFlagIn(token, booleans, values) ?? flagLabel(token);
+    if (rule.leadingUnless?.includes(flag)) patternGiven = true;
+    const consumes = shape === 'value' && takesNextToken(seg.args[i + 1]);
+    if (rule.flags.includes(flag) && values.has(flag)) found.add(consumes ? i + 1 : i);
+    if (consumes) i++;
+  }
+
+  if (rule.leadingUnless && !patternGiven) {
+    const leading = rule.subcommand
+      ? seg.args[operands[0]] === rule.subcommand ? operands[1] : undefined
+      : operands[0];
+    if (leading !== undefined) found.add(leading);
+  }
+  return found;
+}
+
+/**
+ * The value-taking flag a token spells, when it spells one: `--regexp=x`,
+ * `-e`, or the first value letter of a cluster such as `-ie/api/`, which
+ * takes the rest of the token or, at its end, the next one.
+ */
+function valueFlagIn(token: string, booleans: Set<string>, values: Set<string>): string | undefined {
+  if (token.startsWith('--')) {
+    const name = flagLabel(token);
+    return values.has(name) ? name : undefined;
+  }
+  if (values.has(token)) return token;
+  for (let i = 1; i < token.length; i++) {
+    const short = `-${token[i]}`;
+    if (booleans.has(short)) continue;
+    return values.has(short) ? short : undefined;
+  }
+  return undefined;
 }
 
 /**

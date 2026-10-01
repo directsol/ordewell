@@ -50,3 +50,14 @@ export function grantScopeFor(abs: string, kind: 'file' | 'directory'): string {
   if (parent === path.parse(abs).root) return path.join(abs, '*');
   return path.join(parent, '*');
 }
+
+/**
+ * Device files that read nothing and write nowhere but the command's own
+ * streams. `curl -o /dev/null` discards a response; it is not a reach outside
+ * the workspace, and asking about it taught people to approve `/dev/*`.
+ */
+const INERT_DEVICES = ['/dev/null', '/dev/stdin', '/dev/stdout', '/dev/stderr'];
+
+export function isInertDevice(abs: string): boolean {
+  return INERT_DEVICES.includes(abs);
+}

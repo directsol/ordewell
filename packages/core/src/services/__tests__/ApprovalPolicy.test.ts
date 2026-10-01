@@ -173,6 +173,66 @@ describe('ApprovalPolicy', () => {
   });
 });
 
+// One command can need its own approval and an outside path at once. It asks
+// once for both, and each scope is remembered on its own.
+describe('ApprovalPolicy — one request covering several scopes', () => {
+  const both = (): ApprovalRequest => req({ subject: 'npm --prefix /opt/app test', scope: 'npm', scopes: ['npm', '/opt/*'] });
+
+  it('asks once, then remembers every scope it granted', async () => {
+    const ask = vi.fn().mockResolvedValue(true);
+    const policy = new ApprovalPolicy({ ask });
+
+    expect(await policy.request(both())).toBe(true);
+    expect(await policy.request(req({ kind: 'external_path', subject: '/opt/x', scope: '/opt/*' }))).toBe(true);
+    expect(await policy.request(req({ subject: 'npm ci', scope: 'npm' }))).toBe(true);
+    expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks only about the scopes not already granted', async () => {
+    const ask = vi.fn().mockResolvedValue(true);
+    const policy = new ApprovalPolicy({ ask, preApproved: ['/opt/*'] });
+
+    expect(await policy.request(both())).toBe(true);
+    expect(ask).toHaveBeenCalledWith(expect.objectContaining({ scope: 'npm' }));
+    expect(ask.mock.calls[0][0].scopes).toBeUndefined();
+  });
+
+  it('does not ask when every scope is already granted', async () => {
+    const ask = vi.fn();
+    const policy = new ApprovalPolicy({ ask, preApproved: ['npm', '/opt/*'] });
+
+    expect(await policy.request(both())).toBe(true);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it('denies without asking when one of its scopes was refused before', async () => {
+    const ask = vi.fn().mockResolvedValueOnce(false);
+    const policy = new ApprovalPolicy({ ask });
+
+    expect(await policy.request(req({ kind: 'external_path', subject: '/opt/x', scope: '/opt/*' }))).toBe(false);
+    expect(await policy.request(both())).toBe(false);
+    expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  // A "no" to the pair may have been about either half, so it does not refuse
+  // each half on its own — but the same pair is not asked twice.
+  it('remembers a denial for the pair, not for each scope in it', async () => {
+    const ask = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const policy = new ApprovalPolicy({ ask });
+
+    expect(await policy.request(both())).toBe(false);
+    expect(await policy.request(both())).toBe(false);
+    expect(await policy.request(req({ subject: 'npm ci', scope: 'npm' }))).toBe(true);
+    expect(ask).toHaveBeenCalledTimes(2);
+  });
+
+  it('lists every scope it granted', async () => {
+    const policy = new ApprovalPolicy({ ask: vi.fn().mockResolvedValue(true) });
+    await policy.request(both());
+    expect(policy.grantedScopes()).toEqual(['npm', '/opt/*']);
+  });
+});
+
 describe('PendingApprovals', () => {
   it('announces a request and resolves it when a surface answers', async () => {
     const onRequest = vi.fn();

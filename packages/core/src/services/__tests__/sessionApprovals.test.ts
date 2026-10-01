@@ -215,39 +215,37 @@ describe('Session approval flow', () => {
   // T1: a single bash command touching two external directories prompts once
   // per distinct scope — approving the first does not carry the grant to the
   // second.
-  it('prompts per distinct external path in one bash command, not just the first', async () => {
+  it('asks once about every distinct external path in one bash command', async () => {
     const { session, fsAdapter, messages } = sessionWithProbe();
 
     const pending = fsAdapter.bash('cat /etc/passwd /tmp/dump/secret.log');
-    // First escaping path → /etc/*.
     await vi.waitFor(() => expect(approvalRequests(messages)).toHaveLength(1));
-    expect(approvalRequests(messages)[0].scope).toBe('/etc/*');
+    expect(approvalRequests(messages)[0].scope).toBe('/etc/*, /tmp/dump/*');
     session.resolveApproval(approvalRequests(messages)[0].id, true);
-
-    // Granting /etc only does not satisfy /tmp/dump — a second prompt follows.
-    await vi.waitFor(() => expect(approvalRequests(messages)).toHaveLength(2));
-    expect(approvalRequests(messages)[1].scope).toBe('/tmp/dump/*');
-    session.resolveApproval(approvalRequests(messages)[1].id, true);
 
     const result = await pending;
     expect(result.success).toBe(true);
+    expect(approvalRequests(messages)).toHaveLength(1);
     expect(fsAdapter.bashCalls).toEqual(['cat /etc/passwd /tmp/dump/secret.log']);
   });
 
-  it('denies a multi-path bash command when any one path is refused', async () => {
+  it('asks only about the path not granted yet, so one grant never covers another', async () => {
     const { session, fsAdapter, messages } = sessionWithProbe();
 
-    const pending = fsAdapter.bash('cat /etc/passwd /tmp/dump/secret.log');
+    const first = fsAdapter.bash('cat /etc/passwd');
     await vi.waitFor(() => expect(approvalRequests(messages)).toHaveLength(1));
     session.resolveApproval(approvalRequests(messages)[0].id, true);
+    await first;
 
+    const pending = fsAdapter.bash('cat /etc/passwd /tmp/dump/secret.log');
     await vi.waitFor(() => expect(approvalRequests(messages)).toHaveLength(2));
+    expect(approvalRequests(messages)[1].scope).toBe('/tmp/dump/*');
     session.resolveApproval(approvalRequests(messages)[1].id, false);
 
     const result = await pending;
     expect(result.success).toBe(false);
     expect(result.output).toContain('not approved');
-    expect(fsAdapter.bashCalls).toEqual([]);
+    expect(fsAdapter.bashCalls).toEqual(['cat /etc/passwd']);
   });
 
   it('denies without asking when the operator configured deny mode', async () => {

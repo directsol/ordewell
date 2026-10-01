@@ -27,6 +27,12 @@ export interface ApprovalRequest {
    * second file from an already-approved directory does not prompt again.
    */
   scope: string;
+  /**
+   * Every scope one answer settles, when a command needs more than one — its
+   * own and each outside directory it touches — so it prompts once rather than
+   * once per scope. `scope` is the first. Absent means `scope` alone.
+   */
+  scopes?: string[];
   /** One-line context for the prompt. */
   detail?: string;
   /** The task whose runner asked; absent for the planner's own requests. */
@@ -55,6 +61,10 @@ export function toApprovalDecision(answer: ApprovalAnswer): ApprovalDecision {
 
 export function isGranted(decision: ApprovalDecision): boolean {
   return decision.decision !== 'deny';
+}
+
+export function approvalScopes(request: ApprovalRequest): string[] {
+  return request.scopes ?? [request.scope];
 }
 
 export function isRunnerApproval(request: ApprovalRequest): boolean {

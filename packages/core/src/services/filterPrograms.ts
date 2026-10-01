@@ -46,26 +46,52 @@ const SED_LONG_BOOLEANS = ['--quiet', '--silent', '--regexp-extended', '--separa
  * inspected, and either one refusing refuses.
  */
 export function sedRefusal(binary: string, args: string[]): string | undefined {
+  return readSed(binary, args).refusal;
+}
+
+/**
+ * Which of `args` are sed script text rather than files, for path confinement.
+ * The first operand counts only when no script came by flag anywhere: GNU reads
+ * it as a file then, and the file reading is the one confinement must assume.
+ */
+export function sedProgramArgs(binary: string, args: string[]): number[] {
+  return readSed(binary, args).programArgs;
+}
+
+interface FilterRead {
+  refusal?: string;
+  /** Indices into `args` holding program text. Empty when refused. */
+  programArgs: number[];
+}
+
+function refused(refusal: string): FilterRead {
+  return { refusal, programArgs: [] };
+}
+
+function readSed(binary: string, args: string[]): FilterRead {
   const scripts: string[] = [];
+  const scriptArgs: number[] = [];
   let scriptFlagSeen = false;
   let firstOperand: string | undefined;
+  let firstOperandArg = -1;
   let scriptFlagBeforeOperand = false;
-  const noteOperand = (token: string | undefined) => {
-    if (token === undefined || firstOperand !== undefined) return;
-    firstOperand = token;
+  const noteOperand = (at: number) => {
+    if (args[at] === undefined || firstOperand !== undefined) return;
+    firstOperand = args[at];
+    firstOperandArg = at;
     scriptFlagBeforeOperand = scriptFlagSeen;
   };
-  const fromFile = (flag: string) =>
-    `"${binary} ${flag}" reads its script from a file this classifier cannot inspect. ${INSPECT_OR_TASK}`;
-  const inPlace = (flag: string) =>
-    `"${binary} ${flag}" edits files in place. You are a read-only planner — describe the change as a task instead.`;
-  const unknown = (flag: string) =>
-    `"${flag}" is not a flag this classifier knows on "${binary}", so it cannot tell which argument is the script. Re-run without it.`;
+  const fromFile = (flag: string): FilterRead => refused(
+    `"${binary} ${flag}" reads its script from a file this classifier cannot inspect. ${INSPECT_OR_TASK}`);
+  const inPlace = (flag: string): FilterRead => refused(
+    `"${binary} ${flag}" edits files in place. You are a read-only planner — describe the change as a task instead.`);
+  const unknown = (flag: string): FilterRead => refused(
+    `"${flag}" is not a flag this classifier knows on "${binary}", so it cannot tell which argument is the script. Re-run without it.`);
 
   for (let i = 0; i < args.length; i++) {
     const token = args[i];
-    if (token === '--') { noteOperand(args[i + 1]); break; }
-    if (!/^-./.test(token)) { noteOperand(token); continue; }
+    if (token === '--') { noteOperand(i + 1); break; }
+    if (!/^-./.test(token)) { noteOperand(i); continue; }
 
     if (token.startsWith('--')) {
       const eq = token.indexOf('=');
@@ -74,6 +100,7 @@ export function sedRefusal(binary: string, args: string[]): string | undefined {
         const script = eq > 0 ? token.slice(eq + 1) : args[++i];
         if (script === undefined) return unknown(token);
         scripts.push(script);
+        scriptArgs.push(i);
         scriptFlagSeen = true;
       } else if (name === '--file') {
         return fromFile(name);
@@ -96,6 +123,7 @@ export function sedRefusal(binary: string, args: string[]): string | undefined {
         const script = j + 1 < token.length ? token.slice(j + 1) : args[++i];
         if (script === undefined) return unknown(token);
         scripts.push(script);
+        scriptArgs.push(i);
         scriptFlagSeen = true;
         break;
       }
@@ -107,8 +135,14 @@ export function sedRefusal(binary: string, args: string[]): string | undefined {
     }
   }
 
+  const programArgs = scripts.length === 0 && firstOperand !== undefined ? [firstOperandArg] : scriptArgs;
   if (firstOperand !== undefined && (scripts.length === 0 || !scriptFlagBeforeOperand)) scripts.push(firstOperand);
-  if (scripts.length === 0) return undefined;
+  if (scripts.length === 0) return { programArgs };
+  const refusal = sedRefusalFor(binary, scripts);
+  return refusal ? refused(refusal) : { programArgs };
+}
+
+function sedRefusalFor(binary: string, scripts: string[]): string | undefined {
 
   // GNU and BSD both join several scripts with newlines before parsing, so an
   // `a\` in one `-e` continues into the next.
@@ -307,9 +341,19 @@ const AWK_CODE_FILE_FLAGS = ['-f', '-E', '-i', '-l', '--file', '--exec', '--incl
  * after it is an option.
  */
 export function awkRefusal(binary: string, args: string[]): string | undefined {
+  return readAwk(binary, args).refusal;
+}
+
+/** Which of `args` are awk program text rather than files, for path confinement. */
+export function awkProgramArgs(binary: string, args: string[]): number[] {
+  return readAwk(binary, args).programArgs;
+}
+
+function readAwk(binary: string, args: string[]): FilterRead {
   const programs: string[] = [];
-  const unknown = (flag: string) =>
-    `"${flag}" is not a flag this classifier knows on "${binary}", so it cannot tell which argument is the program. Re-run without it.`;
+  const programArgs: number[] = [];
+  const unknown = (flag: string): FilterRead => refused(
+    `"${flag}" is not a flag this classifier knows on "${binary}", so it cannot tell which argument is the program. Re-run without it.`);
 
   let i = 0;
   for (; i < args.length; i++) {
@@ -323,20 +367,28 @@ export function awkRefusal(binary: string, args: string[]): string | undefined {
     const glued = long ? (eq > 0 ? token.slice(eq + 1) : '') : token.slice(2);
 
     if (AWK_CODE_FILE_FLAGS.includes(name)) {
-      return `"${binary} ${name}" loads program code from a file this classifier cannot inspect. ${INSPECT_OR_TASK}`;
+      return refused(`"${binary} ${name}" loads program code from a file this classifier cannot inspect. ${INSPECT_OR_TASK}`);
     }
     if (name === '-e' || name === '--source') {
       const program = glued || args[++i];
       if (program === undefined) return unknown(token);
       programs.push(program);
+      programArgs.push(i);
     } else if (['-F', '-v', '--field-separator', '--assign'].includes(name)) {
       if (!glued) i++;
     } else if (!(long ? AWK_LONG_BOOLEANS.includes(name) && (eq < 0 || name === '--lint') : AWK_SHORT_BOOLEANS.includes(token))) {
       return unknown(long ? name : token);
     }
   }
-  if (programs.length === 0 && i < args.length) programs.push(args[i]);
+  if (programs.length === 0 && i < args.length) {
+    programs.push(args[i]);
+    programArgs.push(i);
+  }
+  const refusal = awkRefusalFor(binary, programs);
+  return refusal ? refused(refusal) : { programArgs };
+}
 
+function awkRefusalFor(binary: string, programs: string[]): string | undefined {
   for (const program of programs) {
     switch (awkProgramHazard(program)) {
       case undefined: continue;

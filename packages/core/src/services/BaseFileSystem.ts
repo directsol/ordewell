@@ -10,7 +10,7 @@ import {
 import { IApproval, DENY_ALL } from '../interfaces/IApproval';
 import { classifyCommand, pathLikeArgs } from './commandPolicy';
 import { resolveResearchShell, researchShellWarning, type ResearchShell } from './researchShell';
-import { resolveWithin, grantScopeFor } from './pathScope';
+import { resolveWithin, grantScopeFor, isInertDevice } from './pathScope';
 import { definitionPattern, referencePattern, languageForId, includeGlobFor } from './symbolPatterns';
 
 export { AUTO_COMMANDS, GIT_READONLY_SUBCOMMANDS, REFUSED_COMMANDS, classifyCommand, pathLikeArgs } from './commandPolicy';
@@ -176,40 +176,30 @@ export abstract class BaseFileSystem implements IFileSystem {
    * Path confinement for `bash`: an `auto`-tier binary (`cat`, `find`, `rg`, …)
    * is only auto because *reading* is read-only — its arguments can still
    * name a path outside the workspace, which is the exact escape confinement
-   * closes for `readFile`/`glob`/`grep`. Each escaping path needs its own
-   * approval (scoped to its containing directory); approving one does not
-   * approve another, so a single command touching two external dirs prompts
-   * once per distinct scope rather than carrying the first grant to the rest.
+   * closes for `readFile`/`glob`/`grep`. Each escaping path is scoped to its
+   * containing directory, one entry per distinct scope.
    */
-  private async authorizeCommandPaths(command: string): Promise<ToolOutcome | null> {
+  private outsidePaths(command: string): Array<{ abs: string; scope: string }> {
     const root = this.getWorkspaceRoot();
-    const escaping = pathLikeArgs(command, { dialect: this.researchShell.dialect })
-      .filter((p) => !resolveWithin(root, p).inside);
-    if (escaping.length === 0) return null;
-
-    for (const p of escaping) {
-      const abs = resolveWithin(root, p).abs;
-      const granted = await this.approval.request({
-        kind: 'external_path',
-        subject: abs,
-        scope: grantScopeFor(abs, 'file'),
-        detail: `Planner research wants to run "${command}", which touches ${abs}, outside the workspace (${root}).`,
-      });
-      if (!granted) {
-        return {
-          success: false,
-          output: `Access denied: "${command}" touches ${abs}, outside the workspace root (${root}), and was not approved. Keep research inside the workspace, or ask the user to approve this location.`,
-          truncated: false,
-        };
-      }
+    const found = new Map<string, string>();
+    for (const p of pathLikeArgs(command, { dialect: this.researchShell.dialect })) {
+      const { abs, inside } = resolveWithin(root, p);
+      if (inside || isInertDevice(abs)) continue;
+      const scope = grantScopeFor(abs, 'file');
+      if (!found.has(scope)) found.set(scope, abs);
     }
-    return null;
+    return [...found].map(([scope, abs]) => ({ abs, scope }));
   }
 
   /**
    * Three tiers (see `commandPolicy.ts`): read-only inspection runs silently,
    * anything else asks once and is remembered, and writes are refused outright
    * because a planner that mutates the workspace has stopped being a planner.
+   *
+   * Everything a command needs — its own approval and every outside directory
+   * it touches — is one request, so one command is one prompt. Each scope is
+   * still granted separately: approving the pair does not approve another
+   * directory the next command names.
    */
   async bash(command: string, signal?: AbortSignal): Promise<ToolOutcome> {
     const { tier, scope, reason } = classifyCommand(command, { dialect: this.researchShell.dialect });
@@ -218,20 +208,27 @@ export abstract class BaseFileSystem implements IFileSystem {
       return { success: false, output: `Command refused: ${reason}`, truncated: false };
     }
 
-    const pathDenial = await this.authorizeCommandPaths(command);
-    if (pathDenial) return pathDenial;
-
-    if (tier === 'ask') {
+    const outside = this.outsidePaths(command);
+    const asks = tier === 'ask';
+    if (asks || outside.length > 0) {
+      const root = this.getWorkspaceRoot();
+      const scopes = [...(asks ? [scope] : []), ...outside.map((o) => o.scope)];
+      const touched = outside.map((o) => o.abs).join(', ');
       const granted = await this.approval.request({
-        kind: 'shell_command',
-        subject: command,
-        scope,
-        detail: `Planner research wants to run: ${command}`,
+        kind: asks ? 'shell_command' : 'external_path',
+        subject: asks ? command : outside[0].abs,
+        scope: scopes[0],
+        ...(scopes.length > 1 ? { scopes } : {}),
+        detail: outside.length > 0
+          ? `Planner research wants to run "${command}", which touches ${touched}, outside the workspace (${root}).`
+          : `Planner research wants to run: ${command}`,
       });
       if (!granted) {
         return {
           success: false,
-          output: `Command not approved: ${command}\nIt is outside the auto-allowed read-only set (${scope}). Continue with the read-only research tools, or ask the user to approve it.`,
+          output: outside.length > 0
+            ? `Access denied: "${command}" touches ${touched}, outside the workspace root (${root}), and was not approved. Keep research inside the workspace, or ask the user to approve this location.`
+            : `Command not approved: ${command}\nIt is outside the auto-allowed read-only set (${scope}). Continue with the read-only research tools, or ask the user to approve it.`,
           truncated: false,
         };
       }

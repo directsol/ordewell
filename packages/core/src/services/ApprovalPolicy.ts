@@ -1,4 +1,4 @@
-import type { IApproval, ApprovalRequest } from '../interfaces/IApproval';
+import { approvalScopes, type IApproval, type ApprovalRequest } from '../interfaces/IApproval';
 
 /**
  * Decides whether one out-of-envelope capability may run, and remembers the
@@ -66,27 +66,38 @@ export class ApprovalPolicy implements IApproval {
       return granted;
     };
 
-    if (this.preApproved.some((p) => scopeMatches(p, req.scope))) return decide(true, 'pre-approved');
-    if (this.granted.has(req.scope)) return decide(true, 'remembered');
-    if (this.refused.has(req.scope)) return decide(false, 'remembered');
+    const scopes = approvalScopes(req);
+    // A denial of several scopes is keyed on all of them together: the "no"
+    // may have been about any one, so it refuses none of them on its own.
+    const key = scopes.join('\n');
+    if (scopes.some((s) => this.refused.has(s)) || this.refused.has(key)) return decide(false, 'remembered');
+    const open = scopes.filter((s) => !this.granted.has(s) && !this.preApproved.some((p) => scopeMatches(p, s)));
+    if (open.length === 0) {
+      return decide(true, scopes.every((s) => this.granted.has(s)) ? 'remembered' : 'pre-approved');
+    }
 
-    if (this.mode === 'allow') { this.granted.add(req.scope); return decide(true, 'mode'); }
-    if (this.mode === 'deny') { this.refused.add(req.scope); return decide(false, 'mode'); }
+    if (this.mode === 'allow') { open.forEach((s) => this.granted.add(s)); return decide(true, 'mode'); }
+    if (this.mode === 'deny') { this.refused.add(key); return decide(false, 'mode'); }
     if (!this.asker) return decide(false, 'no-channel');
 
-    const existing = this.inFlight.get(req.scope);
+    const openKey = open.join('\n');
+    const existing = this.inFlight.get(openKey);
     if (existing) return decide(await existing, 'asked');
 
     const gen = this.generation;
-    const pending = this.asker(req)
+    const asked: ApprovalRequest = { ...req, scope: open[0], scopes: open.length > 1 ? open : undefined };
+    const pending = this.asker(asked)
       .catch(() => false)
-      .finally(() => { if (this.generation === gen) this.inFlight.delete(req.scope); });
-    this.inFlight.set(req.scope, pending);
+      .finally(() => { if (this.generation === gen) this.inFlight.delete(openKey); });
+    this.inFlight.set(openKey, pending);
 
     const answer = await pending;
     // A denial is remembered too, so a model that retries the same blocked
     // lookup burns one tool round instead of re-prompting the user each time.
-    if (this.generation === gen) (answer ? this.granted : this.refused).add(req.scope);
+    if (this.generation === gen) {
+      if (answer) open.forEach((s) => this.granted.add(s));
+      else this.refused.add(key);
+    }
     return decide(answer, 'asked');
   }
 

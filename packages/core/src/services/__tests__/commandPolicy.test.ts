@@ -973,6 +973,59 @@ describe('pathLikeArgs — path arguments an auto-tier binary could still read o
   });
 });
 
+// A search pattern or filter program that starts with `/` was read as a file
+// outside the workspace, so `grep "/api/users" src` prompted for `/api/users`.
+describe('pathLikeArgs — patterns and programs are not paths', () => {
+  it('skips the leading pattern of a search, but not the files searched', () => {
+    expect(pathLikeArgs('grep -rn "/api/users" src')).toEqual([]);
+    expect(pathLikeArgs('grep -A 3 /api/ /etc/hosts')).toEqual(['/etc/hosts']);
+    expect(pathLikeArgs('grep -- /api/ src')).toEqual([]);
+    expect(pathLikeArgs('rg "/v1/" .')).toEqual([]);
+  });
+
+  it('skips a pattern given by flag, and then reads every operand as a file', () => {
+    expect(pathLikeArgs('grep -e /api/ /etc/hosts')).toEqual(['/etc/hosts']);
+    expect(pathLikeArgs('grep -ie/api/ src')).toEqual([]);
+    expect(pathLikeArgs('grep --regexp=/api/ src')).toEqual([]);
+    expect(pathLikeArgs("rg -g '/api/**' -e x src")).toEqual([]);
+  });
+
+  it('still confines a pattern file and the files a listing names', () => {
+    expect(pathLikeArgs('grep -f /etc/patterns src')).toEqual(['/etc/patterns']);
+    expect(pathLikeArgs('rg --files /etc')).toEqual(['/etc']);
+  });
+
+  it('skips git search patterns', () => {
+    expect(pathLikeArgs('git grep -n "/api/"')).toEqual([]);
+    expect(pathLikeArgs('git log --grep=/fix/ -S /api/')).toEqual([]);
+    expect(pathLikeArgs('git -C /etc grep x')).toEqual(['/etc']);
+  });
+
+  it('skips find name patterns, but not its starting points', () => {
+    expect(pathLikeArgs("find . -regex '/a/.*' -o -path '/b/*'")).toEqual([]);
+    expect(pathLikeArgs('find /etc -name x')).toEqual(['/etc']);
+    expect(pathLikeArgs('find . -newer /etc/hosts')).toEqual(['/etc/hosts']);
+  });
+
+  it('skips sed scripts and awk programs, but not their input files', () => {
+    expect(pathLikeArgs("sed -n '/start/,/end/p' f")).toEqual([]);
+    expect(pathLikeArgs("sed -e '/x/d' /etc/hosts")).toEqual(['/etc/hosts']);
+    expect(pathLikeArgs("awk -F: '/error/ {print $1}' /var/log/x")).toEqual(['/var/log/x']);
+  });
+
+  // GNU sed reads every operand as a file once a script came by flag, wherever
+  // the flag sits.
+  it('reads an operand as a file when a sed script flag follows it', () => {
+    expect(pathLikeArgs('sed /etc/passwd -e p')).toEqual(['/etc/passwd']);
+  });
+
+  // An unknown flag might consume the next token or not, so nothing after the
+  // binary can be called a pattern with certainty.
+  it('treats every argument as a possible path past a flag it does not know', () => {
+    expect(pathLikeArgs('grep --unknown /api/ src')).toEqual(['/api/']);
+  });
+});
+
 /**
  * The cmd.exe dialect. Every case here was a wrong answer before the lexer knew
  * which interpreter it was describing — and wrong in both directions: escapes

@@ -193,3 +193,31 @@ allow for this task, or deny with a note — and a boolean still answers a
 planner prompt exactly as before. A turn's abort and a plan change deny only
 the planner's own prompts; a runner's is denied when its attempt's runner
 stops.
+
+## Amendment (2026-10-01) — patterns are not paths, and one command is one prompt
+
+Path confinement read every `/`-leading argument as a file, so a search
+pattern (`grep "/api/users" src`), a `find -name`/`-path`/`-regex` value, a
+`git log --grep`/`-S`/`-G` value, or a sed script or awk program prompted to
+leave the workspace, and `curl -o /dev/null` asked for `/dev/*`. Each was a
+prompt about nothing, and teaching people to approve `/dev/*` or `/api/*` to
+get past them wears down the prompts that matter.
+
+- **Patterns.** `pathLikeArgs` skips the arguments that are patterns or
+  programs: the leading pattern of `grep`/`rg`/`git grep` unless a flag
+  supplied one, the values of their pattern flags, `find`'s name tests, and the
+  script or program `sedRefusal`/`awkRefusal` already locate. It fails closed:
+  past a flag the binary's set does not declare, nothing is called a pattern,
+  and a sed operand counts as a script only when no `-e` appears anywhere,
+  because GNU sed then reads it as a file.
+- **Inert devices.** `/dev/null`, `/dev/stdin`, `/dev/stdout` and
+  `/dev/stderr` are not outside the workspace. The rest of `/dev` still asks.
+- **One prompt per command.** A command's own approval and every outside
+  directory it touches are one `ApprovalRequest`, with `scopes` listing each.
+  The policy asks only about the scopes not already granted and grants each one
+  separately, so a later command naming another directory still asks. A denial
+  is remembered for that set of scopes together, not for each scope, since the
+  answer may have been about any one of them.
+
+None of this changes what is reachable. Every path argument is still confined,
+and every grant still covers only its own scope.

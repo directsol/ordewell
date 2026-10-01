@@ -249,6 +249,65 @@ describe('BaseFileSystem — bash tiers', () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it('does not ask about the null device or the standard streams', async () => {
+    const fs = new TestFileSystem();
+    const request = vi.fn();
+    fs.setApproval({ request });
+
+    const result = await fs.bash('cat /dev/null /dev/stdin');
+
+    expect(result.success).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('still asks about the rest of /dev', async () => {
+    const fs = new TestFileSystem();
+    const request = vi.fn().mockResolvedValue(false);
+    fs.setApproval({ request });
+
+    await fs.bash('cat /dev/sda');
+
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ kind: 'external_path', subject: '/dev/sda' }));
+  });
+
+  it('asks once for a command that needs approval and also leaves the workspace', async () => {
+    const fs = new TestFileSystem();
+    const request = vi.fn().mockResolvedValue(true);
+    fs.setApproval({ request });
+
+    const result = await fs.bash('npm --prefix /opt/app test');
+
+    expect(result.success).toBe(true);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'shell_command',
+      subject: 'npm --prefix /opt/app test',
+      scopes: ['npm', '/opt/*'],
+    }));
+  });
+
+  it('asks once for a command that reads from two places outside the workspace', async () => {
+    const fs = new TestFileSystem();
+    const request = vi.fn().mockResolvedValue(true);
+    fs.setApproval({ request });
+
+    await fs.bash('cat /etc/hosts /opt/app/x /etc/hostname');
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ kind: 'external_path', scopes: ['/etc/*', '/opt/app/*'] }));
+  });
+
+  it('asks a lone outside path with its single scope, as before', async () => {
+    const fs = new TestFileSystem();
+    const request = vi.fn().mockResolvedValue(true);
+    fs.setApproval({ request });
+
+    await fs.bash('cat /etc/hosts');
+
+    expect(request.mock.calls[0][0]).toEqual(expect.objectContaining({ scope: '/etc/*' }));
+    expect(request.mock.calls[0][0].scopes).toBeUndefined();
+  });
+
   it('confines an ask-tier command whose arguments also escape the workspace', async () => {
     const fs = new TestFileSystem();
     const request = vi.fn().mockResolvedValue(false);
@@ -257,7 +316,8 @@ describe('BaseFileSystem — bash tiers', () => {
     const result = await fs.bash('npm --prefix /etc test');
 
     expect(result.success).toBe(false);
-    expect(request).toHaveBeenCalledWith(expect.objectContaining({ kind: 'external_path' }));
+    expect(result.output).toContain('outside the workspace root');
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ scopes: ['npm', '/etc/*'] }));
     expect(fs.bashCalls).toEqual([]);
   });
 });
