@@ -1,9 +1,10 @@
 import type { ChildProcess } from 'child_process';
-import { augmentedPath, withPath } from '../../utils/shellPath';
+import { augmentedPath } from '../../utils/shellPath';
 import { planDirectLaunch, isExecutableResolved, ExecutableNotFoundError } from '../../utils/launch';
 import { assertWorkspaceExists } from '../../utils/workspace';
 import { killTree } from '../../utils/processTree';
 import { workspaceEnvOf } from '../workspaceEnv';
+import { runnerEnv } from './runnerEnv';
 import { LineBuffer, type AgentAdapter, type AgentEvent, type AgentProcessDeps, type AgentStartOptions } from './AgentAdapter';
 
 /** Stderr kept for the failure message; a dying CLI's last words are the only useful diagnostic. */
@@ -106,7 +107,7 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
     const PATH = await resolvePath();
 
     const workspace = await (this.deps.workspaceEnv ?? workspaceEnvOf)(opts.cwd);
-    this.spawnEnv = withPath(process.env, PATH, { ...workspace, ...spec.env });
+    this.spawnEnv = runnerEnv(PATH, { ...workspace, ...spec.env });
     // On POSIX this hands back `spec` untouched; on Windows it resolves the
     // agent's `.exe` (or routes its `.cmd` shim through cmd.exe), because
     // CreateProcess performs no PATHEXT lookup of its own.
@@ -145,6 +146,10 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
     this.process.stderr?.on('data', (chunk: Buffer) => {
       this.stderrTail = (this.stderrTail + chunk.toString()).slice(-STDERR_TAIL_CHARS);
     });
+    // A write racing the process's death (a turn, an interrupt, a permission
+    // answer) fails with EPIPE asynchronously; unheard, it crashes the host.
+    // The exit path already reports the death, with its stderr tail.
+    this.process.stdin?.on('error', () => {});
     this.process.on('exit', (code, signal) => { this.exited = { code, signal }; this.markEnded?.(); });
     this.process.on('error', (err) => {
       this.stderrTail = (this.stderrTail + `\n${err.message}`).slice(-STDERR_TAIL_CHARS);

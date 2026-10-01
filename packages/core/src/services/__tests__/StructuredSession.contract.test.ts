@@ -406,7 +406,7 @@ describe('interrupting a turn', () => {
     expect(adapters).toHaveLength(2);
     expect(adapters[1].starts[0]).toMatchObject({
       kind: 'task', cwd: '/repo', mode: 'acceptEdits', model: 'sonnet', resumeSessionId: 'sess-1',
-      flags: { permissionMode: 'acceptEdits', effortArgs: ['--thinking', 'enabled', '--effort', 'high'] },
+      flags: { permissionMode: 'acceptEdits', effort: 'high', modeSettings: {} },
     });
     expect(turn.session.turnState()).toBe('idle');
     expect(turn.exits).toEqual([]);
