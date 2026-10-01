@@ -181,7 +181,7 @@ describe('StructuredRunner spawn', () => {
 
   it('refuses a runner without a task-mode connector', async () => {
     const { runner, spawned } = harness([]);
-    await expect(runner.spawn(options({ runner: 'codex' }))).rejects.toBeInstanceOf(TaskModeUnsupportedError);
+    await expect(runner.spawn(options({ runner: 'opencode' }))).rejects.toBeInstanceOf(TaskModeUnsupportedError);
     expect(spawned.processes).toHaveLength(0);
     expect(runner.activeCount).toBe(0);
   });

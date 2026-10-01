@@ -149,3 +149,27 @@ runner's own TUI), #26 roll-ups, #31, and switching the default transport.
 - **Live-only task logs.** A reload would lose what the task did.
 - **Storing the log inside the session JSON.** That file is rewritten on every
   save; an append-only file per attempt is not.
+
+## Update 2026-10-01: Codex has a task-mode connector (#54)
+
+S3's "Claude Code alone" no longer holds: `CodexAdapter` drives tasks over
+`codex app-server`, and only OpenCode (#55) still falls back to the terminal.
+The decisions above carry over. Where Codex's protocol differs:
+
+- **Start and Continue.** `thread/start` takes the sandbox, approval policy and
+  reviewer from the manifest's per-mode settings. A resume sends
+  `thread/resume` with the full start params, because a bare thread id resets
+  the approval policy. If Codex refuses the resume, the attempt fails. No fresh
+  thread is started in its place (K1).
+- **Interrupt (M1).** `turn/interrupt` requires the turn id as well as the
+  thread id. An interrupt asked for before Codex has named the turn is sent
+  once it does.
+- **Approvals (A1).** Command, file-change and permission requests become
+  runner approvals. *Allow for this task* is `acceptForSession` or a
+  session-scoped grant. Codex's decline carries no message, so a deny note is
+  steered into the running turn. A yes-or-no MCP elicitation is an approval
+  too. One that asks for input is declined.
+- **Questions.** `item/tool/requestUserInput` is refused with an instruction to
+  ask in plain text and end the turn. The question then arrives as a turn
+  without the marker (W1). Any other request gets `-32601` at once, so a turn
+  never waits on Ordewell.

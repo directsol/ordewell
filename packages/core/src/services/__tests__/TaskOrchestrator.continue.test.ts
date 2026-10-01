@@ -202,9 +202,9 @@ describe('TaskOrchestrator.continueTask', () => {
 
   it('refuses a task whose runner now has no structured connector', async () => {
     const h = setup();
-    h.orchestrator.loadPlan([plan({ status: 'completed', assignedRunner: 'codex', transport: { kind: 'structured', nativeSessionId: 'sess-1' } })], ['codex']);
+    h.orchestrator.loadPlan([plan({ status: 'completed', assignedRunner: 'opencode', transport: { kind: 'structured', nativeSessionId: 'sess-1' } })], ['opencode']);
 
-    await expect(h.orchestrator.continueTask('t1', 'go on')).rejects.toThrow(/no structured connector for Codex yet.*Retry/);
+    await expect(h.orchestrator.continueTask('t1', 'go on')).rejects.toThrow(/no structured connector for OpenCode yet.*Retry/);
     expect(h.requests).toHaveLength(0);
   });
 });

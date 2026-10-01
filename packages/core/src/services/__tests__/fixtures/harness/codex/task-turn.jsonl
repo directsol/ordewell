@@ -1,0 +1,12 @@
+{"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"thr-task-1","status":{"type":"active","activeFlags":[]}}}
+{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr-task-1","turn":{"id":"turn-t1","status":"inProgress","items":[]}}}
+{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thr-task-1","turnId":"turn-t1","item":{"id":"item_c1","type":"commandExecution","command":"npm test","cwd":"/repo","status":"inProgress"}}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-task-1","turnId":"turn-t1","item":{"id":"item_c1","type":"commandExecution","command":"npm test","cwd":"/repo","status":"completed","exitCode":1,"aggregatedOutput":"1 failing\n"}}}
+{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thr-task-1","turnId":"turn-t1","item":{"id":"item_f1","type":"fileChange","status":"inProgress","changes":[{"path":"/repo/src/sum.ts","kind":{"type":"update","move_path":null},"diff":"-return a - b;\n+return a + b;\n"}]}}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-task-1","turnId":"turn-t1","item":{"id":"item_f1","type":"fileChange","status":"completed","changes":[{"path":"/repo/src/sum.ts","kind":{"type":"update","move_path":null},"diff":"-return a - b;\n+return a + b;\n"}]}}}
+{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"thr-task-1","turnId":"turn-t1","tokenUsage":{"total":{"totalTokens":9100,"inputTokens":9000,"cachedInputTokens":4000,"cacheWriteInputTokens":0,"outputTokens":100,"reasoningOutputTokens":20},"last":{"totalTokens":9100,"inputTokens":9000,"cachedInputTokens":4000,"cacheWriteInputTokens":0,"outputTokens":100,"reasoningOutputTokens":20},"modelContextWindow":258400}}}
+{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"thr-task-1","turnId":"turn-t1","itemId":"item_m1","delta":"Fixed the sign in sum.ts.\n<<<ORDE"}}
+{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"thr-task-1","turnId":"turn-t1","itemId":"item_m1","delta":"WELL_DONE>>>"}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-task-1","turnId":"turn-t1","item":{"id":"item_m1","type":"agentMessage","phase":"final_answer","text":"Fixed the sign in sum.ts.\n<<<ORDEWELL_DONE>>>"}}}
+{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr-task-1","turn":{"id":"turn-t1","status":"completed","items":[]}}}
+{"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"thr-task-1","status":{"type":"idle"}}}

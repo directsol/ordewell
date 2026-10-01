@@ -371,7 +371,8 @@ approval" is derived from the task's pending approvals.
 "paused", "blocked" (a dependency term).
 
 **Continue** — a retry of a completed or failed structured task that resumes
-its saved Claude session (`--resume`) with the user's message as the next turn.
+its saved runner session (Claude's `--resume`, Codex's `thread/resume`) with
+the user's message as the next turn.
 It is verified and landed like any attempt, is not offered on conflicts, and
 leaves dependents alone, as retry does. `continuability` is the one rule, and
 a status carries only whether it holds (`continuable`), never the session id.
