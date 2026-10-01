@@ -33,6 +33,9 @@ reference_projects/
 .env.local
 .env.*.local
 
+# direnv, per machine — WorktreeIsolation copies it into worktrees as untracked state
+.envrc
+
 # VS Code workspace files contain local absolute paths
 *.code-workspace
 
