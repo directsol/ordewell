@@ -57,8 +57,10 @@ export type AgentEvent =
    *
    * `input` and `suggestions` are the raw request; `suggestions` are the
    * agent's own session-scoped grants, what "Allow for this task" answers with.
+   * `decided` marks a request the task's mode already answered — the adapter
+   * replied as the manifest says that mode does — so it is shown, never asked.
    */
-  | { type: 'permission_request'; id: string; name: string; detail: string; input?: Record<string, unknown>; suggestions?: unknown[]; toolUseId?: string }
+  | { type: 'permission_request'; id: string; name: string; detail: string; input?: Record<string, unknown>; suggestions?: unknown[]; toolUseId?: string; decided?: ApprovalDecision }
   /** The agent withdrew an open request — an interrupt cancels the call it was for. It takes no answer now. */
   | { type: 'permission_cancelled'; id: string }
   /**

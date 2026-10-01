@@ -30,11 +30,11 @@ function spawnOptions(overrides: Partial<RunnerSpawnOptions> = {}): RunnerSpawnO
 describe('routeTransport', () => {
   it('runs a structured request on the structured transport when the runner has a connector', () => {
     expect(routeTransport('structured', 'claude-code', registry)).toEqual({ transport: 'structured' });
+    expect(routeTransport('structured', 'opencode', registry)).toEqual({ transport: 'structured' });
   });
 
   it('falls back to the terminal for a runner without one, naming it', () => {
     expect(routeTransport('structured', 'codex', registry)).toEqual({ transport: 'terminal', fallback: 'no structured connector for Codex yet' });
-    expect(routeTransport('structured', 'opencode', registry)).toEqual({ transport: 'terminal', fallback: 'no structured connector for OpenCode yet' });
   });
 
   it('names an unregistered runner by its id', () => {

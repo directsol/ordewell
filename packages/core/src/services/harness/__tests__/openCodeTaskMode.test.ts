@@ -1,0 +1,579 @@
+import { describe, it, expect } from 'vitest';
+import { OpenCodeAdapter } from '../OpenCodeAdapter';
+import type { AgentEvent, AgentProcessDeps, AgentStartOptions, TaskStartOptions } from '../AgentAdapter';
+import type { SpawnFn } from '../../HeadlessRunner';
+import { fakeSpawn } from '../../__tests__/harnessTestKit';
+
+/**
+ * OpenCode's task mode (ADR-0018, #55): `opencode serve` driven over HTTP
+ * and its `/event` stream, recorded at the shape sst/opencode 0112a92
+ * (v1.18.34) produces. A turn is posted with `prompt_async` and settles on
+ * the session going idle — never on the POST, which returns at once.
+ */
+
+const BASE = 'http://127.0.0.1:4096';
+
+interface Recorded {
+  method: string;
+  path: string;
+  authorization: string | null;
+  body: unknown;
+}
+
+type Reply = unknown | { status: number; body?: unknown };
+
+/** One open `/event` connection the test pushes frames into. */
+interface EventStream {
+  push(frame: Record<string, unknown>): void;
+}
+
+/**
+ * A scripted `opencode serve`. Routes answer by `METHOD /path`; `/event`
+ * connections stay open until the adapter aborts them, so frames arrive
+ * exactly when a test pushes them.
+ */
+function fakeServer(routes: Record<string, (body: unknown) => Reply | Promise<Reply>> = {}) {
+  const requests: Recorded[] = [];
+  const streams: EventStream[] = [];
+  const status: Record<string, { type: string }> = {};
+
+  const fetchImpl = async (input: unknown, init?: RequestInit) => {
+    const path = String(input).replace(BASE, '');
+    const method = init?.method ?? 'GET';
+    const headers = new Headers(init?.headers);
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) as unknown : undefined;
+    requests.push({ method, path, authorization: headers.get('authorization'), body });
+
+    if (path === '/event') {
+      const queue: Uint8Array[] = [];
+      let wake: (() => void) | null = null;
+      const signal = init?.signal;
+      streams.push({
+        push(frame) {
+          queue.push(new TextEncoder().encode(`data: ${JSON.stringify(frame)}\n\n`));
+          wake?.();
+        },
+      });
+      const reader = {
+        read: async (): Promise<{ done: boolean; value?: Uint8Array }> => {
+          for (;;) {
+            if (signal?.aborted) return { done: true };
+            const next = queue.shift();
+            if (next) return { done: false, value: next };
+            await new Promise<void>((resolve) => {
+              wake = resolve;
+              signal?.addEventListener('abort', () => resolve(), { once: true });
+            });
+            wake = null;
+          }
+        },
+      };
+      return { ok: true, status: 200, statusText: 'OK', body: { getReader: () => reader } } as unknown as Response;
+    }
+
+    const key = `${method} ${path}`;
+    let reply: Reply;
+    if (routes[key]) reply = await routes[key](body);
+    else if (key === 'GET /session/status') reply = status;
+    else if (key === 'POST /session') reply = { id: 'ses_task' };
+    else if (key.endsWith('/prompt_async')) reply = { status: 204 };
+    else if (key.endsWith('/message') && method === 'GET') reply = [];
+    else reply = true;
+    const shaped = typeof reply === 'object' && reply !== null && 'status' in reply && typeof (reply as { status: unknown }).status === 'number'
+      ? reply as { status: number; body?: unknown }
+      : { status: 200, body: reply };
+    return {
+      ok: shaped.status >= 200 && shaped.status < 300,
+      status: shaped.status,
+      statusText: String(shaped.status),
+      json: async () => {
+        if (shaped.body === undefined) throw new SyntaxError('no body');
+        return shaped.body;
+      },
+    } as unknown as Response;
+  };
+
+  return {
+    fetch: fetchImpl as unknown as typeof fetch,
+    requests,
+    status,
+    /** The `n`th `/event` connection — one per turn — once the adapter has opened it. */
+    async stream(n = 0): Promise<EventStream> {
+      for (let i = 0; i < 200 && streams.length <= n; i++) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (streams.length <= n) throw new Error(`event stream ${n} never opened`);
+      return streams[n];
+    },
+    streams,
+  };
+}
+
+function taskStart(overrides: Partial<TaskStartOptions> = {}): TaskStartOptions {
+  return {
+    kind: 'task',
+    cwd: '/repo/.ordewell/worktrees/run/1-task',
+    mode: 'build',
+    model: 'anthropic/claude-sonnet-4',
+    flags: { permissionMode: 'build', modeSettings: { approvals: 'auto' } },
+    ...overrides,
+  };
+}
+
+async function startTask(server: ReturnType<typeof fakeServer>, opts: AgentStartOptions = taskStart()) {
+  const spawned = fakeSpawn([]);
+  const envs: NodeJS.ProcessEnv[] = [];
+  const spawn: SpawnFn = (cmd, argv, options) => {
+    envs.push(options.env);
+    return spawned.spawn(cmd, argv, options);
+  };
+  const deps: AgentProcessDeps = {
+    spawn,
+    fetch: server.fetch,
+    resolvePath: async () => '/usr/bin',
+    platform: 'linux',
+    isDirectory: () => true,
+    exists: () => true,
+    workspaceEnv: async () => ({}),
+  };
+  const adapter = new OpenCodeAdapter(deps);
+  const started = adapter.start(opts);
+  for (let i = 0; i < 50 && spawned.processes.length === 0; i++) await Promise.resolve();
+  spawned.processes[0].emitStdout(`opencode server listening on ${BASE}\n`);
+  await started;
+  return { adapter, spawned, env: envs[0] };
+}
+
+const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+async function until(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !condition(); i++) await tick();
+  if (!condition()) throw new Error('condition never held');
+}
+
+function basic(password: string): string {
+  return `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`;
+}
+
+describe('OpenCodeAdapter task mode — start', () => {
+  it('serves the worktree behind a per-task password, sent on every request', async () => {
+    const server = fakeServer();
+    const { adapter, spawned, env } = await startTask(server);
+
+    expect(spawned.lastArgs()).toEqual(['serve', '--hostname', '127.0.0.1', '--port', '0']);
+    const password = env.OPENCODE_SERVER_PASSWORD;
+    expect(password).toMatch(/^.{16,}$/);
+
+    const second = await startTask(fakeServer());
+    expect(second.env.OPENCODE_SERVER_PASSWORD).not.toBe(password);
+    second.adapter.dispose();
+
+    const events: AgentEvent[] = [];
+    const turn = adapter.send('do the task', (e) => events.push(e));
+    const stream = await server.stream();
+    stream.push({ type: 'session.status', properties: { sessionID: 'ses_task', status: { type: 'busy' } } });
+    stream.push({ type: 'session.status', properties: { sessionID: 'ses_task', status: { type: 'idle' } } });
+    await turn;
+
+    expect(server.requests.map((r) => `${r.method} ${r.path}`)).toEqual(expect.arrayContaining([
+      'POST /session', 'GET /event', 'POST /session/ses_task/prompt_async', 'GET /session/status',
+    ]));
+    for (const request of server.requests) expect(request.authorization).toBe(basic(password!));
+    adapter.dispose();
+  });
+});
+
+const SES = 'ses_task';
+const status = (type: string, sessionID = SES) => ({ type: 'session.status', properties: { sessionID, status: { type } } });
+const assistant = (id: string, extra: Record<string, unknown> = {}) => ({
+  type: 'message.updated',
+  properties: { sessionID: SES, info: { id, role: 'assistant', sessionID: SES, ...extra } },
+});
+const textPart = (id: string, messageID: string, text: string) => ({
+  type: 'message.part.updated',
+  properties: { sessionID: SES, part: { id, messageID, sessionID: SES, type: 'text', text, time: { start: 1, end: 2 } } },
+});
+
+describe('OpenCodeAdapter task mode — the message', () => {
+  it('runs the mode as the agent, with the task model and effort, and withholds only `question`', async () => {
+    const server = fakeServer();
+    const { adapter } = await startTask(server, taskStart({ flags: { permissionMode: 'build', effort: 'high', modeSettings: {} } }));
+    const turn = adapter.send('do the task', () => {});
+    const stream = await server.stream();
+    stream.push(status('busy'));
+    stream.push(status('idle'));
+    await turn;
+
+    const prompt = server.requests.find((r) => r.path === `/session/${SES}/prompt_async`);
+    expect(prompt?.body).toEqual({
+      parts: [{ type: 'text', text: 'do the task' }],
+      agent: 'build',
+      tools: { question: false },
+      model: { providerID: 'anthropic', modelID: 'claude-sonnet-4' },
+      variant: 'high',
+    });
+    expect(server.requests.some((r) => r.path.endsWith('/message') && r.method === 'POST')).toBe(false);
+    adapter.dispose();
+  });
+});
+
+describe('OpenCodeAdapter task mode — when a turn ends', () => {
+  it('ends on an idle the server confirms, with the streamed reply and its usage', async () => {
+    const server = fakeServer();
+    const { adapter } = await startTask(server);
+    const events: AgentEvent[] = [];
+    let settled = false;
+    const turn = adapter.send('do the task', (e) => events.push(e)).then(() => { settled = true; });
+    const stream = await server.stream();
+
+    stream.push(status('busy'));
+    stream.push(assistant('msg_a'));
+    stream.push(textPart('prt_1', 'msg_a', 'Done. <<<MARKER>>>'));
+    // The frame says idle while the server still reports the session busy.
+    server.status[SES] = { type: 'busy' };
+    stream.push(status('idle'));
+    await until(() => server.requests.filter((r) => r.path === '/session/status').length >= 1);
+    await tick();
+    expect(settled).toBe(false);
+
+    delete server.status[SES];
+    stream.push(assistant('msg_a', { time: { created: 1, completed: 2 }, providerID: 'anthropic', modelID: 'claude-sonnet-4', cost: 0.01, tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } } }));
+    stream.push(status('idle'));
+    await turn;
+
+    expect(events).toContainEqual({ type: 'assistant_text', text: 'Done. <<<MARKER>>>' });
+    expect(events).toContainEqual({ type: 'usage', record: expect.objectContaining({ source: 'opencode', model: 'anthropic/claude-sonnet-4', outputTokens: 5 }) });
+    expect(events.at(-1)).toEqual({ type: 'turn_end' });
+    adapter.dispose();
+  });
+
+  it('ignores an idle that arrives before any of the turn\'s own work', async () => {
+    const server = fakeServer();
+    const { adapter } = await startTask(server);
+    const events: AgentEvent[] = [];
+    let settled = false;
+    const turn = adapter.send('second message', (e) => events.push(e)).then(() => { settled = true; });
+    const stream = await server.stream();
+
+    // The previous turn's idle, delivered late: nothing of this turn yet.
+    stream.push(status('idle'));
+    await until(() => server.requests.some((r) => r.path === `/session/${SES}/prompt_async`));
+    for (let i = 0; i < 5; i++) await tick();
+    expect(settled).toBe(false);
+
+    stream.push(status('busy'));
+    stream.push(status('idle'));
+    await turn;
+    expect(events).toEqual([{ type: 'turn_end' }]);
+    adapter.dispose();
+  });
+
+  it('ends on its own status poll when the stream drops the idle', async () => {
+    const server = fakeServer();
+    const { adapter } = await startTask(server);
+    const events: AgentEvent[] = [];
+    const turn = adapter.send('do the task', (e) => events.push(e));
+    const stream = await server.stream();
+    stream.push(status('busy'));
+    await turn;
+    expect(events).toEqual([{ type: 'turn_end' }]);
+    adapter.dispose();
+  }, 5000);
+
+  it('reads back a reply part the stream never delivered', async () => {
+    const server = fakeServer({
+      [`GET /session/${SES}/message`]: () => [
+        { info: { id: 'msg_u', role: 'user' }, parts: [{ id: 'prt_u', messageID: 'msg_u', type: 'text', text: 'do the task' }] },
+        { info: { id: 'msg_a', role: 'assistant', time: { created: 1, completed: 2 } }, parts: [{ id: 'prt_1', messageID: 'msg_a', type: 'text', text: 'All done <<<MARKER>>>' }] },
+      ],
+    });
+    const { adapter } = await startTask(server);
+    const events: AgentEvent[] = [];
+    const turn = adapter.send('do the task', (e) => events.push(e));
+    const stream = await server.stream();
+    stream.push(status('busy'));
+    stream.push(status('idle'));
+    await turn;
+    expect(events).toEqual([{ type: 'assistant_text', text: 'All done <<<MARKER>>>' }, { type: 'turn_end' }]);
+    adapter.dispose();
+  });
+
+  it('fails the turn with OpenCode\'s own words on a session error', async () => {
+    const server = fakeServer();
+    const { adapter } = await startTask(server);
+    const events: AgentEvent[] = [];
+    const turn = adapter.send('do the task', (e) => events.push(e));
+    const stream = await server.stream();
+    stream.push(status('busy'));
+    stream.push({ type: 'session.error', properties: { sessionID: SES, error: { name: 'ProviderAuthError', data: { message: 'No API key for anthropic' } } } });
+    stream.push(status('idle'));
+    await turn;
+    expect(events).toEqual([{ type: 'error', message: 'No API key for anthropic' }]);
+    adapter.dispose();
+  });
+
+  it('fails the turn when its last assistant message carries an error', async () => {
+    const server = fakeServer();
+    const { adapter } = await startTask(server);
+    const events: AgentEvent[] = [];
+    const turn = adapter.send('do the task', (e) => events.push(e));
+    const stream = await server.stream();
+    stream.push(assistant('msg_a', { error: { name: 'APIError', data: { message: 'overloaded' } } }));
+    stream.push(status('idle'));
+    await turn;
+    expect(events).toEqual([{ type: 'error', message: 'overloaded' }]);
+    adapter.dispose();
+  });
+
+  it('fails the turn when the server exits mid-turn, and reports the exit once', async () => {
+    const server = fakeServer();
+    const { adapter, spawned } = await startTask(server);
+    const exits: number[] = [];
+    adapter.onProcessExit((code) => exits.push(code));
+    const events: AgentEvent[] = [];
+    const turn = adapter.send('do the task', (e) => events.push(e));
+    const stream = await server.stream();
+    stream.push(status('busy'));
+    await until(() => server.requests.some((r) => r.path === `/session/${SES}/prompt_async`));
+    spawned.processes[0].exit(3);
+    await turn;
+    expect(events).toEqual([{ type: 'error', message: 'The OpenCode task server exited.' }]);
+    expect(exits).toEqual([3]);
+    adapter.dispose();
+  });
+});
+
+describe('OpenCodeAdapter task mode — interrupt', () => {
+  it('aborts the session and ends the turn as interrupted once it goes idle', async () => {
+    const server = fakeServer();
+    const { adapter } = await startTask(server);
+    const events: AgentEvent[] = [];
+    const turn = adapter.send('do the task', (e) => events.push(e));
+    const stream = await server.stream();
+    stream.push(status('busy'));
+    await until(() => server.requests.some((r) => r.path === `/session/${SES}/prompt_async`));
+
+    server.status[SES] = { type: 'busy' };
+    const acknowledged = adapter.interrupt(2000);
+    await until(() => server.requests.some((r) => r.method === 'POST' && r.path === `/session/${SES}/abort`));
+    delete server.status[SES];
+    stream.push(assistant('msg_a', { error: { name: 'MessageAbortedError', data: { message: 'Aborted' } } }));
+    stream.push(status('idle'));
+
+    expect(await acknowledged).toBe(true);
+    await turn;
+    expect(events.at(-1)).toEqual({ type: 'turn_end', interrupted: true });
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    adapter.dispose();
+  });
+
+  it('reports false when the session never goes idle, so the caller can kill it', async () => {
+    const server = fakeServer();
+    const { adapter } = await startTask(server);
+    const turn = adapter.send('do the task', () => {});
+    const stream = await server.stream();
+    stream.push(status('busy'));
+    server.status[SES] = { type: 'busy' };
+    await until(() => server.requests.some((r) => r.path === `/session/${SES}/prompt_async`));
+    expect(await adapter.interrupt(50)).toBe(false);
+    adapter.dispose();
+    void turn;
+  });
+});
+
+const ask = (id: string, extra: Record<string, unknown> = {}) => ({
+  type: 'permission.asked',
+  properties: {
+    id,
+    sessionID: SES,
+    permission: 'bash',
+    patterns: ['rm -rf dist'],
+    always: ['rm *'],
+    metadata: { command: 'rm -rf dist' },
+    tool: { messageID: 'msg_a', callID: 'call_1' },
+    ...extra,
+  },
+});
+
+async function turnWith(server: ReturnType<typeof fakeServer>, opts: TaskStartOptions) {
+  const { adapter } = await startTask(server, opts);
+  const events: AgentEvent[] = [];
+  const turn = adapter.send('do the task', (e) => events.push(e));
+  const stream = await server.stream();
+  stream.push(status('busy'));
+  return { adapter, events, turn, stream };
+}
+
+const planMode = taskStart({ mode: 'plan', flags: { permissionMode: 'plan', modeSettings: {} } });
+
+describe('OpenCodeAdapter task mode — permissions', () => {
+  it('answers every request under build at once, and still shows it decided', async () => {
+    const server = fakeServer();
+    const { adapter, events, turn, stream } = await turnWith(server, taskStart());
+    stream.push(ask('per_1'));
+    await until(() => server.requests.some((r) => r.path === '/permission/per_1/reply'));
+    stream.push(status('idle'));
+    await turn;
+
+    expect(server.requests.find((r) => r.path === '/permission/per_1/reply')?.body).toEqual({ reply: 'once' });
+    expect(events).toContainEqual(expect.objectContaining({ type: 'permission_request', id: 'per_1', name: 'bash', decided: { decision: 'allow' } }));
+    expect(adapter.answerPermission('per_1', { decision: 'deny' })).toBe(false);
+    adapter.dispose();
+  });
+
+  it('forwards a request for a card under any other mode, and answers with the card\'s decision', async () => {
+    const server = fakeServer();
+    const { adapter, events, turn, stream } = await turnWith(server, planMode);
+    stream.push(ask('per_1'));
+    await until(() => events.some((e) => e.type === 'permission_request'));
+
+    const request = events.find((e) => e.type === 'permission_request');
+    expect(request).toEqual({
+      type: 'permission_request',
+      id: 'per_1',
+      name: 'bash',
+      detail: JSON.stringify({ scope: 'rm -rf dist', command: 'rm -rf dist' }),
+      input: { command: 'rm -rf dist' },
+      suggestions: ['rm *'],
+      toolUseId: 'call_1',
+    });
+    expect(server.requests.some((r) => r.path.startsWith('/permission/'))).toBe(false);
+
+    expect(adapter.answerPermission('per_1', { decision: 'allowForTask' })).toBe(true);
+    expect(adapter.answerPermission('per_1', { decision: 'allow' })).toBe(false);
+    await until(() => server.requests.some((r) => r.path === '/permission/per_1/reply'));
+    expect(server.requests.find((r) => r.path === '/permission/per_1/reply')?.body).toEqual({ reply: 'always' });
+    stream.push(status('idle'));
+    await turn;
+    adapter.dispose();
+  });
+
+  it.each([
+    [{ decision: 'allow' } as const, { reply: 'once' }],
+    [{ decision: 'deny', note: 'use the test fixture instead' } as const, { reply: 'reject', message: 'use the test fixture instead' }],
+    [{ decision: 'deny' } as const, { reply: 'reject' }],
+  ])('answers %o as %o', async (decision, reply) => {
+    const server = fakeServer();
+    const { adapter, events, turn, stream } = await turnWith(server, planMode);
+    stream.push(ask('per_1'));
+    await until(() => events.some((e) => e.type === 'permission_request'));
+    adapter.answerPermission('per_1', decision);
+    await until(() => server.requests.some((r) => r.path === '/permission/per_1/reply'));
+    expect(server.requests.find((r) => r.path === '/permission/per_1/reply')?.body).toEqual(reply);
+    stream.push(status('idle'));
+    await turn;
+    adapter.dispose();
+  });
+
+  it('handles a subagent\'s request the same way', async () => {
+    const server = fakeServer();
+    const { adapter, events, turn, stream } = await turnWith(server, planMode);
+    stream.push({ type: 'session.created', properties: { info: { id: 'ses_child', parentID: SES } } });
+    stream.push(ask('per_2', { sessionID: 'ses_child' }));
+    await until(() => events.some((e) => e.type === 'permission_request'));
+    expect(events.find((e) => e.type === 'permission_request')).toMatchObject({ id: 'per_2', name: 'bash' });
+    expect(adapter.answerPermission('per_2', { decision: 'allow' })).toBe(true);
+    stream.push(status('idle'));
+    await turn;
+    adapter.dispose();
+  });
+
+  it('withdraws a request OpenCode settled itself', async () => {
+    const server = fakeServer();
+    const { adapter, events, turn, stream } = await turnWith(server, planMode);
+    stream.push(ask('per_1'));
+    stream.push({ type: 'permission.replied', properties: { sessionID: SES, requestID: 'per_1', reply: 'reject' } });
+    await until(() => events.some((e) => e.type === 'permission_cancelled'));
+    expect(events).toContainEqual({ type: 'permission_cancelled', id: 'per_1' });
+    expect(adapter.answerPermission('per_1', { decision: 'allow' })).toBe(false);
+    stream.push(status('idle'));
+    await turn;
+    adapter.dispose();
+  });
+
+  it('falls back to the deprecated reply path on a server that 404s the new one', async () => {
+    const server = fakeServer({ 'POST /permission/per_1/reply': () => ({ status: 404 }) });
+    const { adapter, events, turn, stream } = await turnWith(server, planMode);
+    stream.push(ask('per_1'));
+    await until(() => events.some((e) => e.type === 'permission_request'));
+    adapter.answerPermission('per_1', { decision: 'deny' });
+    await until(() => server.requests.some((r) => r.path === `/session/${SES}/permissions/per_1`));
+    expect(server.requests.find((r) => r.path === `/session/${SES}/permissions/per_1`)?.body).toEqual({ response: 'reject' });
+    stream.push(status('idle'));
+    await turn;
+    adapter.dispose();
+  });
+});
+
+describe('OpenCodeAdapter planner — still read-only', () => {
+  /** A planner turn whose message POST stays open until `release`, as the real one does. */
+  function plannerServer(routes: Record<string, (body: unknown) => Reply | Promise<Reply>> = {}) {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const server = fakeServer({
+      [`POST /session/${SES}/message`]: async () => { await held; return { info: { id: 'msg_a', role: 'assistant' }, parts: [] }; },
+      ...routes,
+    });
+    return { server, release };
+  }
+
+  it.each([
+    ['nothing else', {}],
+    // Task fields smuggled onto a planner start: nothing on the planner path reads them.
+    ['a task\'s mode and auto approvals', { mode: 'build', flags: { permissionMode: 'build', effort: 'max', modeSettings: { approvals: 'auto' } } }],
+  ])('plans with the read-only agent and refuses every request whatever its start carries: %s', async (_label, extra) => {
+    const { server, release } = plannerServer();
+    const { adapter, env } = await startTask(server, { kind: 'planner', cwd: '/repo', systemPrompt: 'PLAN', ...extra } as unknown as AgentStartOptions);
+    const events: AgentEvent[] = [];
+    const turn = adapter.send('the goal', (e) => events.push(e));
+    const stream = await server.stream();
+    stream.push(ask('per_1'));
+    await until(() => server.requests.some((r) => r.path === '/permission/per_1/reply'));
+    release();
+    await turn;
+
+    const message = server.requests.find((r) => r.path === `/session/${SES}/message` && r.method === 'POST');
+    expect(message?.body).toMatchObject({
+      agent: 'plan',
+      tools: { question: false, edit: false, write: false, apply_patch: false, todowrite: false },
+      system: 'PLAN',
+    });
+    expect(server.requests.find((r) => r.path === '/permission/per_1/reply')?.body).toEqual({ reply: 'reject' });
+    expect(server.requests.some((r) => r.path.endsWith('/prompt_async'))).toBe(false);
+    expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined();
+    expect(events.find((e) => e.type === 'permission_request')).not.toHaveProperty('decided');
+    expect(adapter.answerPermission('per_1', { decision: 'allow' })).toBe(false);
+    adapter.dispose();
+  });
+
+  it('denies on the deprecated path only when the new reply endpoint 404s', async () => {
+    const { server, release } = plannerServer({ 'POST /permission/per_1/reply': () => ({ status: 404 }) });
+    const { adapter } = await startTask(server, { kind: 'planner', cwd: '/repo', systemPrompt: 'PLAN' });
+    const turn = adapter.send('the goal', () => {});
+    const stream = await server.stream();
+    stream.push(ask('per_1'));
+    stream.push(ask('per_2'));
+    await until(() => server.requests.some((r) => r.path === `/session/${SES}/permissions/per_1`));
+    await until(() => server.requests.some((r) => r.path === '/permission/per_2/reply'));
+    release();
+    await turn;
+
+    expect(server.requests.find((r) => r.path === `/session/${SES}/permissions/per_1`)?.body).toEqual({ response: 'reject' });
+    expect(server.requests.some((r) => r.path === `/session/${SES}/permissions/per_2`)).toBe(false);
+    adapter.dispose();
+  });
+});
+
+describe('OpenCodeAdapter task mode — resume', () => {
+  it('continues the saved session rather than creating one', async () => {
+    const server = fakeServer({ 'GET /session/ses_saved': () => ({ id: 'ses_saved' }) });
+    const { adapter } = await startTask(server, taskStart({ resumeSessionId: 'ses_saved' }));
+    expect(adapter.nativeSessionId()).toBe('ses_saved');
+    expect(server.requests.some((r) => r.method === 'POST' && r.path === '/session')).toBe(false);
+    adapter.dispose();
+  });
+
+  it('fails a resume the server refuses instead of starting a fresh session', async () => {
+    const server = fakeServer({ 'GET /session/ses_gone': () => ({ status: 404 }) });
+    await expect(startTask(server, taskStart({ resumeSessionId: 'ses_gone' }))).rejects.toThrow(/could not resume session ses_gone/);
+    expect(server.requests.some((r) => r.method === 'POST' && r.path === '/session')).toBe(false);
+  });
+});

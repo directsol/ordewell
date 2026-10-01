@@ -405,7 +405,10 @@ runner's own session-scoped grant, offered only when it proposed one) and
 whole decision from any answerer, a person or later the supervisor (#28). The
 task stays `in_progress`: "waiting for approval" is derived from its pending
 requests. Cancel, stop and retry deny them before the runner goes; one the
-runner cancels itself, or whose process ends, is *withdrawn*.
+runner cancels itself, or whose process ends, is *withdrawn*. A mode whose
+manifest sets `approvals: auto` (OpenCode's `build`, the structured `--auto`)
+answers its own requests: they are logged as requested and decided, never
+carded.
 *Avoid:* "permission prompt" for Ordewell's side (that is Claude's protocol),
 and "awaiting approval" as a task status.
 

@@ -353,6 +353,11 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
   private openPermission(adapter: TaskModeAgentAdapter, event: Extract<AgentEvent, { type: 'permission_request' }>): void {
     this.permissionCount += 1;
     const id = `${this.id}-perm-${this.permissionCount}`;
+    if (event.decided) {
+      this.emitEvent({ ...event, id });
+      this.emitEvent({ type: 'permission_decided', id, decision: event.decided });
+      return;
+    }
     this.permissions.set(id, { requestId: event.id, adapter });
     this.emitEvent({ ...event, id });
   }

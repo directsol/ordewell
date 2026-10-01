@@ -71,6 +71,14 @@ describe('RunnerApprovals', () => {
     expect(bridge.waiting('t1')).toBe(0);
   });
 
+  it('puts nothing on the seam for a request the task\'s mode already answered', async () => {
+    const { approvals, bridge, task } = await bridged();
+    task.emitEvent({ type: 'permission_request', id: 's1-perm-1', name: 'bash', detail: '{}', decided: { decision: 'allow' } });
+    task.emitEvent({ type: 'permission_decided', id: 's1-perm-1', decision: { decision: 'allow' } });
+    expect(approvals.outstanding()).toEqual([]);
+    expect(bridge.waiting('t1')).toBe(0);
+  });
+
   it('offers no grant for the task when the runner suggested none', async () => {
     const { approvals, task } = await bridged();
     task.requestPermission('s1-perm-1', 'Bash', { command: 'npm test' });

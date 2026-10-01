@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { resolveArgs, resolveTaskRunnerFlags, ResolveError } from '../resolveArgs';
 import { CODEX_MANIFEST } from '../builtin/codex.manifest';
 import { CLAUDE_CODE_MANIFEST } from '../builtin/claude-code.manifest';
+import { OPENCODE_MANIFEST } from '../builtin/opencode.manifest';
 import type { RunnerPluginManifest, ResolveContext } from '../types';
 
 function basicManifest(overrides?: Partial<RunnerPluginManifest>): RunnerPluginManifest {
@@ -490,6 +491,15 @@ describe('resolveTaskRunnerFlags', () => {
     ['dontAsk', 'dontAsk'],
   ])('maps Claude mode "%s" to --permission-mode %s', (mode, expected) => {
     expect(resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode }).permissionMode).toBe(expected);
+  });
+
+  it.each([
+    // The terminal transport runs every mode but plan with `--auto`; the structured one answers the same requests.
+    ['build', true, { permissionMode: 'build', modeSettings: { approvals: 'auto' } }],
+    ['plan', false, { permissionMode: 'plan', modeSettings: {} }],
+  ])('hands an OpenCode %s task its agent and how its requests are answered', (mode, auto, expected) => {
+    expect(resolveTaskRunnerFlags(OPENCODE_MANIFEST, { mode })).toEqual(expected);
+    expect(resolveArgs(OPENCODE_MANIFEST, { mode, prompt: 'p', headless: true }).args.includes('--auto')).toBe(auto);
   });
 
   describe('per-mode settings', () => {
