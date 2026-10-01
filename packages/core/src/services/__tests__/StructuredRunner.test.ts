@@ -147,7 +147,7 @@ describe('StructuredRunner spawn', () => {
   it.each([
     ['claude-code', 'acceptEdits', 'sonnet', 'high', { permissionMode: 'acceptEdits', effort: 'high', modeSettings: {} }],
     // Runner-neutral: a Codex task gets its sandbox value and the raw effort, never Claude's thinking flags.
-    ['codex', 'agent', 'gpt-5.5', 'high', { permissionMode: 'workspace-write', effort: 'high', modeSettings: {} }],
+    ['codex', 'agent', 'gpt-5.5', 'high', { permissionMode: 'workspace-write', effort: 'high', modeSettings: { approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' } }],
     ['claude-code', 'default', undefined, 'max', { permissionMode: 'default', modeSettings: {} }],
   ])('hands the %s adapter the manifest\'s flags for mode %s, model %s, effort %s', async (runnerId, mode, modelId, thinkingEffort, flags) => {
     const starts: AgentStartOptions[] = [];

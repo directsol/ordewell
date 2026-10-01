@@ -63,7 +63,10 @@ export interface PluginFeatures {
    * Further per-mode settings for runners whose permission story has more than
    * one axis (Codex: sandbox, approval policy, approvals reviewer). Keyed by
    * setting name, then by mode id; a mode a map does not name leaves that
-   * setting to the runner's own default. Read only by the structured transport.
+   * setting to the runner's own default. Codex declares `approvalPolicy`
+   * (`-a` / `approval_policy`) and `approvalsReviewer` (`approvals_reviewer`);
+   * the terminal template reads them too, through `{{feature:approvalPolicyVal}}`
+   * and the `*Config` tokens.
    */
   modeSettings?: Record<string, Record<string, string>>;
 }

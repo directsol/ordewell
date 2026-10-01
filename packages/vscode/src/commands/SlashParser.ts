@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import {
   enabledRunners, listSessions, loadSession, knownModelId, runnerForProvider, getProviderMeta,
-  ORCHESTRATOR_SHORTCUTS,
+  ORCHESTRATOR_SHORTCUTS, parseAutonomyLevel,
 } from '@ordewell/core';
 import type { AiProvider, IConfig, RunnerRegistry, ModelResolver, SettingsService, RunnerModeInfo, DiscoveredModel } from '@ordewell/core';
 import type { ApiProvider } from '../adapters/SecretStore';
@@ -299,16 +299,18 @@ export async function handleSlashCommand(text: string, deps: SlashDeps): Promise
     for (const r of runners) {
       modesByRunner[r] = deps.pluginRegistry.getManifest(r)?.modes ?? [];
     }
-    const explicitArg = args[0]?.toLowerCase();
-    const direct: boolean | undefined =
-      explicitArg === 'on' ? true : explicitArg === 'off' ? false : undefined;
-    if (direct !== undefined) {
+    const direct = parseAutonomyLevel(args[0]);
+    if (args[0] !== undefined && direct === null) {
+      vscode.window.showWarningMessage('Usage: /auto [full|auto]');
+      return;
+    }
+    if (direct !== null) {
       await deps.updateConfig('autonomousMode', direct);
       vscode.window.showInformationMessage(applyAutonomousChoice(direct, runners, modesByRunner));
       return;
     }
     const items = resolveAutonomousQuickPickItems(runners, modesByRunner, deps.config.autonomousMode);
-    const picked = await vscode.window.showQuickPick(items, { placeHolder: 'Autonomous mode for new plans' });
+    const picked = await vscode.window.showQuickPick(items, { placeHolder: 'Autonomy level for new plans' });
     if (!picked) return;
     await deps.updateConfig('autonomousMode', picked.value);
     vscode.window.showInformationMessage(applyAutonomousChoice(picked.value, runners, modesByRunner));

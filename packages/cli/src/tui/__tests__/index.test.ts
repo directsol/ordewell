@@ -142,7 +142,8 @@ describe('handleTui', () => {
 
     await vi.waitFor(() => expect(fakeTerminal.draw).toHaveBeenCalled());
     const frame = (fakeTerminal.draw.mock.calls.at(-1)![0] as string[]).join('\n');
-    expect(frame).toContain('○ auto');
+    expect(frame).toContain('● Auto');
+    expect(frame).not.toContain('Full auto');
     vi.unstubAllEnvs();
   });
 

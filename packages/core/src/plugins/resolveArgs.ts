@@ -174,6 +174,16 @@ function permissionModeValue(manifest: RunnerPluginManifest, mode: string | unde
   return id;
 }
 
+/** The manifest's further per-mode settings for a mode, by setting name; a setting no map names is absent. */
+export function resolveModeSettings(manifest: RunnerPluginManifest, mode: string | undefined): Record<string, string> {
+  const id = modeId(mode);
+  const settings: Record<string, string> = {};
+  for (const [setting, byMode] of Object.entries(manifest.features.modeSettings ?? {})) {
+    if (byMode[id] !== undefined) settings[setting] = byMode[id];
+  }
+  return settings;
+}
+
 /**
  * The manifest's meaning of a task's mode and effort, for a runner driven over
  * its programmatic protocol rather than a command line built from
@@ -185,12 +195,10 @@ export function resolveTaskRunnerFlags(
   manifest: RunnerPluginManifest,
   ctx: Pick<ResolveContext, 'mode' | 'model' | 'thinkingEffort'>,
 ): TaskRunnerFlags {
-  const id = modeId(ctx.mode);
-  const modeSettings: Record<string, string> = {};
-  for (const [setting, byMode] of Object.entries(manifest.features.modeSettings ?? {})) {
-    if (byMode[id] !== undefined) modeSettings[setting] = byMode[id];
-  }
-  const flags: TaskRunnerFlags = { permissionMode: permissionModeValue(manifest, ctx.mode), modeSettings };
+  const flags: TaskRunnerFlags = {
+    permissionMode: permissionModeValue(manifest, ctx.mode),
+    modeSettings: resolveModeSettings(manifest, ctx.mode),
+  };
   if (shouldIncludeBlock(Block.IfThinking, { ...ctx, prompt: '' })) flags.effort = ctx.thinkingEffort;
   return flags;
 }
@@ -247,6 +255,26 @@ function resolveToken(token: string, manifest: RunnerPluginManifest, ctx: Resolv
   }
 
   if (token === '{{feature:permissionModeVal}}') return permissionModeValue(manifest, ctx.mode);
+
+  // An unmapped mode keeps the interactive default from before approvals were
+  // per-mode: never ask, since nobody is at the window to answer.
+  if (token === '{{feature:approvalPolicyVal}}') {
+    return resolveModeSettings(manifest, ctx.mode).approvalPolicy ?? 'never';
+  }
+
+  // `exec` is non-interactive and already implies `never`, so only a policy
+  // that asks needs restating. Under `on-request` the reviewer subagent answers
+  // each request, which keeps a headless task unattended without turning
+  // approvals off.
+  if (token === '{{feature:approvalPolicyConfig}}') {
+    const { approvalPolicy } = resolveModeSettings(manifest, ctx.mode);
+    return approvalPolicy && approvalPolicy !== 'never' ? `-c approval_policy=${approvalPolicy}` : '';
+  }
+
+  if (token === '{{feature:approvalsReviewerConfig}}') {
+    const { approvalsReviewer } = resolveModeSettings(manifest, ctx.mode);
+    return approvalsReviewer ? `-c approvals_reviewer=${approvalsReviewer}` : '';
+  }
 
   if (token === '{{feature:planMode}}') {
     return manifest.features.planModeFlag || '';

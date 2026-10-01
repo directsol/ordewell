@@ -1,3 +1,4 @@
+import { autonomyLevelLabel, parseAutonomyLevel } from '@ordewell/core';
 import { findEnvFile, writeEnvVar } from '../utils/env';
 import type { ApiClient } from '../daemonClient';
 import { positionals } from '../utils';
@@ -32,7 +33,7 @@ export async function handleRunners(subArgs: string[], injectedApi?: ApiClient):
   console.log(`${runner} ${enabled ? 'enabled' : 'disabled'}.`);
 }
 
-const AUTO_USAGE = 'Usage: ordewell auto [on|off]';
+const AUTO_USAGE = 'Usage: ordewell auto [full|auto]';
 
 /**
  * The approval posture new sessions start in. It lives only in `.env` and is
@@ -46,17 +47,17 @@ export function handleAuto(subArgs: string[]): void {
   const current = currentRaw !== 'false' && currentRaw !== '0';
 
   if (!arg) {
-    console.log(`Autonomous mode: ${current ? 'ON' : 'OFF'}`);
+    console.log(`Autonomy level: ${autonomyLevelLabel(current)}`);
     console.log(`  ${AUTO_USAGE}`);
     return;
   }
 
-  const enabled = arg === 'on' ? true : arg === 'off' ? false : null;
+  const enabled = parseAutonomyLevel(arg);
   if (enabled === null) fail(AUTO_USAGE);
 
   writeEnvVar(findEnvFile(), 'ORDEWELL_AUTONOMOUS_MODE', String(enabled));
   process.env.ORDEWELL_AUTONOMOUS_MODE = String(enabled);
-  console.log(`Autonomous mode ${enabled ? 'on' : 'off'} for new sessions.`);
+  console.log(`Autonomy level: ${autonomyLevelLabel(enabled)} for new sessions.`);
 }
 
 /**

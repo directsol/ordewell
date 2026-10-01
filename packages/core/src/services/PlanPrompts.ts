@@ -54,7 +54,7 @@ function buildModeGuideForRunners(runners: RunnerId[], _autonomousDefault: boole
   const lines = ['Assign a "taskMode" to each AI task based on the runner:'];
   for (const r of runners) {
     if (r === 'claude-code') {
-      lines.push('- For claude-code: "acceptEdits" (edit automatically, recommended), "default" (ask before edits), "plan" (read-only analysis), "bypassPermissions" (skip all prompts, CI only).');
+      lines.push('- For claude-code: "acceptEdits" (edit automatically, recommended), "auto" (a classifier approves or blocks each action), "default" (ask before edits), "plan" (read-only analysis), "bypassPermissions" (skip all prompts, CI only).');
     } else if (r === 'opencode') {
       lines.push('- For opencode: "build" (full access agent), "plan" (read-only analysis).');
     } else {
@@ -67,7 +67,7 @@ function buildModeGuideForRunners(runners: RunnerId[], _autonomousDefault: boole
 
 function buildModeExamplesForRunners(runners: RunnerId[]): string {
   return runners.map(r => {
-    if (r === 'claude-code') return 'claude-code: acceptEdits|default|plan|bypassPermissions';
+    if (r === 'claude-code') return 'claude-code: acceptEdits|auto|default|plan|bypassPermissions';
     if (r === 'opencode') return 'opencode: build|plan';
     return `${r}: default|plan`;
   }).join(', ');
