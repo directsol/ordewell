@@ -173,17 +173,17 @@ describe('ClaudeCodeAdapter task argv for every effort and mode', () => {
 });
 
 describe('task mode support', () => {
-  it('is Claude Code alone for now', () => {
+  it('is Claude Code and OpenCode for now', () => {
     expect(supportsTaskMode('claude-code')).toBe(true);
+    expect(supportsTaskMode('opencode')).toBe(true);
+    expect(createTaskAdapter('opencode', deps([]).processDeps)).toBeInstanceOf(OpenCodeAdapter);
     expect(supportsTaskMode('codex')).toBe(false);
-    expect(supportsTaskMode('opencode')).toBe(false);
     expect(supportsTaskMode('toString')).toBe(false);
     expect(() => createTaskAdapter('codex', deps([]).processDeps)).toThrow(TaskModeUnsupportedError);
   });
 
   it.each([
     ['codex', (d: AgentProcessDeps) => new CodexAdapter(d)],
-    ['opencode', (d: AgentProcessDeps) => new OpenCodeAdapter(d)],
   ])('%s refuses task mode with a typed error and spawns nothing', async (runner, make) => {
     const { spawned, processDeps } = deps([]);
     const started = make(processDeps).start(taskStart());

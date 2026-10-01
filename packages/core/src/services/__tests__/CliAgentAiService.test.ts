@@ -1131,7 +1131,7 @@ describe('CliAgentAiService — OpenCode', () => {
       (url) => {
         posted.push(url);
         if (url.endsWith('/session')) return { id: 'ses_perm' };
-        if (url.includes('/permissions/')) { answered(); return true; }
+        if (url.includes('/permission/')) { answered(); return true; }
         return permissionAnswered.then(() => ({
           info: { id: 'msg_a' },
           parts: [
@@ -1146,7 +1146,7 @@ describe('CliAgentAiService — OpenCode', () => {
     const { events, onProgress } = collector();
     const turn = await svc.startConversation(request({ onProgress, runners: ['opencode'] }));
 
-    expect(posted).toContain('http://127.0.0.1:44100/session/ses_perm/permissions/per_1');
+    expect(posted).toContain('http://127.0.0.1:44100/permission/per_1/reply');
     const denied = events.find((e) => e.type === 'tool_result' && e.step?.outcome === 'denied');
     expect(denied?.step?.toolLabel).toBe('external_directory');
     expect(turn.text).toContain('cannot read outside the workspace');
@@ -1166,7 +1166,7 @@ describe('CliAgentAiService — OpenCode', () => {
     );
     await svc.startConversation(request({ runners: ['opencode'] }));
 
-    expect(posted).toContain('http://127.0.0.1:44100/session/ses_child/permissions/per_child');
+    expect(posted).toContain('http://127.0.0.1:44100/permission/per_child/reply');
   });
 
   it('ignores a permission raised for a different session', async () => {
@@ -1185,7 +1185,7 @@ describe('CliAgentAiService — OpenCode', () => {
     );
     await svc.startConversation(request({ runners: ['opencode'] }));
 
-    expect(posted.some((u) => u.includes('/permissions/'))).toBe(false);
+    expect(posted.some((u) => u.includes('/permission'))).toBe(false);
   });
 
   it('reuses the agent session across a restart when the server still has it', async () => {
