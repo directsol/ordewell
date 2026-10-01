@@ -4,7 +4,8 @@ import type { RunnerSpawnOptions } from '../AbstractRunner';
 import { HeadlessSession } from '../HeadlessRunner';
 import { RunnerRegistry } from '../../plugins/RunnerRegistry';
 import { isStructuredSession, type ITerminalSession, type StructuredEvent, type StructuredTurnEnd } from '../../interfaces/ITerminalRunner';
-import { TaskModeUnsupportedError } from '../harness/AgentAdapter';
+import { TaskModeUnsupportedError, type AgentStartOptions } from '../harness/AgentAdapter';
+import { ClaudeCodeAdapter } from '../harness/ClaudeCodeAdapter';
 import type { SpawnFn } from '../HeadlessRunner';
 import { fakeSpawn, fixture, type FakeSpawnResult, type ScriptedReply } from './harnessTestKit';
 
@@ -140,6 +141,30 @@ describe('StructuredRunner spawn', () => {
     const from = args.indexOf('--permission-mode') + 2;
     const to = modelId ? args.indexOf('--model') : args.length;
     expect(args.slice(from, to)).toEqual(expected);
+    session.kill();
+  });
+
+  it.each([
+    ['claude-code', 'acceptEdits', 'sonnet', 'high', { permissionMode: 'acceptEdits', effort: 'high', modeSettings: {} }],
+    // Runner-neutral: a Codex task gets its sandbox value and the raw effort, never Claude's thinking flags.
+    ['codex', 'agent', 'gpt-5.5', 'high', { permissionMode: 'workspace-write', effort: 'high', modeSettings: {} }],
+    ['claude-code', 'default', undefined, 'max', { permissionMode: 'default', modeSettings: {} }],
+  ])('hands the %s adapter the manifest\'s flags for mode %s, model %s, effort %s', async (runnerId, mode, modelId, thinkingEffort, flags) => {
+    const starts: AgentStartOptions[] = [];
+    class Recording extends ClaudeCodeAdapter {
+      override start(opts: AgentStartOptions): Promise<void> {
+        starts.push(opts);
+        return super.start(opts);
+      }
+    }
+    const runner = new StructuredRunner({
+      process: { spawn: fakeSpawn([]).spawn, resolvePath: async () => '/usr/bin', platform: 'linux', isDirectory: () => true, exists: () => true },
+      createAdapter: (_runner, deps) => new Recording(deps),
+    });
+    const session = await runner.spawn(options({ runner: runnerId, mode, modelId, thinkingEffort }));
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({ kind: 'task', mode, model: modelId });
+    expect(starts[0].kind === 'task' && starts[0].flags).toEqual(flags);
     session.kill();
   });
 

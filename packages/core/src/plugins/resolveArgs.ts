@@ -1,4 +1,5 @@
 import type { RunnerPluginManifest, ResolveContext, RunnerInvocation } from './types';
+import type { TaskRunnerFlags } from '../services/harness/AgentAdapter';
 
 export class ResolveError extends Error {
   constructor(message: string) {
@@ -144,25 +145,30 @@ function isFeatureToken(token: string): boolean {
 }
 
 /**
- * Map a thinking effort variant ID to the Claude Code CLI flags string.
- * Effort IDs: adaptive, low, medium, high, xhigh, max (per-model from the
- * Anthropic API). `disabled` is handled as a legacy value for old tasks.
- * Returns a space-separated string that will be split into separate args.
+ * Map a thinking effort variant ID to Claude Code's CLI flags, one argv entry
+ * each. Effort IDs: adaptive, low, medium, high, xhigh, max (per-model from
+ * the Anthropic API). `disabled` is handled as a legacy value for old tasks.
+ * Shared by the terminal template and the structured connector, so both run a
+ * task under the same thinking flags.
  */
-function resolveClaudeThinkingFlags(effort: string): string {
-  if (effort === 'disabled') return '--thinking disabled';
-  if (effort === 'adaptive') return '--thinking adaptive';
+export function claudeThinkingArgs(effort: string): string[] {
+  if (effort === 'disabled') return ['--thinking', 'disabled'];
+  if (effort === 'adaptive') return ['--thinking', 'adaptive'];
   // low/medium/high/xhigh/max all use --thinking enabled + --effort <level>
   if (['low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) {
-    return `--thinking enabled --effort ${effort}`;
+    return ['--thinking', 'enabled', '--effort', effort];
   }
   // Legacy: old variant IDs — map to adaptive
-  return '--thinking adaptive';
+  return ['--thinking', 'adaptive'];
+}
+
+function modeId(mode: string | undefined): string {
+  return mode || 'default';
 }
 
 /** Maps a mode id to the runner's --permission-mode CLI value, falling back to the id itself. */
 function permissionModeValue(manifest: RunnerPluginManifest, mode: string | undefined): string {
-  const id = mode || 'default';
+  const id = modeId(mode);
   const map = manifest.features.permissionModeValues;
   if (map && map[id] !== undefined) return map[id];
   return id;
@@ -171,22 +177,22 @@ function permissionModeValue(manifest: RunnerPluginManifest, mode: string | unde
 /**
  * The manifest's meaning of a task's mode and effort, for a runner driven over
  * its programmatic protocol rather than a command line built from
- * `argsTemplate` (ADR-0018, C1). Same functions and the same `{{if thinking}}`
- * gate as the template path, so a structured task and a terminal task given
- * the same plan run under the same permission mode and effort.
+ * `argsTemplate` (ADR-0018, C1). The effort stays a raw id behind the same
+ * `{{if thinking}}` gate as the template path: how an effort reaches the
+ * runner is protocol, which each adapter owns.
  */
 export function resolveTaskRunnerFlags(
   manifest: RunnerPluginManifest,
   ctx: Pick<ResolveContext, 'mode' | 'model' | 'thinkingEffort'>,
-): { permissionMode: string; effortArgs: string[] } {
-  const context: ResolveContext = { ...ctx, prompt: '' };
-  const effort = shouldIncludeBlock(Block.IfThinking, context)
-    ? resolveToken('{{feature:thinkingFlags}}', manifest, context)
-    : '';
-  return {
-    permissionMode: permissionModeValue(manifest, ctx.mode),
-    effortArgs: effort.split(/(?<!\\) /).filter(Boolean),
-  };
+): TaskRunnerFlags {
+  const id = modeId(ctx.mode);
+  const modeSettings: Record<string, string> = {};
+  for (const [setting, byMode] of Object.entries(manifest.features.modeSettings ?? {})) {
+    if (byMode[id] !== undefined) modeSettings[setting] = byMode[id];
+  }
+  const flags: TaskRunnerFlags = { permissionMode: permissionModeValue(manifest, ctx.mode), modeSettings };
+  if (shouldIncludeBlock(Block.IfThinking, { ...ctx, prompt: '' })) flags.effort = ctx.thinkingEffort;
+  return flags;
 }
 
 function resolveToken(token: string, manifest: RunnerPluginManifest, ctx: ResolveContext): string {
@@ -226,7 +232,7 @@ function resolveToken(token: string, manifest: RunnerPluginManifest, ctx: Resolv
   if (token === '{{feature:thinkingFlags}}') {
     const effort = ctx.thinkingEffort;
     if (!effort) return '';
-    return resolveClaudeThinkingFlags(effort);
+    return claudeThinkingArgs(effort).join(' ');
   }
 
   // Reasoning effort as a config override: `-c model_reasoning_effort=<level>`.
