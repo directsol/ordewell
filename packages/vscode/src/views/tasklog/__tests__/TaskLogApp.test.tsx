@@ -1,5 +1,5 @@
 import React from 'react';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, act, fireEvent, cleanup } from '@testing-library/react';
 import type { DisplayBlock } from '@ordewell/core';
 import TaskLogApp from '../TaskLogApp';
@@ -60,7 +60,7 @@ describe('the task log tab (ADR-0018, V1)', () => {
 
     const input = screen.getByPlaceholderText(/Message the task/);
     act(() => { fireEvent.change(input, { target: { value: 'use Postgres' } }); });
-    act(() => { fireEvent.click(screen.getByText('Send')); });
+    act(() => { fireEvent.click(screen.getByLabelText('Send')); });
 
     expect(api.postMessage).toHaveBeenCalledWith({ type: 'sendTaskMessage', text: 'use Postgres' });
   });
@@ -74,14 +74,73 @@ describe('the task log tab (ADR-0018, V1)', () => {
     expect(api.postMessage).toHaveBeenCalledWith({ type: 'removeQueuedTaskMessage', id: 'q1' });
   });
 
-  it('offers an interrupt only while a turn is live', () => {
+  it('is one button: disabled when idle and empty, Stop while a turn is live and empty, Send once typed', () => {
     render(<TaskLogApp />);
     init({ working: false });
-    expect(screen.queryByText('Interrupt')).toBeNull();
+    expect((screen.getByLabelText('Send') as HTMLButtonElement).disabled).toBe(true);
 
     send({ type: 'status', status: status({ working: true }) });
-    act(() => { fireEvent.click(screen.getByText('Interrupt')); });
+    act(() => { fireEvent.click(screen.getByLabelText('Interrupt')); });
     expect(api.postMessage).toHaveBeenCalledWith({ type: 'interruptTask' });
+
+    act(() => { fireEvent.change(screen.getByPlaceholderText(/Message the task/), { target: { value: 'wait, use Postgres' } }); });
+    expect(screen.queryByLabelText('Interrupt')).toBeNull();
+    act(() => { fireEvent.click(screen.getByLabelText('Send')); });
+    expect(api.postMessage).toHaveBeenCalledWith({ type: 'sendTaskMessage', text: 'wait, use Postgres' });
+  });
+
+  it('sends on Enter and keeps Shift+Enter for a new line', () => {
+    render(<TaskLogApp />);
+    init({ working: true });
+    const input = screen.getByPlaceholderText(/Message the task/);
+    act(() => { fireEvent.change(input, { target: { value: 'hello' } }); });
+
+    act(() => { fireEvent.keyDown(input, { key: 'Enter', shiftKey: true }); });
+    expect(api.postMessage).not.toHaveBeenCalledWith({ type: 'sendTaskMessage', text: 'hello' });
+
+    act(() => { fireEvent.keyDown(input, { key: 'Enter' }); });
+    expect(api.postMessage).toHaveBeenCalledWith({ type: 'sendTaskMessage', text: 'hello' });
+  });
+
+  describe('Esc Esc to interrupt', () => {
+    const esc = (input: HTMLElement): void => { act(() => { fireEvent.keyDown(input, { key: 'Escape' }); }); };
+
+    it('arms on the first Esc with a hint and interrupts on the second', () => {
+      render(<TaskLogApp />);
+      init({ working: true });
+      const input = screen.getByPlaceholderText(/Message the task/);
+
+      esc(input);
+      expect(screen.getByText('Press Esc again to stop')).toBeTruthy();
+      expect(api.postMessage).not.toHaveBeenCalledWith({ type: 'interruptTask' });
+
+      esc(input);
+      expect(screen.queryByText('Press Esc again to stop')).toBeNull();
+      expect(api.postMessage).toHaveBeenCalledWith({ type: 'interruptTask' });
+    });
+
+    it('lets the arm lapse after a pause', () => {
+      vi.useFakeTimers();
+      try {
+        render(<TaskLogApp />);
+        init({ working: true });
+        esc(screen.getByPlaceholderText(/Message the task/));
+        act(() => { vi.advanceTimersByTime(2_100); });
+        expect(screen.queryByText('Press Esc again to stop')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does nothing when no turn is live', () => {
+      render(<TaskLogApp />);
+      init({ working: false });
+      const input = screen.getByPlaceholderText(/Message the task/);
+      esc(input);
+      esc(input);
+      expect(screen.queryByText('Press Esc again to stop')).toBeNull();
+      expect(api.postMessage).not.toHaveBeenCalledWith({ type: 'interruptTask' });
+    });
   });
 
   it('switches to an earlier attempt', () => {
@@ -106,10 +165,10 @@ describe('the task log tab (ADR-0018, V1)', () => {
 
     const input = screen.getByPlaceholderText(/Continue the task/);
     act(() => { fireEvent.change(input, { target: { value: 'also handle arrays' } }); });
-    act(() => { fireEvent.click(screen.getByText('Continue')); });
+    act(() => { fireEvent.click(screen.getByLabelText('Continue')); });
 
     expect(api.postMessage).toHaveBeenCalledWith({ type: 'continueTask', text: 'also handle arrays' });
-    expect(screen.queryByText('Send')).toBeNull();
+    expect(screen.queryByLabelText('Send')).toBeNull();
   });
 
   describe('a runner\'s tool request (ADR-0018, A1)', () => {

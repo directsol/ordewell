@@ -5120,9 +5120,7 @@ body {
 }
 
 .task-log-detail,
-.task-log-interrupt,
-.task-log-attempt,
-.task-log-send {
+.task-log-attempt {
   font-family: inherit;
   font-size: 11px;
   flex-shrink: 0;
@@ -5157,19 +5155,6 @@ body {
   border: 1px solid var(--border-color);
   background: var(--bg-input);
   color: var(--text-primary);
-}
-
-.task-log-interrupt {
-  padding: 2px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--red);
-  background: var(--red-subtle);
-  color: var(--red);
-  cursor: pointer;
-}
-
-.task-log-interrupt:hover {
-  background: color-mix(in srgb, var(--red) 22%, transparent);
 }
 
 .task-log-error {
@@ -5285,23 +5270,4 @@ body {
 .task-log-input:focus {
   outline: none;
   border-color: var(--accent);
-}
-
-.task-log-send {
-  padding: 6px 14px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--accent-emphasis);
-  background: var(--accent-emphasis);
-  color: #ffffff;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.task-log-send:hover:not(:disabled) {
-  opacity: 0.85;
-}
-
-.task-log-send:disabled {
-  opacity: 0.5;
-  cursor: default;
 }

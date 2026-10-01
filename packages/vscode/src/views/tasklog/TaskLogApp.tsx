@@ -11,11 +11,13 @@ const vscode = acquireVsCodeApi();
 
 function noop(): void {}
 
+const STOP_ARM_MS = 2_000;
+
 /**
  * One structured task's log (ADR-0018, V1), in its own editor tab. It draws
  * the same display blocks as the planner chat through the same components and
  * stylesheet, and adds what only a task has: a live-state header, a message
- * box, the queued messages, an interrupt, and an attempt switcher. The host
+ * box that also stops the turn, the queued messages, and an attempt switcher. The host
  * reduces the log and patches blocks in; nothing here knows the event format.
  */
 export default function TaskLogApp() {
@@ -24,6 +26,7 @@ export default function TaskLogApp() {
   const [detailAll, setDetailAll] = useState(false);
   const [text, setText] = useState('');
   const [error, setError] = useState('');
+  const [stopArmed, setStopArmed] = useState(false);
 
   const blocks = useMemo(() => patchedBlocks(view), [view]);
   const state = status ? taskLogState(status) : null;
@@ -73,9 +76,40 @@ export default function TaskLogApp() {
     setText('');
   };
 
+  const working = status?.working === true;
+
+  // The pairing is what keeps a stray tap from interrupting a turn, so an arm
+  // lapses on its own, and never outlives the turn it was aimed at.
+  useEffect(() => {
+    if (!stopArmed) return;
+    if (!working) {
+      setStopArmed(false);
+      return;
+    }
+    const timer = setTimeout(() => setStopArmed(false), STOP_ARM_MS);
+    return () => clearTimeout(timer);
+  }, [stopArmed, working]);
+
   const onComposerKeyDown = (e: React.KeyboardEvent): void => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send();
+    if (e.key === 'Escape' && working) {
+      e.preventDefault();
+      if (stopArmed) {
+        setStopArmed(false);
+        vscode.postMessage({ type: 'interruptTask' });
+      } else {
+        setStopArmed(true);
+      }
+      return;
+    }
+    if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return;
+    e.preventDefault();
+    send();
   };
+
+  // One button, as in the planner's composer: Stop only while a turn is live
+  // and nothing is typed, so typing a message always turns it back into Send.
+  const stops = working && !canSend;
+  const sendLabel = continues ? 'Continue' : 'Send';
 
   return (
     <div className="task-log-container">
@@ -98,11 +132,6 @@ export default function TaskLogApp() {
                 {status.attempts.map((attempt) => <option key={attempt} value={attempt}>{attempt}</option>)}
               </select>
             </label>
-          )}
-          {status.working && (
-            <button type="button" className="task-log-interrupt" onClick={() => vscode.postMessage({ type: 'interruptTask' })}>
-              Interrupt
-            </button>
           )}
         </div>
       )}
@@ -134,11 +163,26 @@ export default function TaskLogApp() {
         </div>
       )}
 
+      {stopArmed && <div className="stop-hint" role="status">Press Esc again to stop</div>}
+
       <div className="task-log-composer">
         <textarea className="task-log-input" value={text} rows={2}
-          placeholder={continues ? 'Continue the task in its saved session… (Ctrl+Enter to send)' : 'Message the task… (Ctrl+Enter to send)'}
+          placeholder={`${continues ? 'Continue the task in its saved session…' : 'Message the task…'} (Enter to send, Shift+Enter for a new line)`}
           onChange={(e) => setText(e.target.value)} onKeyDown={onComposerKeyDown} />
-        <button type="button" className="task-log-send" disabled={!canSend} onClick={send}>{continues ? 'Continue' : 'Send'}</button>
+        <button type="button" className={`send-btn${stops ? ' processing' : ''}`}
+          disabled={!stops && !canSend}
+          title={stops ? 'Interrupt (Esc Esc)' : `${sendLabel} (Enter)`} aria-label={stops ? 'Interrupt' : sendLabel}
+          onClick={stops ? () => vscode.postMessage({ type: 'interruptTask' }) : send}>
+          {stops ? (
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+              <rect x="0" y="0" width="12" height="12" rx="2" />
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M2 8L14 2L8 14L6.5 9.5L2 8Z" fill="currentColor" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+            </svg>
+          )}
+        </button>
       </div>
     </div>
   );
