@@ -20,18 +20,21 @@ async function printed(fn: () => Promise<void>): Promise<string> {
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('handleTransport', () => {
-  it.each(['terminal', 'structured'])('%s sets it through the daemon command and says it is experimental', async (transport) => {
+  it.each([
+    ['terminal', 'terminal'],
+    ['structured', 'structured (experimental)'],
+  ])('%s sets it through the daemon command and labels only structured experimental', async (transport, label) => {
     const api = fakeApi({});
     const out = await printed(() => handleTransport([transport], api as unknown as ApiClient));
     expect(api.sendCommand).toHaveBeenCalledWith('transport', { action: transport });
-    expect(out).toContain(`Runner transport (experimental): ${transport} — applies from the next run`);
+    expect(out).toContain(`Runner transport: ${label} — applies from the next run`);
   });
 
   it('with no argument shows the setting and the usage, changing nothing', async () => {
     const api = fakeApi({ runnerTransport: 'structured' });
     const out = await printed(() => handleTransport([], api as unknown as ApiClient));
     expect(api.sendCommand).not.toHaveBeenCalled();
-    expect(out).toContain('Runner transport (experimental): structured');
+    expect(out).toContain('Runner transport: structured (experimental)');
     expect(out).toContain('Usage: ordewell transport [terminal|structured]');
   });
 });

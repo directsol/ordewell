@@ -1,7 +1,7 @@
 import { ensureDaemon, ApiClient, resolvePort } from '../daemonClient';
 
 const describe = (transport: unknown): string =>
-  `Runner transport (experimental): ${transport === 'structured' ? 'structured' : 'terminal'} — applies from the next run`;
+  `Runner transport: ${transport === 'structured' ? 'structured (experimental)' : 'terminal'} — applies from the next run`;
 
 export async function handleTransport(subArgs: string[], api?: ApiClient): Promise<void> {
   const action = subArgs[0];

@@ -863,6 +863,14 @@ describe('skills and settings', () => {
     expect(h.actions).toContainEqual({ type: 'notice', message: 'Runner transport is structured (experimental) — it applies from the next run.' });
   });
 
+  it('only labels the structured transport experimental', async () => {
+    const h = harness();
+    h.api.sendCommand.mockResolvedValueOnce({ ok: true, settings: { runnerTransport: 'terminal' } });
+    await runEffect({ type: 'setTransport', transport: 'terminal' }, h.deps);
+
+    expect(h.actions).toContainEqual({ type: 'notice', message: 'Runner transport is terminal — it applies from the next run.' });
+  });
+
   it('persists the orchestrator model to .env as well as the running daemon', async () => {
     const h = harness();
     await runEffect({ type: 'setModel', modelId: 'a/b' }, h.deps);
