@@ -131,12 +131,12 @@ describe('recording the transport on the task', () => {
   it('records the fallback and its reason for a runner with no connector', async () => {
     const { runner } = routingRunner();
     const orchestrator = orchestratorWith({ value: 'structured' }, runner);
-    orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'Only', prompt: 'do it', assignedRunner: 'codex' })], ['codex']);
+    orchestrator.loadPlan([createTask({ id: 't1', order: 1, title: 'Only', prompt: 'do it', assignedRunner: 'my-plugin' })], ['my-plugin']);
 
     await orchestrator.forceStartTask('t1');
 
     const status = serializeTaskStatus(orchestrator.storeInstance.get('t1')!);
-    expect(status.transport).toEqual({ kind: 'terminal', fallback: 'no structured connector for Codex yet' });
+    expect(status.transport).toEqual({ kind: 'terminal', fallback: 'no structured connector for my-plugin yet' });
   });
 
   it('names a host that cannot run structured tasks as the reason, never falling back silently', async () => {

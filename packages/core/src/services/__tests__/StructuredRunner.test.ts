@@ -3,6 +3,7 @@ import { StructuredRunner } from '../StructuredRunner';
 import type { RunnerSpawnOptions } from '../AbstractRunner';
 import { HeadlessSession } from '../HeadlessRunner';
 import { RunnerRegistry } from '../../plugins/RunnerRegistry';
+import { CLAUDE_CODE_MANIFEST } from '../../plugins/builtin/claude-code.manifest';
 import { isStructuredSession, type ITerminalSession, type StructuredEvent, type StructuredTurnEnd } from '../../interfaces/ITerminalRunner';
 import { TaskModeUnsupportedError, type AgentEvent, type AgentStartOptions, type TaskModeAgentAdapter } from '../harness/AgentAdapter';
 import { ClaudeCodeAdapter } from '../harness/ClaudeCodeAdapter';
@@ -228,7 +229,12 @@ describe('StructuredRunner spawn', () => {
 
   it('refuses a runner without a task-mode connector', async () => {
     const { runner, spawned } = harness([]);
-    await expect(runner.spawn(options({ runner: 'codex' }))).rejects.toBeInstanceOf(TaskModeUnsupportedError);
+    const withPlugin = new class extends RunnerRegistry {
+      override get(id: string) {
+        return id === 'my-plugin' ? { manifest: { ...CLAUDE_CODE_MANIFEST, name: 'my-plugin' }, source: 'user' as const } : super.get(id);
+      }
+    }();
+    await expect(runner.spawn(options({ runner: 'my-plugin', registry: withPlugin }))).rejects.toBeInstanceOf(TaskModeUnsupportedError);
     expect(spawned.processes).toHaveLength(0);
     expect(runner.activeCount).toBe(0);
   });

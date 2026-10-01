@@ -139,12 +139,6 @@ export class TaskModeUnsupportedError extends Error {
   }
 }
 
-/** Narrow a start to the planner, refusing task mode for adapters that only plan. */
-export function plannerOnly(runner: string, opts: AgentStartOptions): PlannerStartOptions {
-  if (opts.kind !== 'planner') throw new TaskModeUnsupportedError(runner);
-  return opts;
-}
-
 export interface AgentAdapter {
   /** The runner id this adapter drives — `claude-code`, `codex`, `opencode`. */
   readonly agentId: string;
