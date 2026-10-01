@@ -66,6 +66,8 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
   private betweenTurns: AgentEvent[] = [];
   /** Set once a turn has ended: after that, out-of-turn events are stale, not startup. */
   private hadTurn = false;
+  /** A task's session, which wants what the agent says on its own after a turn closed; a planner registers none and drops it. */
+  private outOfTurnListener: ((event: AgentEvent) => void) | null = null;
   private disposed = false;
   /** Resolves when the process ends, so a handshake can lose the race instead of waiting out its timeout. */
   protected processEnded!: Promise<void>;
@@ -137,6 +139,7 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
         this.turnActivity?.();
         this.handleLine(line, (event) => {
           if (this.turnEmit) this.turnEmit(event);
+          else if (this.hadTurn && this.outOfTurnListener) this.outOfTurnListener(event);
           else if (!this.hadTurn && !TURN_SCOPED_EVENTS.has(event.type) && this.betweenTurns.length < BETWEEN_TURN_EVENT_CAP) {
             this.betweenTurns.push(event);
           }
@@ -224,6 +227,10 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
     });
   }
 
+  onOutOfTurn(listener: (event: AgentEvent) => void): void {
+    this.outOfTurnListener = listener;
+  }
+
   nativeSessionId(): string | null { return this.sessionId; }
 
   onProcessExit(listener: (code: number) => void): void {
@@ -236,6 +243,7 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
     if (this.disposed) return;
     this.disposed = true;
     this.turnEmit = null;
+    this.outOfTurnListener = null;
     const proc = this.process;
     this.process = null;
     // Tree-wide, because on Windows the direct child may be the cmd.exe shim

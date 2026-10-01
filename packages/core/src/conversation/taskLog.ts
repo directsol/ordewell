@@ -200,7 +200,9 @@ function decideApproval(view: TaskLogView, { approvalId, decision, note }: Event
 
 function startTurn(view: TaskLogView, { message, messageId }: Event<'turn_start'>): TaskLogView {
   const queued = messageId ? view.queued.filter((m) => m.id !== messageId) : view.queued;
-  return append({ ...view, queued, working: true }, (id) => settledMessage(id, 'user', message));
+  const working = { ...view, queued, working: true };
+  // A turn the runner opened itself has no user message to show.
+  return message ? append(working, (id) => settledMessage(id, 'user', message)) : working;
 }
 
 const CUT: Record<StructuredTurnEnd, SubagentStatus | null> = { completed: null, interrupted: 'stopped', failed: 'failed' };

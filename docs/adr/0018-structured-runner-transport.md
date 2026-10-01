@@ -76,7 +76,22 @@ transport is unchanged and stays the default.
   Interrupt is Claude's soft `control_request` interrupt, with kill-and-resume
   as the fallback; an interrupted turn becomes "waiting for input".
   `session.write(text)` means "send as a user message", so checkpoint replies
-  work unchanged.
+  work unchanged. Clarifying questions are plain text for now: a task starts
+  with `AskUserQuestion` disallowed, so the agent asks in prose and ends its
+  turn; a question card is a later option.
+- **Background work (B1).** Claude Code reports a turn's `result` when the
+  model stops talking, even with a background shell or agent still running, and
+  opens a turn of its own when the work finishes. The Claude connector therefore
+  holds a task's turn open while the CLI lists background tasks, so what is said
+  afterwards — the marker included — belongs to the same turn. If the CLI starts
+  no follow-on turn once the list is empty, the turn ends after a short grace.
+  Anything a runner does by itself after a turn has closed is delivered to the
+  session as a turn of its own, with no user message, instead of being dropped.
+- **The plan's mode is held (B2).** `--permission-mode auto` on a model or
+  account without auto mode is not refused: the CLI starts in `default` and
+  asks about every write. The connector compares the mode `init` reports with
+  the one the plan asked for and fails the turn in plain words on a mismatch
+  (ADR-0001).
 - **Lifetime (L1).** A structured process ends once its task passes. This
   deliberately differs from `LingeringRunners` for terminal tasks: the log
   lives in Ordewell, and work after the verdict would go unverified. The native

@@ -92,6 +92,51 @@ async function firstTurn(spawned: FakeSpawnResult): Promise<void> {
   await until(() => (spawned.processes[0]?.written.length ?? 0) > 0);
 }
 
+describe('StructuredRunner out-of-turn output', () => {
+  // The turn that follows a background task, recorded from `claude` 2.1.286, which the CLI
+  // opens by itself with no user message behind it.
+  const wakeTurn = fixture('claude-code', 'task-background').split('\n').slice(
+    fixture('claude-code', 'task-background').split('\n').findIndex((line) => line.includes('"task_notification"')) + 1,
+  ).join('\n');
+
+  it('shows a turn the runner starts on its own as a turn of the task, and keeps the task working until it ends', async () => {
+    const { runner, spawned } = harness([fixture('claude-code', 'task-marker')]);
+    const seen = observe(await runner.spawn(options()));
+    await seen.nextTurnEnd();
+    expect(seen.session.turnState()).toBe('idle');
+
+    const ended = seen.nextTurnEnd();
+    spawned.processes[0].emitStdout(wakeTurn);
+    await ended;
+
+    expect(seen.turnEnds).toEqual(['completed', 'completed']);
+    expect(seen.statesAtTurnEnd).toEqual(['idle', 'idle']);
+    expect(seen.chunks.join('')).toContain('FINISHED');
+    const starts = seen.events.filter((e) => e.type === 'turn_start');
+    expect(starts).toHaveLength(2);
+    expect(starts[1]).toMatchObject({ text: '' });
+    seen.session.kill();
+  });
+
+  it('queues a message sent while such a turn runs, and delivers it when the turn ends', async () => {
+    const { runner, spawned } = harness([fixture('claude-code', 'task-marker'), fixture('claude-code', 'task-marker')]);
+    const seen = observe(await runner.spawn(options()));
+    await seen.nextTurnEnd();
+
+    const lines = wakeTurn.split('\n').filter(Boolean);
+    const result = lines.pop()!;
+    spawned.processes[0].emitStdout(`${lines.join('\n')}\n`);
+    await until(() => seen.session.turnState() === 'working');
+    seen.session.sendMessage('and then?');
+    expect(seen.session.queued().map((m) => m.text)).toEqual(['and then?']);
+
+    spawned.processes[0].emitStdout(`${result}\n`);
+    await until(() => userTurns(spawned.processes[0].written).includes('and then?'));
+    expect(seen.session.queued()).toEqual([]);
+    seen.session.kill();
+  });
+});
+
 describe('StructuredRunner spawn', () => {
   it.each([
     ['default', 'default'],
@@ -105,7 +150,8 @@ describe('StructuredRunner spawn', () => {
     const session = await runner.spawn(options({ mode }));
     const args = spawned.lastArgs();
     expect(args[args.indexOf('--permission-mode') + 1]).toBe(expected);
-    expect(args).not.toContain('--disallowedTools');
+    // Only the question tool: a task keeps every other tool its mode allows.
+    expect(args[args.indexOf('--disallowedTools') + 1]).toBe('AskUserQuestion');
     expect(args).not.toContain('--append-system-prompt');
     expect(args).not.toContain('--dangerously-skip-permissions');
     session.kill();
@@ -122,6 +168,7 @@ describe('StructuredRunner spawn', () => {
       '--include-partial-messages',
       '--permission-prompt-tool', 'stdio',
       '--permission-mode', 'acceptEdits',
+      '--disallowedTools', 'AskUserQuestion',
       '--thinking', 'enabled', '--effort', 'high',
       '--model', 'sonnet',
       '--resume', 'sess-prev',
@@ -138,7 +185,7 @@ describe('StructuredRunner spawn', () => {
     const { runner, spawned } = harness([]);
     const session = await runner.spawn(options({ thinkingEffort, modelId }));
     const args = spawned.lastArgs();
-    const from = args.indexOf('--permission-mode') + 2;
+    const from = args.indexOf('--disallowedTools') + 2;
     const to = modelId ? args.indexOf('--model') : args.length;
     expect(args.slice(from, to)).toEqual(expected);
     session.kill();
@@ -222,8 +269,9 @@ describe('StructuredSession output', () => {
   });
 
   it('leaves subagent work out of the plain text, but not out of the events', async () => {
+    // Recorded under plan mode, which the adapter holds the CLI to.
     const { runner } = harness([fixture('claude-code', 'stream-subagent')]);
-    const turn = observe(await runner.spawn(options()));
+    const turn = observe(await runner.spawn(options({ mode: 'plan' })));
     await turn.nextTurnEnd();
     const output = turn.session.getOutput();
     expect(output).toContain('› Agent(Read README first line)');

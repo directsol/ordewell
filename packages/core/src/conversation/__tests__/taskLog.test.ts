@@ -13,6 +13,12 @@ describe('reduceTaskLog', () => {
     expect(unkeyed(view.blocks)).toEqual([{ type: 'message', role: 'user', text: 'Do the task', streaming: false }]);
   });
 
+  it('opens a turn the runner started itself without inventing a user message', () => {
+    const view = replayTaskLog([{ type: 'turn_start', message: '' }, { type: 'text', text: 'FINISHED' }]);
+    expect(view.working).toBe(true);
+    expect(unkeyed(view.blocks)).toEqual([{ type: 'message', role: 'agent', text: 'FINISHED', streaming: false }]);
+  });
+
   it('streams the agent’s text and lets the whole block replace it', () => {
     const streaming = replayTaskLog([start, { type: 'text_delta', text: 'Look' }, { type: 'text_delta', text: 'ing' }]);
     expect(unkeyed(streaming.blocks).at(-1)).toEqual({ type: 'message', role: 'agent', text: 'Looking', streaming: true });
