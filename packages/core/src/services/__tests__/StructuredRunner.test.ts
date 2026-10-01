@@ -3,8 +3,9 @@ import { StructuredRunner } from '../StructuredRunner';
 import type { RunnerSpawnOptions } from '../AbstractRunner';
 import { HeadlessSession } from '../HeadlessRunner';
 import { RunnerRegistry } from '../../plugins/RunnerRegistry';
+import { CLAUDE_CODE_MANIFEST } from '../../plugins/builtin/claude-code.manifest';
 import { isStructuredSession, type ITerminalSession, type StructuredEvent, type StructuredTurnEnd } from '../../interfaces/ITerminalRunner';
-import { TaskModeUnsupportedError, type AgentStartOptions } from '../harness/AgentAdapter';
+import { TaskModeUnsupportedError, type AgentEvent, type AgentStartOptions, type TaskModeAgentAdapter } from '../harness/AgentAdapter';
 import { ClaudeCodeAdapter } from '../harness/ClaudeCodeAdapter';
 import type { SpawnFn } from '../HeadlessRunner';
 import { fakeSpawn, fixture, type FakeSpawnResult, type ScriptedReply } from './harnessTestKit';
@@ -181,7 +182,12 @@ describe('StructuredRunner spawn', () => {
 
   it('refuses a runner without a task-mode connector', async () => {
     const { runner, spawned } = harness([]);
-    await expect(runner.spawn(options({ runner: 'opencode' }))).rejects.toBeInstanceOf(TaskModeUnsupportedError);
+    const withPlugin = new class extends RunnerRegistry {
+      override get(id: string) {
+        return id === 'my-plugin' ? { manifest: { ...CLAUDE_CODE_MANIFEST, name: 'my-plugin' }, source: 'user' as const } : super.get(id);
+      }
+    }();
+    await expect(runner.spawn(options({ runner: 'my-plugin', registry: withPlugin }))).rejects.toBeInstanceOf(TaskModeUnsupportedError);
     expect(spawned.processes).toHaveLength(0);
     expect(runner.activeCount).toBe(0);
   });
@@ -263,6 +269,34 @@ describe('StructuredSession output', () => {
     const answer = JSON.parse(spawned.processes[0].written[1]) as { response: { request_id: string } };
     expect(answer.response.request_id).toBe('9a948184-6792-4049-85b1-3e837387f618');
     expect(turn.session.answerPermission(id, { decision: 'deny' })).toBe(false);
+    turn.session.kill();
+  });
+
+  it('shows a request the task\'s mode already answered as asked and decided, with nothing left open', async () => {
+    const answered: string[] = [];
+    const decided: AgentEvent = { type: 'permission_request', id: 'per_1', name: 'bash', detail: '{}', decided: { decision: 'allow' } };
+    const adapter: TaskModeAgentAdapter = {
+      agentId: 'opencode',
+      start: async () => {},
+      send: async (_message, onEvent) => { onEvent(decided); onEvent({ type: 'turn_end' }); },
+      nativeSessionId: () => null,
+      dispose: () => {},
+      interrupt: async () => true,
+      onProcessExit: () => {},
+      answerPermission: (id) => { answered.push(id); return true; },
+    };
+    const runner = new StructuredRunner({ createAdapter: () => adapter });
+    const turn = observe(await runner.spawn(options({ runner: 'opencode', mode: 'build' })));
+    await turn.nextTurnEnd();
+
+    const id = `${turn.session.id}-perm-1`;
+    const permissionEvents = turn.events.filter((e) => e.type.startsWith('permission_'));
+    expect(permissionEvents).toEqual([
+      { ...decided, id },
+      { type: 'permission_decided', id, decision: { decision: 'allow' } },
+    ]);
+    expect(turn.session.answerPermission(id, { decision: 'deny' })).toBe(false);
+    expect(answered).toEqual([]);
     turn.session.kill();
   });
 

@@ -57,8 +57,10 @@ export type AgentEvent =
    *
    * `input` and `suggestions` are the raw request; `suggestions` are the
    * agent's own session-scoped grants, what "Allow for this task" answers with.
+   * `decided` marks a request the task's mode already answered — the adapter
+   * replied as the manifest says that mode does — so it is shown, never asked.
    */
-  | { type: 'permission_request'; id: string; name: string; detail: string; input?: Record<string, unknown>; suggestions?: unknown[]; toolUseId?: string }
+  | { type: 'permission_request'; id: string; name: string; detail: string; input?: Record<string, unknown>; suggestions?: unknown[]; toolUseId?: string; decided?: ApprovalDecision }
   /** The agent withdrew an open request — an interrupt cancels the call it was for. It takes no answer now. */
   | { type: 'permission_cancelled'; id: string }
   /**
@@ -135,12 +137,6 @@ export class TaskModeUnsupportedError extends Error {
     super(`${runner} has no structured task connector yet; its tasks run on the terminal transport.`);
     this.name = 'TaskModeUnsupportedError';
   }
-}
-
-/** Narrow a start to the planner, refusing task mode for adapters that only plan. */
-export function plannerOnly(runner: string, opts: AgentStartOptions): PlannerStartOptions {
-  if (opts.kind !== 'planner') throw new TaskModeUnsupportedError(runner);
-  return opts;
 }
 
 export interface AgentAdapter {

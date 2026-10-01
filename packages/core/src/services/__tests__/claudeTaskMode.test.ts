@@ -173,23 +173,18 @@ describe('ClaudeCodeAdapter task argv for every effort and mode', () => {
 });
 
 describe('task mode support', () => {
-  it('is Claude Code and Codex for now', () => {
+  it('is every built-in runner', () => {
     expect(supportsTaskMode('claude-code')).toBe(true);
     expect(supportsTaskMode('codex')).toBe(true);
+    expect(supportsTaskMode('opencode')).toBe(true);
     expect(createTaskAdapter('codex', deps([]).processDeps)).toBeInstanceOf(CodexAdapter);
-    expect(supportsTaskMode('opencode')).toBe(false);
+    expect(createTaskAdapter('opencode', deps([]).processDeps)).toBeInstanceOf(OpenCodeAdapter);
     expect(supportsTaskMode('toString')).toBe(false);
-    expect(() => createTaskAdapter('opencode', deps([]).processDeps)).toThrow(TaskModeUnsupportedError);
   });
 
-  it.each([
-    ['opencode', (d: AgentProcessDeps) => new OpenCodeAdapter(d)],
-  ])('%s refuses task mode with a typed error and spawns nothing', async (runner, make) => {
-    const { spawned, processDeps } = deps([]);
-    const started = make(processDeps).start(taskStart());
-    await expect(started).rejects.toBeInstanceOf(TaskModeUnsupportedError);
-    await expect(started).rejects.toThrow(`${runner} has no structured task connector yet`);
-    expect(spawned.processes).toHaveLength(0);
+  it('refuses a runner without a connector with a typed error', () => {
+    expect(() => createTaskAdapter('my-plugin', deps([]).processDeps)).toThrow(TaskModeUnsupportedError);
+    expect(() => createTaskAdapter('my-plugin', deps([]).processDeps)).toThrow('my-plugin has no structured task connector yet');
   });
 });
 

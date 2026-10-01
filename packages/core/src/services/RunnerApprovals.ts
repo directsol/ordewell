@@ -63,7 +63,8 @@ export class RunnerApprovals {
     const open = new Set<string>();
     this.open.set(session.id, open);
     session.onEvent((event) => {
-      if (event.type === 'permission_request') {
+      // One the task's mode already answered has nothing left to ask.
+      if (event.type === 'permission_request' && !event.decided) {
         open.add(event.id);
         void this.approvals.decide(runnerRequest(taskId, event), {
           id: event.id,
