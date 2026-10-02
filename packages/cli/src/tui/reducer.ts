@@ -25,7 +25,25 @@ export { markAction } from './reducers/planPane';
 export { resolveTaskId } from './reducers/taskEdits';
 export type { Action, Effect, Step, TaskAction } from './reducers/shared';
 
+/**
+ * Live output never moves a reader who scrolled back: the offset counts lines
+ * from the tail, so lines arriving below would otherwise slide what they are
+ * reading upward. At the tail (scroll 0) the pane just follows.
+ */
+function holdReadingPlace(before: TuiState, after: TuiState): TuiState {
+  if (before.scroll <= 0 || after.scroll !== before.scroll) return after;
+  if (before.taskView?.taskId !== after.taskView?.taskId) return after;
+  const grown = chatScrollMax(after) - chatScrollMax(before);
+  return grown > 0 ? { ...after, scroll: clamp(after.scroll + grown, chatScrollMax(after)) } : after;
+}
+
 export function reduce(state: TuiState, action: Action): Step {
+  const result = reduceAction(state, action);
+  if (action.type !== 'sessionMessage' && action.type !== 'taskLog') return result;
+  return { ...result, state: holdReadingPlace(state, result.state) };
+}
+
+function reduceAction(state: TuiState, action: Action): Step {
   switch (action.type) {
     case 'key':
       return handleKey(state, action.key);

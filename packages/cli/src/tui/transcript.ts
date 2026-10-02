@@ -10,11 +10,7 @@ import type { TuiState } from './state';
 function show(state: TuiState, { view: conversation, gate: turnGate }: GatedConversation): TuiState {
   const gated = turnGate === state.turnGate ? state : { ...state, turnGate };
   if (conversation === state.conversation) return gated;
-  // A new block snaps a scrolled-back pane to the tail — following the
-  // conversation beats keeping the reading position. A block growing in
-  // place is the same line still arriving, and leaves the pane where it is.
-  const scroll = conversation.nextId > state.conversation.nextId ? 0 : state.scroll;
-  return { ...gated, conversation, scroll };
+  return { ...gated, conversation };
 }
 
 function fold(state: TuiState, input: ConversationInput): TuiState {
@@ -23,7 +19,10 @@ function fold(state: TuiState, input: ConversationInput): TuiState {
 
 /** A line the TUI adds itself: the user's prompt, a notice, an error. */
 export function say(state: TuiState, role: LocalEntry['role'], text: string): TuiState {
-  return fold(state, { type: 'local_entry', role, text });
+  const said = fold(state, { type: 'local_entry', role, text });
+  // The TUI's own lines answer something the reader just did, so they bring
+  // the pane to the tail. Live output from the session or a task does not.
+  return said.conversation.nextId > state.conversation.nextId ? { ...said, scroll: 0 } : said;
 }
 
 /** A planner message from the session, folded into the conversation. */

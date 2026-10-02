@@ -43,6 +43,11 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
   looked for a tmux window the task never had, and said it "hasn't opened a
   terminal yet". A task with a saved log now opens that log, and a task with
   neither says so plainly.
+- **The terminal UI keeps your place when you scroll back.** The planner chat
+  jumped to the newest line whenever a block arrived, and a task log slid what
+  you were reading upward as lines came in below. Both now hold the lines you
+  were on while you read back, and follow new output once you are at the bottom
+  again. What you send yourself still brings the pane to the bottom.
 - **Live logs in VS Code follow new output again.** The task log, the planner
   conversation and a task card's runner output now stay on the newest lines
   while you are at the bottom, and stop following as soon as you scroll up to
