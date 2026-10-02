@@ -1352,6 +1352,120 @@ describe.skipIf(!hasGit)('WorktreeIsolation end-of-run handoff', () => {
   });
 });
 
+describe.skipIf(!hasGit)('WorktreeIsolation for merge gates and ops tasks (ADR-0020)', () => {
+  async function landedOne(root: string) {
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const t = task(1, 'Add alpha');
+    const { cwd } = await iso.prepare(t, run);
+    writeFileSync(join(cwd, 'alpha.txt'), 'alpha\n');
+    expect(await iso.integrate(t, run)).toBe('merged');
+    return { iso, run };
+  }
+
+  it('records the integration tip each task landed at', async () => {
+    const root = repo();
+    const { run } = await landedOne(root);
+    expect(run.tasks['task-1'].repos['.'].landedTip).toBe(git(root, 'rev-parse', run.repos[0].integrationBranch));
+  });
+
+  it('finds landed work in HEAD only once the user has merged it, mid-run included', async () => {
+    const root = repo();
+    const { iso, run } = await landedOne(root);
+    expect(await iso.findInHead(run)).toEqual([]);
+
+    expect(await iso.mergeIntoCheckedOut(run)).toEqual({ outcome: 'merged' });
+
+    expect(await iso.findInHead(run)).toEqual(['task-1']);
+    expect(run.tasks['task-1'].inHead).toBe(true);
+    expect(await iso.findInHead(run)).toEqual([]);
+    // A later task still lands on the integration branch the merge left in place.
+    const t2 = task(2, 'Add beta');
+    const { cwd } = await iso.prepare(t2, run);
+    writeFileSync(join(cwd, 'beta.txt'), 'beta\n');
+    expect(await iso.integrate(t2, run)).toBe('merged');
+    expect(await iso.findInHead(run)).toEqual([]);
+  });
+
+  it('counts a merge done by hand with git', async () => {
+    const root = repo();
+    const { iso, run } = await landedOne(root);
+    git(root, 'merge', '-q', '--no-edit', run.repos[0].integrationBranch);
+    expect(await iso.findInHead(run)).toEqual(['task-1']);
+  });
+
+  it('holds Merge all back until a landing in flight has finished', async () => {
+    const root = repo();
+    let reached!: () => void;
+    const atMerge = new Promise<void>((resolve) => { reached = resolve; });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const execFileImpl: GitExecFn = async (file, args, opts) => {
+      if (args[0] === 'merge' && args.includes('--no-ff')) {
+        reached();
+        await held;
+      }
+      const { stdout, stderr } = await execFileAsync(file, args, { cwd: opts.cwd, env: opts.env });
+      return { stdout: String(stdout), stderr: String(stderr) };
+    };
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }), execFileImpl });
+    const run = await iso.startRun(root);
+    const t = task(1, 'Add alpha');
+    const { cwd } = await iso.prepare(t, run);
+    writeFileSync(join(cwd, 'alpha.txt'), 'alpha\n');
+
+    const landing = iso.integrate(t, run);
+    await atMerge;
+    const merge = iso.mergeIntoCheckedOut(run);
+    release();
+
+    expect(await landing).toBe('merged');
+    expect(await merge).toEqual({ outcome: 'merged' });
+    expect(readFileSync(join(root, 'alpha.txt'), 'utf8')).toBe('alpha\n');
+  });
+
+  it('snapshots tracked changes and names only those made since, never untracked files', async () => {
+    const root = repo({ 'README.md': 'hello\n', 'notes.md': 'notes\n' });
+    writeFileSync(join(root, 'notes.md'), 'the user was here\n');
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const snapshot = await iso.snapshotTree(root, []);
+    expect(snapshot).toEqual({ '.': { 'notes.md': expect.any(String) } });
+    expect(await iso.changedSince(root, snapshot!)).toEqual([]);
+
+    writeFileSync(join(root, 'README.md'), 'changed\n');
+    writeFileSync(join(root, 'notes.md'), 'changed again\n');
+    writeFileSync(join(root, 'deploy.log'), 'untracked output\n');
+
+    expect(await iso.changedSince(root, snapshot!)).toEqual(['README.md', 'notes.md']);
+    // Neither the tree, the index nor the stash list is touched.
+    expect(git(root, 'stash', 'list')).toBe('');
+    expect(readFileSync(join(root, 'README.md'), 'utf8')).toBe('changed\n');
+  });
+
+  it('does not count commits an ops task made to history, only uncommitted changes', async () => {
+    const root = repo();
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const snapshot = await iso.snapshotTree(root, []);
+    git(root, 'commit', '-q', '--amend', '-m', 'reworded');
+    expect(await iso.changedSince(root, snapshot!)).toEqual([]);
+  });
+
+  it('snapshots every repo of a group, leaving out those excluded', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ordewell-group-')));
+    roots.push(dir);
+    initRepo(join(dir, 'api'), { 'a.txt': 'a\n' });
+    initRepo(join(dir, 'web'), { 'w.txt': 'w\n' });
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const snapshot = await iso.snapshotTree(dir, ['web']);
+    expect(Object.keys(snapshot!)).toEqual(['api']);
+
+    writeFileSync(join(dir, 'api', 'a.txt'), 'changed\n');
+    writeFileSync(join(dir, 'web', 'w.txt'), 'changed\n');
+
+    expect(await iso.changedSince(dir, snapshot!)).toEqual(['api/a.txt']);
+  });
+});
+
 describe.skipIf(!hasGit)('WorktreeIsolation over a repo group', () => {
   // A folder that is not a repository: three repositories with commits, one
   // with none, a loose file, a loose directory, and a gitignored `.env`.

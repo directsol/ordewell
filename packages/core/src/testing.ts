@@ -13,6 +13,7 @@ import type {
   PreparedTask,
   IWorktreeIsolation,
   RepairEvidence,
+  TreeSnapshot,
 } from './interfaces/IWorktreeIsolation';
 import type { Task } from './models/Task';
 import { handoffOf, integrationBranchFor, SELF_REPO } from './services/isolationRecord';
@@ -201,7 +202,7 @@ export type FakeIsolationCall =
   | { op: 'prepare' | 'reopen' | 'verifyRepair'; taskId: string }
   | { op: 'integrate'; taskId: string }
   | { op: 'release'; taskId: string; keep: boolean }
-  | { op: 'handoff' | 'pruneOrphans' | 'reviewDiff' | 'mergeIntoCheckedOut' | 'sweep' }
+  | { op: 'handoff' | 'pruneOrphans' | 'reviewDiff' | 'mergeIntoCheckedOut' | 'sweep' | 'findInHead' | 'snapshotTree' | 'changedSince' }
   | { op: 'discard'; integration: IntegrationDisposal };
 
 /**
@@ -224,8 +225,14 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
   stopsIn = new Map<string, string>();
   /** Per task id, the files a `conflict` outcome names; empty when not listed. */
   conflictFiles = new Map<string, string[]>();
-  /** What `mergeIntoCheckedOut` answers. */
+  /** What `mergeIntoCheckedOut` answers; a `merged` one also puts every landed task in HEAD, as git would. */
   mergeResult: IsolationMergeResult = { outcome: 'merged' };
+  /** Task ids whose landed work `findInHead` finds in HEAD besides those a merge put there, as a merge by hand would. */
+  mergedByHand = new Set<string>();
+  /** What `snapshotTree` answers; null as for a workspace with no repo. */
+  treeSnapshot: TreeSnapshot | null = {};
+  /** What `changedSince` answers: the tracked files an ops task changed. */
+  changedFiles: string[] = [];
   /** What `startRun` shares and `prepare` copies, to exercise their notices. */
   shared: string[] = [];
   sharedRepos: string[] = [];
@@ -366,7 +373,25 @@ export class FakeWorktreeIsolation implements IWorktreeIsolation {
     return { kept: [...this.keptOnPrune] };
   }
   async reviewDiff(): Promise<string> { this.log({ op: 'reviewDiff' }); return ''; }
-  async mergeIntoCheckedOut(): Promise<IsolationMergeResult> { this.log({ op: 'mergeIntoCheckedOut' }); return this.mergeResult; }
+  async mergeIntoCheckedOut(run: IsolationRun): Promise<IsolationMergeResult> {
+    this.log({ op: 'mergeIntoCheckedOut' });
+    if (this.mergeResult.outcome === 'merged') {
+      for (const record of Object.values(run.tasks)) if (record.status === 'merged') this.mergedByHand.add(record.taskId);
+    }
+    return this.mergeResult;
+  }
+  async findInHead(run: IsolationRun): Promise<string[]> {
+    this.log({ op: 'findInHead' });
+    const found: string[] = [];
+    for (const record of Object.values(run.tasks)) {
+      if (record.status !== 'merged' || record.inHead || !this.mergedByHand.has(record.taskId)) continue;
+      record.inHead = true;
+      found.push(record.taskId);
+    }
+    return found;
+  }
+  async snapshotTree(): Promise<TreeSnapshot | null> { this.log({ op: 'snapshotTree' }); return this.treeSnapshot; }
+  async changedSince(): Promise<string[]> { this.log({ op: 'changedSince' }); return [...this.changedFiles]; }
   async discard(_run: IsolationRun, opts: { integration: IntegrationDisposal }): Promise<void> {
     this.log({ op: 'discard', integration: opts.integration });
     if (this.discardError) throw this.discardError;

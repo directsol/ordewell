@@ -26,7 +26,7 @@ export interface TaskEditCheck {
   clear?: (keyof Task)[];
 }
 
-const AI_ONLY_FIELDS = ['assignedModel', 'thinkingEffort', 'taskMode', 'autonomy'] as const satisfies readonly (keyof Task)[];
+const AI_ONLY_FIELDS = ['assignedModel', 'thinkingEffort', 'taskMode', 'autonomy', 'ops'] as const satisfies readonly (keyof Task)[];
 
 /**
  * The catalog a model/task-mode edit is checked against — the same discovered
@@ -113,6 +113,27 @@ function typeCoherenceCheck(target: Task, changes: Partial<Task>): TaskEditCheck
   return { ok: true, clear: target.userSteps && target.userSteps.length > 0 ? ['userSteps'] : [] };
 }
 
+/** Statuses of a task that has not started: the only ones whose ops flag may still change (ADR-0020). */
+const NOT_STARTED: ReadonlySet<Task['status']> = new Set<Task['status']>(['pending', 'approved', 'blocked']);
+
+/**
+ * Whether a task may become an ops task, or stop being one (ADR-0020). Only a
+ * top-level AI task can be ops, and the flag decides where the task runs, so
+ * once it has started it is fixed, like its transport.
+ */
+function opsCheck(tasks: readonly Task[], target: Task, changes: Partial<Task>): TaskEditCheck | null {
+  if (!('ops' in changes) || !!changes.ops === !!target.ops) return null;
+  if (!NOT_STARTED.has(target.status)) {
+    return { ok: false, error: `"${target.title}" has started, so whether it is an ops task is fixed` };
+  }
+  if (!changes.ops) return null;
+  if ((changes.type ?? target.type) !== 'ai') return { ok: false, error: `"${target.title}" is a manual task — only an AI task can be an ops task` };
+  if (tasks.some((t) => t.subtasks?.some((s) => s.id === target.id))) {
+    return { ok: false, error: `"${target.title}" is a subtask, which runs with its parent — only a top-level task can be an ops task` };
+  }
+  return null;
+}
+
 /**
  * The rules governing one task edit, shared by both actors. Lock rules
  * (running/completed) apply to the planner only. Well-formedness rules — like
@@ -143,6 +164,9 @@ export function validateTaskEdit(
 
   const coherence = typeCoherenceCheck(target, changes);
   if (coherence && !coherence.ok) return coherence;
+
+  const ops = opsCheck(tasks, target, changes);
+  if (ops) return ops;
 
   const runner = changes.assignedRunner ?? target.assignedRunner;
   const validity = checkModelAndModeValidity(runner, changes.assignedModel, changes.taskMode, catalog);

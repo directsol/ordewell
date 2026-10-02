@@ -45,6 +45,22 @@ const saved = (session: Session) => saves(session).mock.calls.at(-1)?.[0];
 beforeEach(() => { vi.restoreAllMocks(); });
 
 describe('Session with worktree isolation', () => {
+  it('reports a merge gate on status updates, and merges mid-run to open it (ADR-0020)', async () => {
+    const { session, lastStatus, pass, spawn, messages } = setup();
+    const t1 = task('t1', 1);
+    session.loadPlan(plan([t1, task('o2', 2, { ops: true, dependencies: ['t1'] })]), 'goal', '/repo');
+    await session.executePlan();
+    pass(t1);
+    await vi.waitFor(() => expect(lastStatus()!.tasks.find((t) => t.id === 'o2')!.mergeGate).toEqual(['t1']));
+    expect(messages.map((m) => m.type)).not.toContain('execution_complete');
+
+    expect(await session.mergeRun()).toEqual({ outcome: 'merged' });
+
+    await vi.waitFor(() => expect(spawn.mock.calls.map(([o]) => o.taskId)).toContain('o2'));
+    expect(lastStatus()!.tasks.find((t) => t.id === 'o2')!.mergeGate).toBeUndefined();
+    expect(session.isolationView()).not.toBeNull();
+  });
+
   it('reports each task\'s branch, worktree and isolation state on status updates', async () => {
     const { session, lastStatus } = setup();
     session.loadPlan(plan([task('t1', 1), task('t2', 2, { dependencies: ['t1'] })]), 'goal', '/repo');
@@ -323,7 +339,7 @@ describe('Session with worktree isolation', () => {
 
       expect(session.planState!.isolation).toBeUndefined();
       expect(session.isolationView()).toBeNull();
-      const update = messages.find((m) => m.type === 'status_update');
+      const update = messages.filter((m) => m.type === 'status_update').at(-1);
       expect(update?.type === 'status_update' && update.tasks.every((t) => t.isolation === undefined)).toBe(true);
       expect(messages.at(-1)).toEqual({ type: 'isolation_merge', result: { outcome: 'merged' } });
       await expect(session.cleanupRun()).rejects.toThrow('This plan has no isolated run');

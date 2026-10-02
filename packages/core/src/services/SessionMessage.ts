@@ -29,6 +29,14 @@ export type SerializedTaskStatus = {
    * Absent when none do.
    */
   awaitingApproval?: number;
+  /**
+   * The dependencies an ops or user task waits on at its merge gate: their
+   * work has landed but is not merged into the user's branch (ADR-0020).
+   * Absent when it waits for no Merge all.
+   */
+  mergeGate?: string[];
+  /** The dependencies, by title, a force start went past the merge gate of (ADR-0020). */
+  forcedPastGate?: string[];
 };
 
 export type SerializedTask = {
@@ -48,6 +56,8 @@ export type SerializedTask = {
   autonomy: Task['autonomy'];
   sliceType: Task['sliceType'];
   userStoriesCovered: Task['userStoriesCovered'];
+  /** Set only on an ops task (ADR-0020). */
+  ops?: true;
 };
 
 export type SerializedPlan = {
@@ -246,6 +256,7 @@ export function serializeTask(t: Task): SerializedTask {
     autonomy: t.autonomy || undefined,
     sliceType: t.sliceType || undefined,
     userStoriesCovered: t.userStoriesCovered || undefined,
+    ...(t.ops ? { ops: true as const } : {}),
   };
 }
 
@@ -255,6 +266,7 @@ export function serializeTaskStatus(
   isolation: TaskIsolation | null = null,
   queued: readonly QueuedTaskMessage[] = [],
   awaitingApproval = 0,
+  mergeGate: readonly string[] = [],
 ): SerializedTaskStatus {
   return {
     id: t.id,
@@ -269,6 +281,8 @@ export function serializeTaskStatus(
     ...(queued.length > 0 ? { queued: queued.map((m) => ({ ...m })) } : {}),
     ...(canContinue(t) ? { continuable: true as const } : {}),
     ...(awaitingApproval > 0 ? { awaitingApproval } : {}),
+    ...(mergeGate.length > 0 ? { mergeGate: [...mergeGate] } : {}),
+    ...(t.forcedPastGate?.length ? { forcedPastGate: [...t.forcedPastGate] } : {}),
   };
 }
 

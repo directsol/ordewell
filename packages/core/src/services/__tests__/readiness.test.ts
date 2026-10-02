@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { selectReadyTasks, isBlocked, dependencyMet, type ReadinessInput } from '../readiness';
+import { selectReadyTasks, isBlocked, dependencyMet, mergeGate, type ReadinessInput } from '../readiness';
 import { createTask, type Task } from '../../models/Task';
 import type { IsolationTaskRecord, IsolationTaskStatus } from '../../interfaces/IWorktreeIsolation';
 
@@ -9,6 +9,7 @@ function storeOf(tasks: Task[]) {
     allTasks: tasks as ReadonlyArray<Readonly<Task>>,
     isCompleted: (id: string) => byId.get(id)?.status === 'completed',
     isFailed: (id: string) => byId.get(id)?.status === 'failed',
+    isOps: (id: string) => byId.get(id)?.ops === true,
   };
 }
 
@@ -17,7 +18,10 @@ function record(taskId: string, status: IsolationTaskStatus): IsolationTaskRecor
 }
 
 function runsOf(records: Record<string, IsolationTaskRecord> = {}) {
-  return { openRecord: (taskId: string) => records[taskId] };
+  return {
+    openRecord: (taskId: string) => records[taskId],
+    awaitsMerge: (taskId: string) => records[taskId]?.status === 'merged' && !records[taskId]?.inHead,
+  };
 }
 
 function input(tasks: Task[], overrides: Partial<ReadinessInput> = {}): ReadinessInput {
@@ -159,5 +163,43 @@ describe('isBlocked', () => {
   it('does not block a task without dependencies', () => {
     const task = createTask({ id: 't1', order: 1, title: 'Free', prompt: 'x' });
     expect(isBlocked(task, storeOf([task]))).toBe(false);
+  });
+});
+
+describe('the merge gate (ADR-0020)', () => {
+  const done = createTask({ id: 't1', order: 1, title: 'Change', prompt: 'x', status: 'completed' });
+  const opsTask = createTask({ id: 'o2', order: 2, title: 'Deploy', prompt: 'x', ops: true, dependencies: ['t1'] });
+  const userTask = createTask({ id: 'u3', order: 3, title: 'Check', type: 'user', dependencies: ['t1'] });
+  const changeTask = createTask({ id: 't4', order: 4, title: 'Follow-up', prompt: 'x', dependencies: ['t1'] });
+  const tasks = [done, opsTask, userTask, changeTask];
+  const landed = (inHead: boolean) => runsOf({ t1: { ...record('t1', 'merged'), ...(inHead ? { inHead: true as const } : {}) } });
+
+  it('holds an ops task whose change dependency has landed but is not merged, and reports it gated', () => {
+    const { ready, gated } = selectReadyTasks(input(tasks, { runs: landed(false) }));
+    expect(ready.map((t) => t.id)).toEqual(['t4']);
+    expect(gated.map((t) => t.id)).toEqual(['o2']);
+  });
+
+  it('lets it go once that work is in the user\'s branch', () => {
+    const { ready, gated } = selectReadyTasks(input(tasks, { runs: landed(true) }));
+    expect(ready.map((t) => t.id)).toEqual(['o2', 't4']);
+    expect(gated).toEqual([]);
+  });
+
+  it('starts no ops task while a merge is under way', () => {
+    const { ready } = selectReadyTasks(input(tasks, { runs: landed(true), merging: true }));
+    expect(ready.map((t) => t.id)).toEqual(['t4']);
+  });
+
+  it('names the unmerged dependencies of an ops or user task, and none of a change task', () => {
+    const store = storeOf(tasks);
+    expect(mergeGate(opsTask, store, landed(false))).toEqual(['t1']);
+    expect(mergeGate(userTask, store, landed(false))).toEqual(['t1']);
+    expect(mergeGate(changeTask, store, landed(false))).toEqual([]);
+    expect(mergeGate(opsTask, store, landed(true))).toEqual([]);
+  });
+
+  it('has nothing to wait for without an isolation run', () => {
+    expect(mergeGate(opsTask, storeOf(tasks), runsOf())).toEqual([]);
   });
 });

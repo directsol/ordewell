@@ -1220,10 +1220,12 @@ export class Session {
    * "Merge all": each repo's integration branch into whatever the user has
    * checked out there — every repo, or none if any cannot take it. The one
    * irreversible step of isolated execution, so this explicit call is the
-   * only way it ever happens.
+   * only way it ever happens. During a run it merges what has landed so far,
+   * which is what opens a merge gate (ADR-0020); it waits for no ops task,
+   * and refuses while one runs.
    */
   async mergeRun(): Promise<IsolationMergeResult> {
-    this.requireSettledRun();
+    if (!this.orchestrator.isolationRecord) throw new PlanEditError('This plan has no isolated run');
     const result = await this.orchestrator.mergeRun();
     this.broadcast({ type: 'isolation_merge', result });
     return result;
@@ -1321,7 +1323,8 @@ export class Session {
    * falls through to the no-op `store.update` below instead of throwing.
    */
   async updateTask(taskId: string, changes: Partial<Task>): Promise<LegacyPlanState | null> {
-    if ((changes.dependencies || changes.type || changes.assignedModel || changes.taskMode) && this.store.get(taskId)) {
+    if ('ops' in changes) changes = { ...changes, ops: changes.ops === true ? true : undefined };
+    if ((changes.dependencies || changes.type || changes.assignedModel || changes.taskMode || 'ops' in changes) && this.store.get(taskId)) {
       const check = validateTaskEdit('direct', this.store.planTasks, taskId, changes, this.editCatalog());
       if (!check.ok) throw new PlanEditError(check.error ?? 'Those changes are not valid');
       if (check.clear?.length) {

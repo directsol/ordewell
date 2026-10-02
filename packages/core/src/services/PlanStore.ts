@@ -31,6 +31,8 @@ export class PlanStore {
   private _planTasks: readonly Task[] = [];
   private _allTasks: readonly Task[] = [];
   private _taskMap = new Map<string, Task>();
+  /** Task id → the top-level task it hangs under, itself for a top-level task. */
+  private _rootMap = new Map<string, Task>();
   private _planRunners: RunnerId[] = ['claude-code'];
   private _onMutate: (() => void) | null = null;
   private _executionLog: TaskSnapshot[] = [];
@@ -50,6 +52,15 @@ export class PlanStore {
   isFailed(id: string): boolean { return this._taskMap.get(id)?.status === 'failed'; }
 
   get(taskId: string): Readonly<Task> | undefined { return this._taskMap.get(taskId); }
+
+  /**
+   * Whether a task runs as an ops task (ADR-0020). Only a top-level AI task
+   * can be one; a subtask runs with the top-level task it hangs under.
+   */
+  isOps(taskId: string): boolean {
+    const root = this._rootMap.get(taskId);
+    return root?.type === 'ai' && root.ops === true;
+  }
 
   /** A copy of the task tree, detached from the store: later status changes do not reach it. */
   snapshot(): Task[] { return cloneTasks(this._planTasks); }
@@ -277,7 +288,14 @@ export class PlanStore {
       this.setStatus(id, 'pending');
       task.verdict = undefined;
       task.outputSummary = undefined;
+      delete task.forcedPastGate;
     }
+  }
+
+  /** Kept on the task: it was force-started past its merge gate, before these dependencies' work was merged (ADR-0020). */
+  setForcedPastGate(id: string, dependencies: string[]): void {
+    const task = this._taskMap.get(id);
+    if (task) task.forcedPastGate = dependencies;
   }
 
   /** A reason outlives nothing: any status but `awaiting_user` drops it. */
@@ -375,6 +393,10 @@ export class PlanStore {
     this._taskMap.clear();
     for (const task of this._allTasks) {
       this._taskMap.set(task.id, task);
+    }
+    this._rootMap.clear();
+    for (const root of this._planTasks) {
+      for (const task of flattenTasks([root])) this._rootMap.set(task.id, root);
     }
   }
 

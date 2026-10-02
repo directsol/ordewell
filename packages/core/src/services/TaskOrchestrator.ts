@@ -16,6 +16,7 @@ import type {
   IWorktreeIsolation,
   PlanIsolation,
   TaskIsolation,
+  TreeSnapshot,
 } from '../interfaces/IWorktreeIsolation';
 import { createWorktreeIsolation } from './GitWorktreeIsolation';
 import { SELF_REPO } from './isolationRecord';
@@ -25,7 +26,8 @@ import type { IsolatedExecution } from './plannerModes';
 import { watchBlockingPrompts } from './blockingPrompts';
 import { classifyRunnerStop, keepsTerminalReadable, stopsRunner, LingeringRunners, type AttemptEnd } from './runnerExit';
 import { MessageQueue } from './MessageQueue';
-import { selectReadyTasks } from './readiness';
+import { mergeGate, selectReadyTasks, type Readiness } from './readiness';
+import { capConflictFiles } from './conflictFiles';
 import { resolveWorkspaceEnv, type WorkspaceEnv } from './workspaceEnv';
 import { routeTransport } from './TransportRouter';
 import { continuability } from './continuation';
@@ -107,6 +109,10 @@ interface TaskAttempt {
   readonly repair: RepairAttempt | null;
   /** Set when this attempt continues the task's saved runner session (ADR-0018, K1). */
   readonly continuation: Continuation | null;
+  /** An ops task's attempt (ADR-0020): it runs at the workspace root and lands nothing. */
+  readonly ops: boolean;
+  /** The workspace's tracked state as an ops attempt started; what its tree check compares with. */
+  snapshot: TreeSnapshot | null;
   readonly startedAt: string;
   /**
    * Set as its verdict arrives, before the verdict is applied: the turn that
@@ -217,6 +223,10 @@ export class TaskOrchestrator {
    * pending and nothing ran until the user also re-ran the whole plan.
    */
   private haltedByFailure = false;
+  /** A Merge all is under way: no ops task starts until it ends (ADR-0020). */
+  private merging = false;
+  /** The last "waiting for Merge all" notice, so a run paused at a gate says it once, not on every tick. */
+  private gateNotice = '';
   /** The workspace's own variables for a task's cwd (ADR-0016); swapped out in tests. */
   private workspaceEnv: (cwd: string) => Promise<WorkspaceEnv>;
   /** What the workspace env has already warned about, so a run says it once, not per task. */
@@ -544,9 +554,39 @@ export class TaskOrchestrator {
     return this.runs.reviewDiff();
   }
 
-  /** "Merge all"; a run that merged everything is cleared up and forgotten. */
+  /**
+   * "Merge all"; a settled run that merged everything is cleared up and
+   * forgotten. During a run it merges what has landed and the run goes on:
+   * the tasks waiting at a merge gate for that work then start (ADR-0020).
+   * Never while an ops task runs, and no ops task starts until it ends — the
+   * one overlap the plan cannot order, because the merge is the user's.
+   */
   async mergeRun(): Promise<IsolationMergeResult> {
-    return this.runs.merge();
+    const ops = [...this.attempts.values()].find((a) => a.ops);
+    if (ops) {
+      const title = this.store.get(ops.taskId)?.title ?? ops.taskId;
+      throw new TaskControlError(`Ops task "${title}" is running in your checkout — Merge all once it has finished.`);
+    }
+    this.merging = true;
+    let result: IsolationMergeResult;
+    try {
+      result = await this.runs.merge();
+    } finally {
+      this.merging = false;
+    }
+    await this.tick();
+    return result;
+  }
+
+  /**
+   * The dependencies an ops or user task waits on at its merge gate: those
+   * whose landed work is not in the user's branch yet (ADR-0020). Empty once
+   * the task has started, and for every other task.
+   */
+  getMergeGate(taskId: string): string[] {
+    const task = this.store.get(taskId);
+    if (!task || (task.status !== 'pending' && task.status !== 'approved')) return [];
+    return mergeGate(task, this.store, this.runs);
   }
 
   /** Worktrees and task branches go; the integration branch and the record stay for review and merge. */
@@ -665,7 +705,7 @@ export class TaskOrchestrator {
       this.emit('onReviewNeeded', { tasks: this.store.planTasks, planRunners: this.store.planRunners });
       return;
     }
-    if (!(await this.runs.open(() => this.start())) || this.running) return;
+    this.runs.open();
     console.log(`[TaskOrchestrator] Starting with ${this.store.allTasks.length} tasks (${this.store.allTasks.filter(t => t.type === 'ai' && t.prompt).length} AI ready)`);
     this.running = true;
     this.haltedByFailure = false;
@@ -721,12 +761,18 @@ export class TaskOrchestrator {
     // task since. A stale verdict must not overwrite that decision.
     if (this.attempts.get(taskId) !== attempt) return;
     const landing = verdict.outcome === 'pass' ? await this.land(attempt, () => this.landing.landPassed(task, attempt)) : null;
+    const changedFiles = landing && attempt.ops ? await this.runs.filesChangedSince(attempt.snapshot) : [];
     const unresumedReason = this.unresumed(attempt) ? unresumedMessage(task, `${attempt.runner} could not find its saved session`) : null;
     if (this.attempts.get(taskId) !== attempt) return;
     this.endAttempt(taskId, 'verdict');
     this.store.setTaskVerdict(taskId, verdict);
     console.error(`[TaskOrchestrator] Output summary:\n${summary || '(empty — no output captured)'}`);
-    if (landing) {
+    if (changedFiles.length > 0) {
+      // The evidence the ops rule rests on: a runner cannot be kept from
+      // writing, only caught. Nothing is committed, and nothing fails.
+      this.store.markAwaitingUser(taskId, 'files-changed');
+      this.tell('warn', `Ops task "${task.title}" finished, but changed tracked files in your checkout: ${capConflictFiles(changedFiles)}. An ops task must not change repository files, so nothing was committed — look at the changes, then mark it complete or retry it.`);
+    } else if (landing) {
       await this.applyLanding(task, landing, () => this.notifications.info(`Task "${task.title}" completed.`));
     } else if (classifyRunnerStop(attempt.session?.getOutput() ?? '') === 'usage-limit') {
       // No marker, but what stopped the runner was its account rather than the
@@ -846,22 +892,38 @@ export class TaskOrchestrator {
   }
 
   getReadyTasks(): Task[] {
-    if (!this.running) return [];
+    return this.readiness().ready;
+  }
+
+  private readiness(): Readiness {
+    if (!this.running) return { ready: [], candidateCount: 0, excluded: [], gated: [] };
     const maxParallel = this.config.maxParallelSessions;
     const active = this.attempts.size;
-    const { ready, candidateCount, excluded } = selectReadyTasks({
+    const readiness = selectReadyTasks({
       store: this.store,
       onHold: this.onHold,
       runs: this.runs,
       active,
       maxParallel,
+      merging: this.merging,
     });
 
-    for (const { task, reasons } of excluded) {
+    for (const { task, reasons } of readiness.excluded) {
       console.log(`[TaskOrchestrator] excluded: #${task.order} "${task.title}" — ${reasons.join(', ')}`);
     }
-    console.log(`[TaskOrchestrator] getReadyTasks: ${candidateCount} candidates, ${Math.max(0, maxParallel - active)} slots, maxParallel=${maxParallel}`);
-    return ready;
+    console.log(`[TaskOrchestrator] getReadyTasks: ${readiness.candidateCount} candidates, ${Math.max(0, maxParallel - active)} slots, maxParallel=${maxParallel}`);
+    return readiness;
+  }
+
+  /**
+   * Open the run a task starts in, and for a change task decide whether it
+   * isolates (ADR-0020): an ops task needs no worktree, so it never waits on
+   * that choice. False while a dirty tree waits on the user; `resume` is what
+   * their choice replays.
+   */
+  private async openFor(taskId: string, resume: () => Promise<void>): Promise<boolean> {
+    this.runs.open();
+    return this.store.isOps(taskId) || this.runs.decide(resume);
   }
 
   /**
@@ -1015,7 +1077,7 @@ export class TaskOrchestrator {
     const runner = this.store.resolveTaskRunner(task);
     const route = routeTransport('structured', runner, this.registry);
     if (route.transport !== 'structured') throw new TaskControlError(`Task "${task.title}" cannot be continued: ${route.fallback}. Use Retry instead.`);
-    if (!(await this.runs.open(() => this.continueTask(taskId, message)))) return;
+    if (!(await this.openFor(taskId, () => this.continueTask(taskId, message)))) return;
     // The run may have started it while opening; the claim below must be the only one.
     if (this.attempts.has(taskId) || !continuability(task).ok) return;
 
@@ -1042,9 +1104,30 @@ export class TaskOrchestrator {
     const task = this.store.get(taskId);
     if (!task || task.type !== 'ai') return;
     if (this.attempts.has(taskId)) return;
-    if (!(await this.runs.open(() => this.forceStartTask(taskId)))) return;
+    this.refuseOpsDuringMerge(task);
+    if (!(await this.openFor(taskId, () => this.forceStartTask(taskId)))) return;
     this.onHold.delete(taskId);
+    this.notePastGate(task);
     await this.startTask(task);
+  }
+
+  private refuseOpsDuringMerge(task: Readonly<Task>): void {
+    if (this.merging && this.store.isOps(task.id)) {
+      throw new TaskControlError(`A Merge all is under way — ops task "${task.title}" can start once it has finished.`);
+    }
+  }
+
+  /**
+   * A force start passes a merge gate (ADR-0020), and the surface confirmed it
+   * first; the choice is kept on the task and said, because the work it acts
+   * on is not in the user's branch.
+   */
+  private notePastGate(task: Readonly<Task>): void {
+    const unmerged = mergeGate(task, this.store, this.runs);
+    if (unmerged.length === 0) return;
+    const titles = unmerged.map((id) => `"${this.store.get(id)?.title ?? id}"`);
+    this.store.setForcedPastGate(task.id, titles);
+    this.tell('warn', `Task "${task.title}" was force-started before the work of ${titles.join(', ')} was merged into your branch.`);
   }
 
   /**
@@ -1057,8 +1140,10 @@ export class TaskOrchestrator {
     if (this.hasLiveWork) return;
     const task = this.store.get(taskId);
     if (!task || task.type !== 'ai') return;
-    if (!(await this.runs.open(() => this.runTask(taskId)))) return;
+    this.refuseOpsDuringMerge(task);
+    if (!(await this.openFor(taskId, () => this.runTask(taskId)))) return;
     this.onHold.delete(taskId);
+    this.notePastGate(task);
     await this.startTask(task);
   }
 
@@ -1098,8 +1183,13 @@ export class TaskOrchestrator {
       return;
     }
 
-    const ready = this.getReadyTasks();
+    let readiness = this.readiness();
+    // Work merged by hand opens a gate as Merge all does; only git can tell.
+    if (readiness.gated.length > 0 && (await this.runs.refreshInHead())) readiness = this.readiness();
+    if (!this.running) return;
+    const { ready } = readiness;
     console.log(`[TaskOrchestrator] tick(): ${ready.length} ready, ${this.attempts.size} active, queue=${this.messageQueue.length}`);
+    if (readiness.gated.length === 0) this.gateNotice = '';
 
     if (ready.length === 0 && this.attempts.size === 0) {
       const remaining = this.store.allTasks.filter(t => t.status !== 'completed');
@@ -1129,14 +1219,32 @@ export class TaskOrchestrator {
         // its execution stream on receipt, so a later fan-out from completing the
         // user task would arrive to a closed socket and be invisible).
         this.notifications.info('Remaining tasks require user action or are on hold.');
+        this.sayGate();
         this.emit('onTaskChanged');
         this.emit('onTick');
       }
       return;
     }
 
-    for (const task of ready) await this.startTask(task);
+    for (const task of ready) {
+      if (this.store.isOps(task.id) ? this.merging : !(await this.runs.decide(() => this.tick()))) continue;
+      await this.startTask(task);
+    }
     this.emit('onTick');
+  }
+
+  /**
+   * A run paused at merge gates says so, as plainly as a task that waits on
+   * the user: which tasks wait, and that Merge all lets them go on (ADR-0020).
+   */
+  private sayGate(): void {
+    const waiting = this.store.allTasks.filter((t) => this.getMergeGate(t.id).length > 0);
+    const notice = waiting.length === 0
+      ? ''
+      : `Waiting for Merge all: ${waiting.map((t) => `"${t.title}"`).join(', ')} ${waiting.length === 1 ? 'needs' : 'need'} work that is not merged into your branch yet.`;
+    if (notice === this.gateNotice) return;
+    this.gateNotice = notice;
+    if (notice) this.tell('info', notice);
   }
 
   private async startTask(task: Task, continuation: Continuation | null = null): Promise<void> {
@@ -1152,6 +1260,8 @@ export class TaskOrchestrator {
       integration: null,
       repair: this.landing.nextRepair(task.id),
       continuation,
+      ops: this.store.isOps(task.id),
+      snapshot: null,
       startedAt: new Date().toISOString(),
       decided: false,
     };
@@ -1183,9 +1293,10 @@ export class TaskOrchestrator {
    */
   private async spawnAttempt(task: Task, attempt: TaskAttempt): Promise<boolean> {
     try {
-      const { cwd, worktree } = await this.runs.attemptCwd(task, { repair: attempt.repair !== null });
+      const { cwd, worktree } = await this.runs.attemptCwd(task, { repair: attempt.repair !== null, ops: attempt.ops });
       attempt.cwd = cwd;
       attempt.worktree = worktree;
+      if (attempt.ops) attempt.snapshot = await this.runs.snapshotWorkspace();
       if (this.attempts.get(task.id) !== attempt) {
         // Ended while its worktree was being made, so whatever ended it could
         // not release it. A newer attempt's own prepare replaces it instead.
@@ -1197,11 +1308,14 @@ export class TaskOrchestrator {
       // Through the same augmenting as any spawn, so the marker is the task's
       // own and the VerdictEngine watches for it unchanged.
       const finalPrompt = attempt.continuation
-        ? composeContinuationPrompt(task, attempt.continuation.message)
+        ? composeContinuationPrompt(task, attempt.continuation.message, { ops: attempt.ops })
         : composeAugmentedPrompt(attempt.repair ? { ...task, prompt: this.landing.repairPrompt(task) } : task, this.store.planTasks, {
           planMapEnabled: this.config.planMapEnabled,
           // A merge to resolve is not new behaviour to drive test-first.
           tddEnabled: !attempt.repair && this.tddEnabled(),
+          // An ops task's effects outlive a failed attempt and are never rolled
+          // back, so the next one is told what the last one did (ADR-0020).
+          previousAttempt: attempt.ops ? this.output.liveTail(task.id, { maxLines: OPS_RETRY_TAIL_LINES })?.text : undefined,
         });
       this.lingering.close(task.id);
       const env = await this.envForTask(cwd);
@@ -1402,6 +1516,9 @@ export class TaskOrchestrator {
     return ended;
   }
 }
+
+/** How much of an ops task's last attempt the next one is shown. */
+const OPS_RETRY_TAIL_LINES = 60;
 
 function unresumedMessage(task: Task, why: string): string {
   return `Could not continue task "${task.title}": ${why}. Retry starts it afresh.`;

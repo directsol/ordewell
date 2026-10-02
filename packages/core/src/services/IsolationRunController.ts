@@ -14,6 +14,7 @@ import type {
   RepairEvidence,
   RepoGroupLayout,
   TaskIsolation,
+  TreeSnapshot,
 } from '../interfaces/IWorktreeIsolation';
 import { describeMergeResult } from './mergeResultNotice';
 import { handoffOf, integrationBranchNameOf, layoutOf, SELF_REPO, taskIsolationOf } from './isolationRecord';
@@ -31,6 +32,7 @@ export interface IsolationRunListener {
   /**
    * A run opened — the one moment shared by Execute, a manual task run and
    * a force start, so whatever a run pins for its whole length is read here.
+   * Whether it isolates is decided later, at its first change task.
    */
   opened(): void;
   /** A run did not start: `repos` of the group have tracked changes. */
@@ -98,12 +100,13 @@ function sharedPathsNotice(run: IsolationRun): string | null {
 }
 
 /**
- * The lifecycle of a plan's isolation run (ADR-0013, ADR-0014), between the
- * scheduler and the git layer: deciding at a run's start whether it executes
- * in worktrees, a blocked run and how it goes on, each attempt's working
- * directory, releasing worktrees, the handoff when the run closes, and what the
- * user does with it afterwards. The record it keeps outlives one run — a
- * resumed plan continues it.
+ * The lifecycle of a plan's isolation run (ADR-0013, ADR-0014, ADR-0020),
+ * between the scheduler and the git layer: deciding, at a run's first change
+ * task, whether it executes in worktrees, a blocked run and how it goes on,
+ * each attempt's working directory, releasing worktrees, which landed work the
+ * user has merged, the tree check of an ops task, the handoff when the run
+ * closes, and what the user does with it afterwards. The record it keeps
+ * outlives one run — a resumed plan continues it.
  */
 export class IsolationRunController {
   private readonly isolation: IWorktreeIsolation;
@@ -116,11 +119,11 @@ export class IsolationRunController {
   /** Copied paths already reported for the current run: every task gets the same copies. */
   private reportedCopies = new Set<string>();
   /**
-   * How the open run executes; null while no run is open. A run is one
-   * Execute-Plan or one manual task run, from its start until it settles or
-   * is stopped.
+   * How the open run executes; null while no run is open, `undecided` until
+   * its first change task asks. A run is one Execute-Plan or one manual task
+   * run, from its start until it settles or is stopped.
    */
-  private mode: 'isolated' | 'shared' | null = null;
+  private mode: 'undecided' | 'isolated' | 'shared' | null = null;
   /** Resolver task id → the conflicted task it resolves; see {@link linkResolver}. */
   private resolvers: Record<string, string> = {};
   private opening: Promise<boolean> | null = null;
@@ -141,6 +144,9 @@ export class IsolationRunController {
   get current(): IsolationRun | null { return this.run; }
 
   get isOpen(): boolean { return this.mode !== null; }
+
+  /** The open run has decided whether it isolates. */
+  get decided(): boolean { return this.mode === 'isolated' || this.mode === 'shared'; }
 
   /** The open run executes in worktrees. */
   get isolating(): boolean { return this.mode === 'isolated' && this.run !== null; }
@@ -204,13 +210,23 @@ export class IsolationRunController {
     }
   }
 
+  /** Open a run if none is, leaving whether it isolates to its first change task. */
+  open(): void {
+    if (this.mode) return;
+    this.mode = 'undecided';
+    this.listener.opened();
+  }
+
   /**
-   * Open a run if none is: decide once, at its start, whether it executes in
-   * worktrees. `resume` is what a dirty tree parks until the user chooses how
-   * to go on. Resolves false when the run did not start.
+   * Decide once per run, as its first change task starts, whether it executes
+   * in worktrees (ADR-0020): an ops task needs none, so a run of only ops
+   * tasks never asks. `resume` is what a dirty tree parks until the user
+   * chooses how to go on. Resolves false while the run waits on that choice.
    */
-  open(resume: () => Promise<void>): Promise<boolean> {
-    if (this.mode) return Promise.resolve(true);
+  decide(resume: () => Promise<void>): Promise<boolean> {
+    this.open();
+    if (this.decided) return Promise.resolve(true);
+    if (this.blockedStart) return Promise.resolve(false);
     this.opening ??= this.activate(resume).finally(() => { this.opening = null; });
     return this.opening;
   }
@@ -224,8 +240,8 @@ export class IsolationRunController {
    * the safe rule then.
    */
   async plannerLayout(): Promise<IsolatedExecution> {
-    if (this.mode) return this.isolating && this.run ? layoutOf(this.run) : false;
-    const decision = await this.decide(this.workspaceRoot());
+    if (this.decided) return this.isolating && this.run ? layoutOf(this.run) : false;
+    const decision = await this.assess(this.workspaceRoot());
     return decision.mode === 'isolated' ? decision.layout : false;
   }
 
@@ -259,12 +275,13 @@ export class IsolationRunController {
    * committed as running, so a spawn abandoned or failed after this settles
    * is not misreported as a change that stuck.
    */
-  async attemptCwd(task: Task, opts: { repair: boolean }): Promise<{ cwd: string; worktree: boolean }> {
+  async attemptCwd(task: Task, opts: { repair: boolean; ops?: boolean }): Promise<{ cwd: string; worktree: boolean }> {
     if (opts.repair && this.run) {
       const { cwd } = await this.isolation.reopen(task, this.run);
       return { cwd, worktree: true };
     }
-    if (!this.isolating || !this.run) {
+    // An ops task acts from the user's own checkout, never a worktree (ADR-0020).
+    if (opts.ops || !this.isolating || !this.run) {
       // A worktree left by an earlier attempt describes work this attempt
       // replaces; left alone it could later be integrated as if it were this one's.
       await this.release(task.id, { keep: false });
@@ -315,17 +332,74 @@ export class IsolationRunController {
     this.listener.changed();
   }
 
-  /** Close the open run. An isolated one hands its integration branch over for review. */
+  /**
+   * Close the open run. An isolated one hands its integration branch over for
+   * review — unless the user merged everything it landed at merge gates
+   * already, which leaves nothing to hand over, so it is cleared up as a Merge
+   * all would have.
+   */
   async close(): Promise<void> {
     const mode = this.mode;
     this.mode = null;
-    if (mode !== 'isolated' || !this.run) return;
+    const run = this.run;
+    if (mode !== 'isolated' || !run) return;
+    await this.refreshInHead();
+    const records = Object.values(run.tasks);
+    if (records.length > 0 && records.every((r) => r.status === 'merged' && r.inHead)) {
+      this.tell('info', 'Everything this run landed is merged into your branch already.');
+      await this.clearMerged(run);
+      return;
+    }
     try {
-      this.listener.handoff(await this.isolation.handoff(this.run));
+      this.listener.handoff(await this.isolation.handoff(run));
     } catch (err) {
       this.tell('warn', `Could not hand the run's integration branch over: ${err instanceof Error ? err.message : String(err)}`);
     }
     this.listener.changed();
+  }
+
+  /**
+   * Whether a task's landed work still waits to be merged into the user's
+   * branch — what holds an ops or user task at its merge gate (ADR-0020). A
+   * task with no record never landed anything to wait for.
+   */
+  awaitsMerge(taskId: string): boolean {
+    const record = this.run?.tasks[taskId];
+    return !!record && record.status === 'merged' && !record.inHead;
+  }
+
+  /**
+   * Look again for landed work the user has merged — by Merge all, or by hand
+   * with git. Resolves true when some was found.
+   */
+  async refreshInHead(): Promise<boolean> {
+    const run = this.run;
+    if (!run || !Object.values(run.tasks).some((r) => r.status === 'merged' && !r.inHead)) return false;
+    const found = await this.isolation.findInHead(run).catch((): string[] => []);
+    if (found.length > 0) this.listener.changed();
+    return found.length > 0;
+  }
+
+  /**
+   * The tracked state of the workspace as an ops task starts, for
+   * {@link filesChangedSince} (ADR-0020). Null where the check does not run:
+   * a run that shares the workspace root, where every task's edits land in
+   * it, or a workspace git cannot isolate at all.
+   */
+  async snapshotWorkspace(): Promise<TreeSnapshot | null> {
+    if (this.mode === 'shared') return null;
+    const root = this.workspaceRoot();
+    if (!this.isolating) {
+      const availability = await this.isolation.isActive(root).catch((): null => null);
+      if (!availability || (!availability.active && availability.reason !== 'dirty')) return null;
+    }
+    return this.isolation.snapshotTree(root, this.run?.sharedRepos ?? []).catch((): null => null);
+  }
+
+  /** Tracked files changed since `snapshot`; none when the run has since gone on in the workspace root. */
+  async filesChangedSince(snapshot: TreeSnapshot | null): Promise<string[]> {
+    if (!snapshot || this.mode === 'shared') return [];
+    return this.isolation.changedSince(this.workspaceRoot(), snapshot).catch((): string[] => []);
   }
 
   /**
@@ -362,19 +436,23 @@ export class IsolationRunController {
 
   /**
    * "Merge all": the run's integration branches into whatever the user has
-   * checked out, in every repo or none. Once everything merged, the run has
-   * nothing left to hand over, so it is cleared up and forgotten; a branch
-   * the user's HEAD somehow does not contain stays for the next run's sweep.
+   * checked out, in every repo or none. During a run it merges what has
+   * landed so far and the run goes on (ADR-0020): its branches stay for the
+   * tasks still to land. Once a settled run merged everything, it has nothing
+   * left to hand over, so it is cleared up and forgotten; a branch the user's
+   * HEAD somehow does not contain stays for the next run's sweep.
    */
   async merge(): Promise<IsolationMergeResult> {
     const run = this.requireRun();
+    const repaired = handoffOf(run).landed.filter((t) => t.repairedFiles?.length);
     const result = await this.isolation.mergeIntoCheckedOut(run);
     const branch = integrationBranchNameOf(run);
     const group = run.repos.some((r) => r.path !== SELF_REPO);
-    const repaired = handoffOf(run).landed.filter((t) => t.repairedFiles?.length);
     const { level, message } = describeMergeResult(result, branch, group, repaired);
     this.tell(level, message);
-    if (result.outcome === 'merged') await this.clearMerged(run);
+    if (result.outcome !== 'merged') return result;
+    await this.refreshInHead();
+    if (!this.isOpen) await this.clearMerged(run);
     return result;
   }
 
@@ -411,7 +489,7 @@ export class IsolationRunController {
     this.listener.changed();
   }
 
-  private async decide(root: string): Promise<RunDecision> {
+  private async assess(root: string): Promise<RunDecision> {
     const availability = await this.isolation.isActive(root);
     const continued = this.continuableRun(root);
     const continuing = continued !== null;
@@ -430,7 +508,7 @@ export class IsolationRunController {
 
   private async activate(resume: () => Promise<void>): Promise<boolean> {
     const root = this.workspaceRoot();
-    const decision = await this.decide(root);
+    const decision = await this.assess(root);
     if (decision.mode === 'blocked') {
       this.blockedStart = resume;
       this.blockedRepos = decision.repos;
@@ -459,8 +537,8 @@ export class IsolationRunController {
   }
 
   private begin(mode: 'isolated' | 'shared'): void {
+    this.open();
     this.mode = mode;
-    this.listener.opened();
   }
 
   /** What earlier runs left merged in the group goes; a failure here is worth a word, never a stopped run. */

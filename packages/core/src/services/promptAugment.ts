@@ -153,6 +153,27 @@ export interface ComposeOptions {
   planMapEnabled?: boolean;
   planMapMaxEntries?: number;
   tddEnabled?: boolean;
+  /** An ops task's last attempt, as its output ended (ADR-0020); absent on a first attempt. */
+  previousAttempt?: string;
+}
+
+/**
+ * What an ops task's retry is told (ADR-0020). Its effects are outside the
+ * repository and are never rolled back, so the last attempt may have done
+ * part of the work already.
+ */
+function renderPreviousAttempt(output: string): string {
+  const tail = output.trim()
+    ? defuseMarkers(output.trim()).split('\n').map((l) => '  ' + l).join('\n')
+    : '  (no output captured)';
+  return [
+    '## Previous attempt',
+    '',
+    'This task ran before and did not finish. What it did outside the repository was not undone: before acting, check what already exists — resources, deployments, pushed refs — and do not repeat a step that already took effect.',
+    '',
+    'The end of its output:',
+    tail,
+  ].join('\n');
 }
 
 function renderCompletionMarker(task: Task): string {
@@ -222,6 +243,8 @@ export function composeAugmentedPrompt(task: Task, allTasks: readonly Task[], op
   const outputs = collectDirectDependencyOutputs(task, flat);
   if (outputs.length > 0) blocks.push(renderPriorOutputs(outputs));
 
+  if (opts?.previousAttempt !== undefined) blocks.push(renderPreviousAttempt(opts.previousAttempt));
+
   if (opts?.tddEnabled) {
     blocks.push(renderTddInstruction());
   }
@@ -242,9 +265,11 @@ export function composeAugmentedPrompt(task: Task, allTasks: readonly Task[], op
  * original prompt, so it is not sent again — but it holds the old worktree
  * too, and this attempt's is fresh from the integration branch.
  */
-export function composeContinuationPrompt(task: Task, message: string): string {
+export function composeContinuationPrompt(task: Task, message: string, opts: { ops?: boolean } = {}): string {
   const reminder = [
-    '(Ordewell) You are continuing this task in the same session. Your working directory was recreated from the integration branch: work from your earlier attempt is there only if it landed, so check the files before relying on them.',
+    opts.ops
+      ? '(Ordewell) You are continuing this task in the same session, in the same checkout. What your earlier attempt did outside the repository was not undone: check what already exists before acting again.'
+      : '(Ordewell) You are continuing this task in the same session. Your working directory was recreated from the integration branch: work from your earlier attempt is there only if it landed, so check the files before relying on them.',
   ];
   if (isHitlTask(task)) {
     reminder.push(`If you reach a decision that needs human judgment, print one line holding only the checkpoint marker and wait for ORDEWELL_CONTINUE or ORDEWELL_REJECT. ${CHECKPOINT_MARKER_HOWTO}.`);

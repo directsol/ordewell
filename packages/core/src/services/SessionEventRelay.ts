@@ -16,7 +16,7 @@ export interface SessionEventRelayDeps {
   /** Where isolation notices go, for a host whose notifications are not seen by the user. */
   onNotice?: (notice: SessionNotice) => void;
   store: Pick<PlanStore, 'allTasks' | 'snapshot'>;
-  orchestrator: Pick<TaskOrchestrator, 'getIdleSince' | 'getTaskIsolation' | 'getQueuedTaskMessages'>;
+  orchestrator: Pick<TaskOrchestrator, 'getIdleSince' | 'getTaskIsolation' | 'getQueuedTaskMessages' | 'getMergeGate'>;
   /** Shared with the Session, which snapshots, restores and clears it. */
   usage: PlannerUsageLedger;
   /** How many of a task's runner requests wait for an answer (ADR-0018, A1). */
@@ -109,6 +109,7 @@ export class SessionEventRelay {
         this.orchestrator.getTaskIsolation(t.id),
         this.orchestrator.getQueuedTaskMessages(t.id),
         this.awaitingApproval(t.id),
+        this.orchestrator.getMergeGate(t.id),
       )),
     });
   }

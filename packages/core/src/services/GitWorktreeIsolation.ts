@@ -21,6 +21,7 @@ import type {
   IWorktreeIsolation,
   PreparedTask,
   RepairEvidence,
+  TreeSnapshot,
 } from '../interfaces/IWorktreeIsolation';
 import type { Task } from '../models/Task';
 import { augmentedPath, withPath } from '../utils/shellPath';
@@ -133,6 +134,23 @@ function leftoverMarkerFiles(check: string): string[] {
 }
 
 /** Where a landing or a release leaves a task; a repair in flight ends there too, whatever the outcome. */
+/**
+ * Tracked file → its state, from `git diff --raw -z --no-abbrev`: the mode and
+ * blob on the right-hand side, all zeros for a deleted file.
+ */
+function rawDiffStates(raw: string): Record<string, string> {
+  const parts = raw.split('\0');
+  const states: Record<string, string> = {};
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const meta = parts[i].trim();
+    const file = parts[i + 1];
+    if (!meta.startsWith(':') || !file) continue;
+    const [, mode, , blob] = meta.slice(1).split(' ');
+    states[file] = `${mode}:${blob}`;
+  }
+  return states;
+}
+
 function settleStatus(record: IsolationTaskRecord, status: IsolationTaskRecord['status']): void {
   record.status = status;
   delete record.repairBase;
@@ -224,6 +242,8 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
   private readonly adminChains = new Map<string, Promise<unknown>>();
   private waiting: QueuedMerge[] = [];
   private draining = false;
+  /** Landings and Merge all take turns on this, so a merge never reads an integration branch mid-landing. */
+  private turns: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly deps: WorktreeIsolationDeps) {
     this.execFileImpl = deps.execFileImpl ?? defaultExecFile;
@@ -659,6 +679,68 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     });
   }
 
+  async findInHead(run: IsolationRun): Promise<string[]> {
+    const found: string[] = [];
+    for (const record of Object.values(run.tasks)) {
+      if (record.status !== 'merged' || record.inHead) continue;
+      if (!(await this.headContains(run, record))) continue;
+      record.inHead = true;
+      found.push(record.taskId);
+    }
+    return found;
+  }
+
+  private async headContains(run: IsolationRun, record: IsolationTaskRecord): Promise<boolean> {
+    for (const repo of run.repos) {
+      const entry = record.repos[repo.path];
+      if (!entry?.changed) continue;
+      // A task landed before its tip was recorded counts as merged once the whole integration branch is.
+      const merged = await this.tryGit(repo.root, ['merge-base', '--is-ancestor', entry.landedTip ?? repo.integrationBranch, 'HEAD']);
+      if (!merged.ok) return false;
+    }
+    return true;
+  }
+
+  async snapshotTree(workspaceRoot: string, exclude: readonly string[]): Promise<TreeSnapshot | null> {
+    const scan = await this.scanGroup(workspaceRoot);
+    if ('refused' in scan) return null;
+    const repos = (await this.committedRepos(workspaceRoot, scan.paths)).filter((repoPath) => !exclude.includes(repoPath));
+    if (repos.length === 0) return null;
+    const snapshot: TreeSnapshot = {};
+    for (const repoPath of repos) {
+      const states = await this.trackedStates(repoRootOf(workspaceRoot, repoPath));
+      if (states) snapshot[repoPath] = states;
+    }
+    return snapshot;
+  }
+
+  async changedSince(workspaceRoot: string, snapshot: TreeSnapshot): Promise<string[]> {
+    const changed: string[] = [];
+    for (const [repoPath, before] of Object.entries(snapshot)) {
+      const now = await this.trackedStates(repoRootOf(workspaceRoot, repoPath));
+      if (!now) continue;
+      for (const [file, state] of Object.entries(now)) {
+        if (before[file] !== state) changed.push(repoPath === SELF_REPO ? file : `${repoPath}/${file}`);
+      }
+    }
+    return changed.sort();
+  }
+
+  /**
+   * Each tracked file that differs from HEAD, with what it holds. `git stash
+   * create` records the working tree as a commit without touching the tree,
+   * the index or the stash, so a file changed again is told apart from one
+   * left as it was. Null when git cannot tell — a merge in progress, say.
+   */
+  private async trackedStates(root: string): Promise<Record<string, string> | null> {
+    const stash = await this.tryGit(root, ['stash', 'create']);
+    if (!stash.ok) return null;
+    const commit = stash.stdout.trim();
+    if (!commit) return {};
+    const diff = await this.tryGit(root, ['diff', '--raw', '--no-abbrev', '--no-renames', '-z', 'HEAD', commit]);
+    return diff.ok ? rawDiffStates(diff.stdout) : null;
+  }
+
   /**
    * One section per repo with changes. A repo below the workspace root gets a
    * header and paths prefixed with its own, so the whole reads as one patch
@@ -676,7 +758,11 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     return diff;
   }
 
-  async mergeIntoCheckedOut(run: IsolationRun): Promise<IsolationMergeResult> {
+  mergeIntoCheckedOut(run: IsolationRun): Promise<IsolationMergeResult> {
+    return this.inTurn(() => this.mergeAll(run));
+  }
+
+  private async mergeAll(run: IsolationRun): Promise<IsolationMergeResult> {
     const partial = await this.settleLanding(run);
     if (partial.length > 0) return { outcome: 'blocked', blocked: partial.map((repo) => ({ repo, reason: 'partial-landing', files: [] })) };
     const repos = await this.reposWithWork(run);
@@ -833,7 +919,7 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
           if (entry.run.id === runId && (pick < 0 || entry.task.order < this.waiting[pick].task.order)) pick = i;
         });
         const [entry] = this.waiting.splice(pick, 1);
-        entry.settle(await this.land(entry.task, entry.run, entry.persist).catch((): IsolationOutcome => 'failed'));
+        entry.settle(await this.inTurn(() => this.land(entry.task, entry.run, entry.persist)).catch((): IsolationOutcome => 'failed'));
       }
     } finally {
       this.draining = false;
@@ -894,6 +980,10 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
       }
     }
 
+    for (const repo of changed) {
+      const tip = await this.tryGit(repo.root, ['rev-parse', '--verify', '-q', repo.integrationBranch]);
+      if (tip.ok) record.repos[repo.path].landedTip = tip.stdout.trim();
+    }
     // No await between these: a persist must never see the landing cleared without the task merged.
     delete run.landing;
     settleStatus(record, 'merged');
@@ -1206,6 +1296,12 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
 
   private async abortMerge(cwd: string): Promise<void> {
     if (!(await this.tryGit(cwd, ['merge', '--abort'])).ok) await this.tryGit(cwd, ['reset', '--hard']);
+  }
+
+  private inTurn<T>(fn: () => Promise<T>): Promise<T> {
+    const turn = this.turns.then(fn, fn);
+    this.turns = turn.catch(() => undefined);
+    return turn;
   }
 
   private admin<T>(repoKey: string, fn: () => Promise<T>): Promise<T> {

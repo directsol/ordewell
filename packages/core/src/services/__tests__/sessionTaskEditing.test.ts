@@ -326,6 +326,45 @@ describe('Session.updateTask — type coherence on AI <-> MAN flips', () => {
   });
 });
 
+describe('Session.updateTask — the ops flag (ADR-0020)', () => {
+  function loaded(plan = planWith()) {
+    const session = makeSession({ modelResolver: resolverFor(CLAUDE_CATALOG) });
+    session.loadPlan(plan, 'goal', testWorkspace, { persist: false });
+    return session;
+  }
+
+  it('flips a pending AI task to ops and back', async () => {
+    const session = loaded();
+
+    let state = await session.updateTask('t2', { ops: true });
+    expect(state!.tasks.find((t) => t.id === 't2')!.ops).toBe(true);
+
+    state = await session.updateTask('t2', { ops: false });
+    expect(state!.tasks.find((t) => t.id === 't2')!.ops).toBeUndefined();
+  });
+
+  it('refuses it on a manual task, and once the task has started', async () => {
+    const plan = planWith();
+    plan.tasks[0].type = 'user';
+    plan.tasks[0].userSteps = [{ order: 1, instruction: 'do it', completed: false }];
+    plan.tasks[1].status = 'completed';
+    const session = loaded(plan);
+
+    await expect(session.updateTask('t1', { ops: true })).rejects.toThrow(/only an AI task/);
+    await expect(session.updateTask('t2', { ops: true })).rejects.toThrow(/has started/);
+  });
+
+  it('clears it when the task becomes manual', async () => {
+    const plan = planWith();
+    plan.tasks[0].ops = true;
+    const session = loaded(plan);
+
+    const state = await session.updateTask('t1', { type: 'user', userSteps: [{ order: 1, instruction: 'by hand', completed: false }] });
+
+    expect(state!.tasks.find((t) => t.id === 't1')!.ops).toBeUndefined();
+  });
+});
+
 describe('Session.updateTask — model and task-mode validity', () => {
   // addTask populates modelsCache via catalogFor/admitRunner, giving the
   // direct-edit path a real catalog to check against — the same rule the

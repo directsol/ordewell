@@ -203,7 +203,7 @@ export class Landing {
     // The verdict passed; only the landing did not. A red X would contradict
     // the marker evidence, and failing would halt the run over work that is
     // finished and kept, so it waits on the user as a conflict does
-    // (ADR-0013, update of 2026-09-28).
+    // (ADR-0013).
     const why = record?.landingError ? ` (${record.landingError})` : '';
     return {
       kind: 'awaiting_user',

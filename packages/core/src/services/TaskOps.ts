@@ -23,7 +23,7 @@ export type TaskOp =
 
 /** Fields the planner may change on an existing task. Everything else (id, status, verdict…) is system-owned. */
 export const UPDATABLE_FIELDS: (keyof Task)[] = [
-  'title', 'description', 'prompt', 'dependencies', 'assignedRunner', 'assignedModel', 'taskMode', 'thinkingEffort', 'type', 'userSteps', 'autonomy', 'sliceType',
+  'title', 'description', 'prompt', 'dependencies', 'assignedRunner', 'assignedModel', 'taskMode', 'thinkingEffort', 'type', 'userSteps', 'autonomy', 'sliceType', 'ops',
 ];
 
 /**
@@ -40,7 +40,7 @@ export function taskOpsProtocol(executionNote = ''): string[] {
     '- To modify specific tasks, reply with ONLY this JSON object:',
     '  {"taskOps": [',
     `    {"op":"update","taskId":"<id or #order>","changes":{${updateChanges}}},`,
-    '    {"op":"add","task":{"title","description","prompt","dependencies":["<id or #order>"],"assignedRunner"?,"assignedModel"?},"handle"?:"<name>"},',
+    '    {"op":"add","task":{"title","description","prompt","dependencies":["<id or #order>"],"assignedRunner"?,"assignedModel"?,"ops"?},"handle"?:"<name>"},',
     '    {"op":"remove","taskId":"<id or #order>"},',
     '    {"op":"reorder","taskIds":["<id or #order>", "... every task exactly once"]},   // only to re-prioritise INDEPENDENT tasks',
     '    {"op":"merge","taskIds":["<id or #order>", "..."],"merged":{"title","description","prompt"?,"assignedRunner"?,"assignedModel"?,...},"handle"?:"<name>"},',
@@ -551,6 +551,7 @@ export function applyTaskOps(currentTasks: readonly Task[], ops: TaskOp[], runne
           taskMode: spec.taskMode ?? toMerge[0].taskMode,
           autonomy: spec.autonomy ?? toMerge.find((t) => t.autonomy)?.autonomy,
           sliceType: spec.sliceType ?? toMerge.find((t) => t.sliceType)?.sliceType,
+          ops: spec.ops ?? toMerge.every((t) => t.ops),
           userStoriesCovered: spec.userStoriesCovered ?? (toMerge.flatMap((t) => t.userStoriesCovered ?? []).length
             ? [...new Set(toMerge.flatMap((t) => t.userStoriesCovered ?? []))]
             : undefined),
@@ -610,6 +611,7 @@ export function applyTaskOps(currentTasks: readonly Task[], ops: TaskOp[], runne
             taskMode: spec.taskMode ?? target.taskMode,
             autonomy: spec.autonomy ?? target.autonomy,
             sliceType: spec.sliceType ?? target.sliceType,
+            ops: spec.ops ?? target.ops,
             userStoriesCovered: spec.userStoriesCovered ?? target.userStoriesCovered,
           });
           newTasks.push(nt);

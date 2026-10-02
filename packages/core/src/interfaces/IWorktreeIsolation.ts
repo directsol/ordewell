@@ -58,6 +58,11 @@ export interface IsolationTaskRepo {
   linked: string[];
   /** Whether the task brought commits to this repo; unknown until it first integrates. */
   changed?: boolean;
+  /**
+   * The integration tip right after the task landed here: what the user's
+   * HEAD must contain for the task's work to count as merged (ADR-0020).
+   */
+  landedTip?: string;
 }
 
 export interface IsolationTaskRecord {
@@ -102,6 +107,12 @@ export interface IsolationTaskRecord {
    * names it in a group of one, prefixed with its repo's path in a group.
    */
   repairedFiles?: string[];
+  /**
+   * Set once the task's landed work is in the checked-out HEAD of every repo
+   * it changed — merged into the user's branch, by Merge all or by hand. What
+   * a merge gate waits for (ADR-0020).
+   */
+  inHead?: true;
 }
 
 /**
@@ -300,6 +311,13 @@ export interface IsolationPruneResult {
   kept: Array<{ taskId: string; order: number; title: string }>;
 }
 
+/**
+ * The tracked changes of a workspace's repos at one moment, against each
+ * repo's HEAD: repo path → file path → the content it held then. What an ops
+ * task's tree check compares against (ADR-0020).
+ */
+export type TreeSnapshot = Record<string, Record<string, string>>;
+
 export interface IWorktreeIsolation {
   /**
    * A repo group with at least one repo to isolate, a clean tracked tree in
@@ -393,13 +411,36 @@ export interface IWorktreeIsolation {
   reviewDiff(run: IsolationRun): Promise<string>;
 
   /**
+   * Mark the landed tasks whose work the checked-out HEAD now contains in
+   * every repo they changed (`git merge-base --is-ancestor`), and return their
+   * ids. Only adds marks: a task found merged stays merged.
+   */
+  findInHead(run: IsolationRun): Promise<string[]>;
+
+  /**
+   * The tracked changes of each committed repo of the workspace's group,
+   * except those in `exclude`; null when there is no repo to snapshot.
+   * Untracked and ignored files never count.
+   */
+  snapshotTree(workspaceRoot: string, exclude: readonly string[]): Promise<TreeSnapshot | null>;
+
+  /**
+   * Tracked files whose content differs from what `snapshot` recorded: new
+   * changes, and further changes to files already changed then. Paths are
+   * from the workspace root. A repo git cannot read now is left out.
+   */
+  changedSince(workspaceRoot: string, snapshot: TreeSnapshot): Promise<string[]>;
+
+  /**
    * "Merge all": merge each repo's integration branch into whatever the user
    * has checked out there. The one irreversible step, so it only ever happens
    * when a caller asks for it. Every repo with work is preflighted first — no
    * merge of the user's in progress, no conflict against their HEAD, no
    * uncommitted edit to a file the merge changes — and unless all pass,
    * nothing is merged anywhere. Only a merge Ordewell itself just started is
-   * ever aborted; nothing of the user's is reset.
+   * ever aborted; nothing of the user's is reset. Waits for a landing in
+   * flight and holds the next back, so a merge during a run takes the
+   * integration branches between two landings, never part of one.
    */
   mergeIntoCheckedOut(run: IsolationRun): Promise<IsolationMergeResult>;
 

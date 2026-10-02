@@ -196,9 +196,9 @@ describe('TaskOrchestrator with worktree isolation', () => {
     expect(spawn).toHaveBeenCalledTimes(3);
     const afterFailure = isolation.calls.slice(isolation.calls.findIndex((c) => c.op === 'release' && c.keep));
     expect(afterFailure.map((c) => c.op + ('taskId' in c ? `:${c.taskId}` : ''))).toEqual([
-      'release:t1', 'handoff', 'release:t1', 'isActive', 'sweep', 'prepare:t1',
+      'release:t1', 'findInHead', 'handoff', 'release:t1', 'isActive', 'sweep', 'prepare:t1',
     ]);
-    expect(afterFailure[2]).toEqual({ op: 'release', taskId: 't1', keep: false });
+    expect(afterFailure[3]).toEqual({ op: 'release', taskId: 't1', keep: false });
     expect(spawn.mock.calls[2][0].cwd).toBe('/fake-worktrees/run1/1-t1');
     expect(spawnedCwd('t1')).toBe('/fake-worktrees/run1/1-t1');
   });
@@ -654,7 +654,7 @@ describe('TaskOrchestrator with worktree isolation', () => {
       expect(spawn).not.toHaveBeenCalled();
       expect(observed).toEqual(['dirty']);
       expect(orchestrator.awaitingIsolationChoice).toBe(true);
-      expect(orchestrator.isRunning).toBe(false);
+      expect(orchestrator.hasLiveWork).toBe(false);
     });
 
     it('goes on isolated once the changes are stashed', async () => {
@@ -1292,11 +1292,11 @@ describe('TaskOrchestrator with worktree isolation', () => {
 
       expect(await orchestrator.mergeRun()).toEqual({ outcome: 'merged' });
 
-      expect(isolation.calls.slice(-2)).toEqual([{ op: 'mergeIntoCheckedOut' }, { op: 'discard', integration: 'delete-merged' }]);
+      expect(isolation.calls.slice(-3)).toEqual([{ op: 'mergeIntoCheckedOut' }, { op: 'findInHead' }, { op: 'discard', integration: 'delete-merged' }]);
       expect(orchestrator.isolationRecord).toBeNull();
       expect(orchestrator.isolationView()).toBeNull();
       expect(orchestrator.getTaskIsolation('t1')).toBeNull();
-      expect(changed).toBe(1);
+      expect(changed).toBe(2);
       expect(orchestrator.storeInstance.get('t1')!.status).toBe('completed');
     });
 

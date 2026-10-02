@@ -48,6 +48,17 @@ describe('parsePlanJson', () => {
     expect(tasks[0].prompt).toBe('Read the project README');
   });
 
+  it('reads "ops" on a top-level AI task only (ADR-0020)', () => {
+    const tasks = parsePlanJson(JSON.stringify({ tasks: [
+      { id: 'o1', order: 1, title: 'Deploy', description: 'Deploy', type: 'ai', prompt: 'deploy', autonomy: 'AFK', sliceType: 'AFK', ops: true,
+        subtasks: [{ id: 's1', order: 1, title: 'Watch', description: 'Watch', type: 'ai', prompt: 'watch', ops: true }] },
+      { id: 'u2', order: 2, title: 'Check', description: 'Check', type: 'user', sliceType: 'HITL', ops: true, userSteps: [{ order: 1, instruction: 'look' }] },
+      { id: 't3', order: 3, title: 'Change', description: 'Change', type: 'ai', prompt: 'change', autonomy: 'AFK', sliceType: 'AFK' },
+    ] }), RUNNERS);
+    expect(tasks.map((t) => t.ops)).toEqual([true, undefined, undefined]);
+    expect(tasks[0].subtasks[0].ops).toBeUndefined();
+  });
+
   it('falls back to title when the model omits both prompt and description', () => {
     const tasks = parsePlanJson(onePlan({ prompt: undefined, description: undefined }), RUNNERS);
     expect(tasks[0].prompt).toBe('Read README');

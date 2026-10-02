@@ -29,8 +29,8 @@ describe('IsolationRunController', () => {
     it('mints an isolated run once and reports it as a change', async () => {
       const { runs, isolation, listener } = setup();
 
-      expect(await runs.open(async () => undefined)).toBe(true);
-      expect(await runs.open(async () => undefined)).toBe(true);
+      expect(await runs.decide(async () => undefined)).toBe(true);
+      expect(await runs.decide(async () => undefined)).toBe(true);
 
       expect(runs.isOpen).toBe(true);
       expect(runs.isolating).toBe(true);
@@ -43,7 +43,7 @@ describe('IsolationRunController', () => {
     it('decides once for starts that race each other', async () => {
       const { runs, isolation } = setup();
 
-      await Promise.all([runs.open(async () => undefined), runs.open(async () => undefined)]);
+      await Promise.all([runs.decide(async () => undefined), runs.decide(async () => undefined)]);
 
       expect(ops(isolation).filter((op) => op === 'isActive')).toHaveLength(1);
     });
@@ -53,7 +53,7 @@ describe('IsolationRunController', () => {
       isolation.availability = { active: false, reason: 'not-git' };
       const { runs, listener, notifications } = setup(isolation);
 
-      expect(await runs.open(async () => undefined)).toBe(true);
+      expect(await runs.decide(async () => undefined)).toBe(true);
 
       expect(runs.isOpen).toBe(true);
       expect(runs.isolating).toBe(false);
@@ -64,14 +64,14 @@ describe('IsolationRunController', () => {
 
     it('continues an adopted run that holds work instead of minting a new one', async () => {
       const { runs: first } = setup();
-      await first.open(async () => undefined);
+      await first.decide(async () => undefined);
       await first.attemptCwd(task('t1', 1), { repair: false });
       await first.release('t1', { keep: true });
       const saved = first.planIsolation;
 
       const { runs, isolation } = setup();
       await runs.adopt(saved);
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
 
       expect(runs.current?.id).toBe('run1');
       expect(ops(isolation)).toContain('pruneOrphans');
@@ -82,7 +82,7 @@ describe('IsolationRunController', () => {
   describe('attemptCwd', () => {
     it('gives an attempt in an isolated run the worktree prepared for it', async () => {
       const { runs } = setup();
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
 
       expect(await runs.attemptCwd(task('t1', 1), { repair: false })).toEqual({ cwd: '/fake-worktrees/run1/1-t1', worktree: true });
       expect(runs.taskIsolation('t1')).toMatchObject({ state: 'active' });
@@ -92,7 +92,7 @@ describe('IsolationRunController', () => {
       const isolation = new FakeWorktreeIsolation();
       isolation.availability = { active: false, reason: 'disabled' };
       const { runs } = setup(isolation);
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
 
       expect(await runs.attemptCwd(task('t1', 1), { repair: false })).toEqual({ cwd: '/repo', worktree: false });
       expect(isolation.taskIdsFor('prepare')).toEqual([]);
@@ -100,7 +100,7 @@ describe('IsolationRunController', () => {
 
     it('reopens the kept worktree for a conflict repair', async () => {
       const { runs, isolation } = setup();
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
       const t1 = task('t1', 1);
       await runs.attemptCwd(t1, { repair: false });
       runs.current!.tasks.t1.status = 'conflict';
@@ -113,7 +113,7 @@ describe('IsolationRunController', () => {
       const isolation = new FakeWorktreeIsolation();
       isolation.copied = ['.env'];
       const { runs, listener } = setup(isolation);
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
 
       await runs.attemptCwd(task('t1', 1), { repair: false });
       await runs.attemptCwd(task('t2', 2), { repair: false });
@@ -129,9 +129,9 @@ describe('IsolationRunController', () => {
       const { runs, listener } = setup(isolation);
       const resume = vi.fn(async () => undefined);
 
-      expect(await runs.open(resume)).toBe(false);
+      expect(await runs.decide(resume)).toBe(false);
       expect(runs.blocked).toBe(true);
-      expect(runs.isOpen).toBe(false);
+      expect(runs.decided).toBe(false);
       expect(listener.blocked).toHaveBeenCalledWith(['api']);
 
       expect(await runs.continueBlocked('stash')).toBe(resume);
@@ -140,7 +140,7 @@ describe('IsolationRunController', () => {
       expect(listener.notice).toHaveBeenCalledWith('info', expect.stringContaining('Stashed your uncommitted changes in api'));
       expect(resume).not.toHaveBeenCalled();
 
-      expect(await runs.open(resume)).toBe(true);
+      expect(await runs.decide(resume)).toBe(true);
       expect(runs.isolating).toBe(true);
     });
 
@@ -149,7 +149,7 @@ describe('IsolationRunController', () => {
       isolation.availability = { active: false, reason: 'dirty' };
       const { runs } = setup(isolation);
       const resume = vi.fn(async () => undefined);
-      await runs.open(resume);
+      await runs.decide(resume);
 
       expect(await runs.continueBlocked('shared')).toBe(resume);
 
@@ -167,7 +167,7 @@ describe('IsolationRunController', () => {
       const isolation = new FakeWorktreeIsolation();
       isolation.availability = { active: false, reason: 'dirty' };
       const { runs } = setup(isolation);
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
 
       runs.interrupt();
 
@@ -178,7 +178,7 @@ describe('IsolationRunController', () => {
   describe('close', () => {
     it('hands an isolated run over and keeps its record for review', async () => {
       const { runs, listener } = setup();
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
       const t1 = task('t1', 1);
       await runs.attemptCwd(t1, { repair: false });
       runs.current!.tasks.t1.status = 'merged';
@@ -194,7 +194,7 @@ describe('IsolationRunController', () => {
       const isolation = new FakeWorktreeIsolation();
       isolation.availability = { active: false, reason: 'disabled' };
       const { runs, listener } = setup(isolation);
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
 
       await runs.close();
 
@@ -204,7 +204,7 @@ describe('IsolationRunController', () => {
 
     it('keeps a run the scheduler still drives open through an interrupt that asks it to', async () => {
       const { runs } = setup();
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
 
       runs.interrupt({ keepOpen: true });
       expect(runs.isOpen).toBe(true);
@@ -213,10 +213,11 @@ describe('IsolationRunController', () => {
       expect(runs.isOpen).toBe(false);
     });
 
-    it('forgets the run once everything merged into the checked-out branch', async () => {
+    it('forgets a settled run once everything merged into the checked-out branch', async () => {
       const { runs, listener } = setup();
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
       await runs.attemptCwd(task('t1', 1), { repair: false });
+      await runs.close();
 
       expect(await runs.merge()).toEqual({ outcome: 'merged' });
 
@@ -229,7 +230,7 @@ describe('IsolationRunController', () => {
   describe('integrate', () => {
     it('reports the record changed before the merge and again once it settles', async () => {
       const { runs, isolation, listener } = setup();
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
       const t1 = task('t1', 1);
       await runs.attemptCwd(t1, { repair: false });
       const release = isolation.holdIntegration('t1');
@@ -249,7 +250,7 @@ describe('IsolationRunController', () => {
       const t1 = task('t1', 1);
       expect(await runs.integrate(t1)).toBe('failed');
 
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
       await runs.attemptCwd(t1, { repair: false });
       vi.spyOn(isolation, 'integrate').mockRejectedValueOnce(new Error('hook failed'));
       expect(await runs.integrate(t1)).toBe('failed');
@@ -257,7 +258,7 @@ describe('IsolationRunController', () => {
 
     it('counts a repair git cannot check against it, in the repo that conflicted', async () => {
       const { runs, isolation } = setup();
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
       const t1 = task('t1', 1);
       await runs.attemptCwd(t1, { repair: false });
       runs.current!.tasks.t1.conflictRepo = 'api';
@@ -270,7 +271,7 @@ describe('IsolationRunController', () => {
   describe('release', () => {
     it('removes a worktree the task no longer needs, after whatever runs in it', async () => {
       const { runs, isolation, listener } = setup();
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
       await runs.attemptCwd(task('t1', 1), { repair: false });
 
       await runs.release('t1', { keep: false });
@@ -283,7 +284,7 @@ describe('IsolationRunController', () => {
 
     it('keeps a worktree for inspection without closing what runs in it', async () => {
       const { runs, listener } = setup();
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
       await runs.attemptCwd(task('t1', 1), { repair: false });
 
       await runs.release('t1', { keep: true });
@@ -294,7 +295,7 @@ describe('IsolationRunController', () => {
 
     it('waits for a merge in flight before touching the worktree', async () => {
       const { runs, isolation } = setup();
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
       await runs.attemptCwd(task('t1', 1), { repair: false });
       let settle!: (outcome: IsolationOutcome) => void;
       const integration = new Promise<IsolationOutcome>((resolve) => { settle = resolve; });
@@ -310,7 +311,7 @@ describe('IsolationRunController', () => {
 
     it('does nothing for a task the run has no record of', async () => {
       const { runs, isolation, listener } = setup();
-      await runs.open(async () => undefined);
+      await runs.decide(async () => undefined);
 
       await runs.release('ghost', { keep: false });
 
@@ -321,7 +322,7 @@ describe('IsolationRunController', () => {
 
   it('forgets a resolver link as it hands it back', async () => {
     const { runs } = setup();
-    await runs.open(async () => undefined);
+    await runs.decide(async () => undefined);
 
     runs.linkResolver('r1', 't1');
     expect(runs.planIsolation?.resolvers).toEqual({ r1: 't1' });

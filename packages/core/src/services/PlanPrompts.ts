@@ -153,9 +153,29 @@ export interface ConversationVariant {
  * workspace, two tasks on one file really do overwrite each other.
  */
 const ISOLATED_PARALLELISM_RULE =
-  '- Each AI task runs in its own git worktree, and its work is merged in afterwards, so tasks that edit the same files can still run in parallel. Never add a dependency just because two tasks touch the same file — keep dependencies for genuine logical ordering.';
+  '- Each change task runs in its own git worktree, and its work is merged in afterwards, so tasks that edit the same files can still run in parallel. Never add a dependency just because two tasks touch the same file — keep dependencies for genuine logical ordering.';
 
 const OVERLAP_AVOIDANCE_RULE = '- For parallel tasks, specify different target files to avoid merge conflicts.';
+
+/**
+ * Change versus ops (ADR-0020): what decides where a task runs and when. The
+ * conversation planner also hears that a question is no task; a one-shot run
+ * has no conversation to answer one in.
+ */
+function opsTaskSection(conversation: boolean): string[] {
+  return [
+    '',
+    'CHANGE AND OPS TASKS:',
+    '- Every AI task is either a change task or an ops task. Decide by one test: is the task\'s result a change to files in the repository?',
+    '- A change task (the default) edits repository files. Omit "ops".',
+    '- An ops task changes no repository files: it acts on systems outside the repository (a cloud CLI, a deployment, a pipeline, a provisioned resource) or on the git refs and history of the user\'s branch (push, tag, reword commits). Set "ops": true. Only top-level "ai" tasks can be ops; a subtask runs with its parent.',
+    '- Ops tasks run in the user\'s own checkout, after the user has merged the change tasks they depend on. Give an ops task a dependency on every change task whose result it acts on — "deploy the fix" depends on the fix.',
+    '- Split a request that mixes the two into a change task and an ops task that depends on it: "bump the version and redeploy" is a change task that bumps and commits the version, then an ops task that pushes and watches the pipeline.',
+    '- Ops tasks run in parallel as their dependencies allow. Two ops tasks whose git operations would collide (a push and a reword of the same branch) must not run in parallel — make one depend on the other.',
+    '- An ops task runs until what it acts on has finished: one that watches a pipeline reports done only when the pipeline has ended.',
+    ...(conversation ? ['- A question is not a task. "What is the frontend\'s URL?" is answered in this conversation, from your research; never make a task of it.'] : []),
+  ];
+}
 
 /** Even under worktree isolation, tasks appending to one shared file still race each other's merges. */
 const SHARED_APPEND_FILE_RULE =
@@ -270,6 +290,7 @@ function buildConversationBody(
     '      "taskMode": "' + modeExamples + '",',
     '      "autonomy": "AFK|HITL",',
     '      "sliceType": "AFK|HITL",',
+    '      "ops": true,',
     '      "userStoriesCovered": ["user story text"],',
     '      "subtasks": [{ "id": "sub-id-string", "order": 1, "title": "Sub-step title", "description": "What it accomplishes", "type": "ai", "dependencies": [], "prompt": "Detailed instructions", "autonomy": "AFK|HITL", "sliceType": "AFK|HITL", "subtasks": [] }]',
     '    }',
@@ -295,6 +316,7 @@ function buildConversationBody(
     SHARED_APPEND_FILE_RULE,
     ...(variant.isolatedExecution ? [ISOLATED_PARALLELISM_RULE] : []),
     ...repoGroupSection(variant.isolatedExecution),
+    ...opsTaskSection(true),
     '',
     'RULES:',
     '- Do NOT wrap the JSON in markdown code blocks. Output ONLY the JSON object when committing the plan.',
@@ -371,6 +393,7 @@ function corePlannerPrompt(isolatedExecution: IsolatedExecution): string {
   '      "taskMode": "{{MODE_EXAMPLES}}",',
   '      "autonomy": "AFK|HITL",',
   '      "sliceType": "AFK|HITL",',
+  '      "ops": true,',
   '      "userStoriesCovered": ["user story text"],',
   '      "subtasks": [{ "id": "sub-id-string", "order": 1, "title": "Sub-step title", "description": "What it accomplishes", "type": "ai", "dependencies": [], "prompt": "Detailed instructions", "autonomy": "AFK|HITL", "sliceType": "AFK|HITL", "subtasks": [] }]',
   '    }',
@@ -400,6 +423,7 @@ function corePlannerPrompt(isolatedExecution: IsolatedExecution): string {
   SHARED_APPEND_FILE_RULE,
   isolatedExecution ? ISOLATED_PARALLELISM_RULE : '- Slices that touch different areas of the codebase are naturally parallel.',
   ...repoGroupSection(isolatedExecution),
+  ...opsTaskSection(false),
   '',
   'RULES:',
   '- Mark as type "ai" any task the coding assistant can do autonomously.',

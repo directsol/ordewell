@@ -38,13 +38,14 @@ export type TaskMode = string;
 
 /**
  * Why an `awaiting_user` task waits (ADR-0018, W1): a structured turn that
- * ended without the done marker, a checkpoint question, or work that did not
- * land. Saved, so no surface has to guess it from whether an attempt is live.
+ * ended without the done marker, a checkpoint question, work that did not
+ * land, or an ops task that changed tracked files (ADR-0020). Saved, so no
+ * surface has to guess it from whether an attempt is live.
  */
-export type AwaitingReason = 'input' | 'checkpoint' | 'conflict';
+export type AwaitingReason = 'input' | 'checkpoint' | 'conflict' | 'files-changed';
 
 export function isAwaitingReason(value: unknown): value is AwaitingReason {
-  return value === 'input' || value === 'checkpoint' || value === 'conflict';
+  return value === 'input' || value === 'checkpoint' || value === 'conflict' || value === 'files-changed';
 }
 
 export interface TaskModelAssignment {
@@ -99,6 +100,19 @@ export interface Task {
   transport?: TaskTransport;
   /** Set only while `status` is `awaiting_user`, and not always then — a usage-limit pause has none. */
   awaitingReason?: AwaitingReason;
+  /**
+   * An ops task (ADR-0020): it changes no repository files, runs at the
+   * workspace root rather than in a worktree, and waits for the change tasks
+   * it depends on to be merged into the user's branch. Top-level AI tasks
+   * only; absent means a change task.
+   */
+  ops?: boolean;
+  /**
+   * The dependencies, by title, whose work was not merged into the user's
+   * branch when the user force-started this task past its merge gate
+   * (ADR-0020). Cleared when the task is retried.
+   */
+  forcedPastGate?: string[];
 }
 
 export interface DiscoveredMode {
@@ -540,6 +554,7 @@ export function createTask(overrides: Partial<Task> = {}): Task {
     autonomy: overrides.autonomy,
     sliceType: overrides.sliceType,
     userStoriesCovered: overrides.userStoriesCovered,
+    ...(overrides.ops && (overrides.type ?? 'ai') === 'ai' ? { ops: true } : {}),
   };
 }
 

@@ -172,6 +172,8 @@ function parseTask(
     userStoriesCovered: Array.isArray(raw.userStoriesCovered)
       ? raw.userStoriesCovered.map(String)
       : undefined,
+    // A subtask runs with its parent, so only a top-level AI task carries it (ADR-0020).
+    ops: !inherited && taskType === 'ai' && raw.ops === true,
   });
 }
 

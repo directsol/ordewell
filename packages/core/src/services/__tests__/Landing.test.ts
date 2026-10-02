@@ -19,7 +19,7 @@ async function setup(opts: { isolation?: FakeWorktreeIsolation; conflictRepairAt
   const runs = new IsolationRunController({ isolation, config, notifications: fakeNotification(), workspaceRoot: () => '/repo', listener });
   const store = new PlanStore();
   store.load(opts.tasks ?? [], ['claude-code']);
-  await runs.open(async () => undefined);
+  await runs.decide(async () => undefined);
   const landing = new Landing({ runs, config, tasks: store });
   const prepare = (t: Task) => runs.attemptCwd(t, { repair: false });
   const record = (taskId: string) => runs.current?.tasks[taskId];

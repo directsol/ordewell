@@ -60,10 +60,14 @@ export function taskIsolationOf(record: IsolationTaskRecord, repairLimit: number
   };
 }
 
-/** What a run hands over: each repo's integration branch and base, and what landed, in plan order. */
+/**
+ * What a run hands over: each repo's integration branch and base, and what
+ * landed, in plan order. Work the user has merged already, at a merge gate
+ * (ADR-0020), is not handed over again.
+ */
 export function handoffOf(run: IsolationRun): IsolationHandoff {
   const merged = Object.values(run.tasks)
-    .filter((r) => r.status === 'merged')
+    .filter((r) => r.status === 'merged' && !r.inHead)
     .sort((a, b) => a.order - b.order);
   const entry = (r: IsolationTaskRecord): IsolationLandedTask => ({
     taskId: r.taskId, order: r.order, title: r.title,
