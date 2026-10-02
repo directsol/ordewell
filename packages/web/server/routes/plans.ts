@@ -1,5 +1,5 @@
 import { Hono, type Context } from 'hono';
-import { ConversationBusyError, ConversationEditError, PlanEditError, TaskControlError, WorkspaceNotFoundError, WorkspaceNotAProjectError } from '@ordewell/core';
+import { ConversationBusyError, ConversationEditError, flattenTasks, PlanEditError, TaskControlError, WorkspaceNotFoundError, WorkspaceNotAProjectError } from '@ordewell/core';
 import { OrchestratorPool } from '../pool/orchestratorPool';
 
 /**
@@ -162,6 +162,22 @@ export function plansRoute(pool: OrchestratorPool) {
     try {
       await pool.session(c.req.param('sessionId')).interruptTask(c.req.param('taskId'));
       return c.json({ ok: true });
+    } catch (err) {
+      return editFailure(c, err);
+    }
+  });
+
+  // What a task waits on at its merge gate (ADR-0020), for a surface that asks
+  // before a force start passes it. Empty when nothing gates the task.
+  router.get('/:sessionId/tasks/:taskId/merge-gate', (c) => {
+    try {
+      const session = pool.session(c.req.param('sessionId'));
+      const tasks = flattenTasks(session.planState?.tasks ?? []);
+      const mergeGate = session.mergeGate(c.req.param('taskId')).map((id) => {
+        const dep = tasks.find((t) => t.id === id);
+        return { id, order: dep?.order ?? 0, title: dep?.title ?? id };
+      });
+      return c.json({ mergeGate });
     } catch (err) {
       return editFailure(c, err);
     }

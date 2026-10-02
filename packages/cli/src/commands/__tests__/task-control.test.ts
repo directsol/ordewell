@@ -45,6 +45,11 @@ async function serverRecordingHits(hits: string[]) {
       res.end(JSON.stringify(PLAN));
       return;
     }
+    if (req.url?.endsWith('/merge-gate')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ mergeGate: [] }));
+      return;
+    }
     hits.push(`${req.method} ${req.url}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
@@ -205,5 +210,75 @@ describe('handleAddTask', () => {
     const { stderr, exitCode } = await capture(() => handleAddTask(['--session-id', 'session-1']));
     expect(stderr).toContain('--title');
     expect(exitCode).toBe(1);
+  });
+});
+
+describe('starting a task past its merge gate (ADR-0020)', () => {
+  const GATE_PLAN = {
+    meta: PLAN.meta,
+    plan: { pendingTasks: [{ id: 'ops-2', order: 2, title: 'Deploy', type: 'ai', ops: true, status: 'pending' }] },
+  };
+
+  async function gatedServer(hits: string[], gate: unknown = { mergeGate: [{ id: 'fix-1', order: 1, title: 'Fix' }] }, gateStatus = 200) {
+    return startServer((req, res) => {
+      res.writeHead(req.url?.endsWith('/merge-gate') ? gateStatus : 200, { 'Content-Type': 'application/json' });
+      if (req.url?.includes('/sessions/')) return res.end(JSON.stringify(GATE_PLAN));
+      if (req.url?.endsWith('/merge-gate')) return res.end(JSON.stringify(gate));
+      hits.push(`${req.method} ${req.url}`);
+      res.end(JSON.stringify({ ok: true }));
+    });
+  }
+
+  it.each(['handleForceStart', 'handleRunTask'])('%s asks first, naming the unmerged work, and starts nothing on a no', async (handlerName) => {
+    const hits: string[] = [];
+    const srv = await gatedServer(hits);
+    const questions: string[] = [];
+    const mod = (await import('../task-control')) as unknown as Record<string, (...args: unknown[]) => Promise<void>>;
+
+    const { stderr, exitCode } = await capture(() =>
+      mod[handlerName](['--session-id', 'session-1', '2'], new ApiClient(srv.port), async (q: string) => { questions.push(q); return false; }),
+    );
+
+    expect(questions).toEqual([expect.stringContaining('the work of #1 Fix is not merged into your branch yet')]);
+    expect(stderr).toContain('Not started');
+    expect(exitCode).toBe(1);
+    expect(hits).toEqual([]);
+    srv.close();
+  });
+
+  it('starts it on a yes, and with --yes asks nothing', async () => {
+    const hits: string[] = [];
+    const srv = await gatedServer(hits);
+    const { handleForceStart } = await import('../task-control');
+    const asked: string[] = [];
+
+    await capture(() => handleForceStart(['--session-id', 'session-1', '2'], new ApiClient(srv.port), async (q) => { asked.push(q); return true; }));
+    await capture(() => handleForceStart(['--session-id', 'session-1', '--yes', '2'], new ApiClient(srv.port), async (q) => { asked.push(q); return false; }));
+
+    expect(asked).toHaveLength(1);
+    expect(hits).toEqual(['POST /api/plans/session-1/tasks/ops-2/force-start', 'POST /api/plans/session-1/tasks/ops-2/force-start']);
+    srv.close();
+  });
+
+  it('leaves a daemon that cannot say what gates the task to answer the start itself', async () => {
+    const hits: string[] = [];
+    const srv = await gatedServer(hits, { error: 'Session not found' }, 404);
+    const { handleForceStart } = await import('../task-control');
+
+    await capture(() => handleForceStart(['--session-id', 'session-1', '2'], new ApiClient(srv.port), async () => { throw new Error('asked'); }));
+
+    expect(hits).toEqual(['POST /api/plans/session-1/tasks/ops-2/force-start']);
+    srv.close();
+  });
+
+  it('never asks before a retry', async () => {
+    const hits: string[] = [];
+    const srv = await gatedServer(hits);
+    const { handleRetry } = await import('../task-control');
+
+    await capture(() => handleRetry(['--session-id', 'session-1', '2'], new ApiClient(srv.port), async () => { throw new Error('asked'); }));
+
+    expect(hits).toEqual(['POST /api/plans/session-1/tasks/ops-2/retry']);
+    srv.close();
   });
 });

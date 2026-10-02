@@ -209,3 +209,35 @@ describe('ordewell task-deps', () => {
     d.close();
   });
 });
+
+describe('ordewell task-ops (ADR-0020)', () => {
+  it('flips an AI task to ops and back', async () => {
+    const d = await fakeDaemon();
+    const { handleTaskOps } = await import('../task-assign');
+    const on = await capture(() => handleTaskOps([...SESSION, '2', 'on'], new ApiClient(d.port)));
+    await capture(() => handleTaskOps([...SESSION, '2', 'off'], new ApiClient(d.port)));
+    expect(updates(d.sent).map((r) => r.body)).toEqual([{ ops: true }, { ops: false }]);
+    expect(on.stdout).toContain('is an ops task');
+    d.close();
+  });
+
+  it('refuses a manual task and a value that is not on or off', async () => {
+    const d = await fakeDaemon();
+    const { handleTaskOps } = await import('../task-assign');
+    const manual = await capture(() => handleTaskOps([...SESSION, '3', 'on'], new ApiClient(d.port)));
+    const garbled = await capture(() => handleTaskOps([...SESSION, '2', 'maybe'], new ApiClient(d.port)));
+    expect(manual.stderr).toContain('Only an AI task');
+    expect(garbled.stderr).toContain('Usage: ordewell task-ops');
+    expect(updates(d.sent)).toEqual([]);
+    d.close();
+  });
+
+  it('says what the task is when no value is given', async () => {
+    const d = await fakeDaemon();
+    const { handleTaskOps } = await import('../task-assign');
+    const { stdout } = await capture(() => handleTaskOps([...SESSION, '2'], new ApiClient(d.port)));
+    expect(stdout).toContain('a change task');
+    expect(updates(d.sent)).toEqual([]);
+    d.close();
+  });
+});

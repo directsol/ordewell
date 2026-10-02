@@ -18,7 +18,7 @@ Planning:
   ordewell fork                   Continue in a copy of the conversation and its tasks
   ordewell compact                Condense the conversation into a summary (tasks are kept)
   ordewell rewind [<n>]           Fork the conversation from before message <n> (no <n>: list them)
-  ordewell handoff [action]       Review, merge, discard or clean up a finished isolated run
+  ordewell handoff [action]       Review, merge, discard or clean up an isolated run
 
 Tasks (<id> is an order number or a task ID):
   ordewell add-task --title "..."  Add a task to the current plan
@@ -26,7 +26,7 @@ Tasks (<id> is an order number or a task ID):
   ordewell complete <id>          Mark a task complete (alias: mark-complete)
   ordewell uncomplete <id>        Mark a completed task not done
   ordewell skip <id>              Skip a task (marks it complete so dependents can run)
-  ordewell force-start <id>       Start a task now, ignoring dependencies
+  ordewell force-start <id>       Start a task now, ignoring dependencies (asks past a merge gate)
   ordewell run-task <id>          Run only one task
   ordewell retry <id>             Re-run a failed task
   ordewell continue <id> <msg>    Continue a finished task in its saved runner session

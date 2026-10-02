@@ -181,6 +181,7 @@ export class PlanStore {
       assignedRunner: taskA.assignedRunner,
       assignedModel: taskA.assignedModel,
       taskMode: taskA.taskMode,
+      ops: taskA.ops === true && taskB.ops === true,
       order: Math.min(taskA.order, taskB.order),
     });
 
@@ -223,6 +224,7 @@ export class PlanStore {
         autonomy: spec.autonomy ?? original.autonomy,
         sliceType: spec.sliceType ?? original.sliceType,
         userStoriesCovered: spec.userStoriesCovered ?? original.userStoriesCovered,
+        ops: spec.ops ?? original.ops,
       }));
     });
 

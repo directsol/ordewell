@@ -133,7 +133,6 @@ function leftoverMarkerFiles(check: string): string[] {
   return [...new Set(files)];
 }
 
-/** Where a landing or a release leaves a task; a repair in flight ends there too, whatever the outcome. */
 /**
  * Tracked file → its state, from `git diff --raw -z --no-abbrev`: the mode and
  * blob on the right-hand side, all zeros for a deleted file.
@@ -151,6 +150,7 @@ function rawDiffStates(raw: string): Record<string, string> {
   return states;
 }
 
+/** Where a landing or a release leaves a task; a repair in flight ends there too, whatever the outcome. */
 function settleStatus(record: IsolationTaskRecord, status: IsolationTaskRecord['status']): void {
   record.status = status;
   delete record.repairBase;

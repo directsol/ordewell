@@ -1,23 +1,11 @@
-import { createInterface } from 'readline';
 import { hasFlag, positionals } from '../utils';
 import type { ApiClient } from '../daemonClient';
 import { handoffBase, handoffBranch, isolationOfPlan, isRepoGroup, mergeOutcome, repairedLanded, repairedNotice, repoResultLines, reposWithWork } from '../isolation';
 import { HANDOFF_ACTIONS } from '../tui/handoff';
 import { adopted } from './conversation';
-import { fail } from './shared';
+import { askYesNo, fail } from './shared';
 
 const USAGE = 'Usage: ordewell handoff [review|merge|discard|cleanup] [--session-id <id>] [--workspace /path] [--yes]';
-
-async function askYesNo(question: string): Promise<boolean> {
-  if (!process.stdin.isTTY) return false;
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    const answer = await new Promise<string>((resolve) => rl.question(`${question} [y/N] `, resolve));
-    return /^y(es)?$/i.test(answer.trim());
-  } finally {
-    rl.close();
-  }
-}
 
 /**
  * Land an isolated run's branch (ADR-0013) — the terminal counterpart of the

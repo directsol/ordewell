@@ -498,10 +498,30 @@ describe('keepExecutionState', () => {
     expect(result.map((t) => [t.id, t.status])).toEqual([['a', 'failed'], ['b', 'pending'], ['new', 'pending']]);
     expect(result[2].verdict).toBeUndefined();
   });
+
+  it('keeps where a task that has run ran, and a force start past its merge gate (ADR-0020)', () => {
+    const failed = { ...createTask({ id: 'a', order: 1, status: 'failed', ops: true }), forcedPastGate: ['"Fix"'] };
+    const current = [failed, todo('b', 2)];
+    const rewrite = [{ ...failed, status: 'pending' as const, ops: undefined, forcedPastGate: undefined }, { ...todo('b', 2), ops: true }];
+
+    const result = keepExecutionState(current, rewrite);
+
+    expect(result[0]).toMatchObject({ ops: true, forcedPastGate: ['"Fix"'] });
+    expect(result[1].ops).toBe(true);
+  });
+});
+
+describe('the ops flag on a new task (ADR-0020)', () => {
+  it('is set only by a literal true, on an AI task', () => {
+    expect(createTask({ ops: true }).ops).toBe(true);
+    expect(createTask({ ops: 'true' as unknown as boolean })).not.toHaveProperty('ops');
+    expect(createTask({ ops: false })).not.toHaveProperty('ops');
+    expect(createTask({ ops: true, type: 'user' })).not.toHaveProperty('ops');
+  });
 });
 
 describe('what an awaiting_user task waits on (ADR-0018, W1)', () => {
-  it.each(['input', 'checkpoint', 'conflict'])('%s is a reason', (reason) => {
+  it.each(['input', 'checkpoint', 'conflict', 'files-changed'])('%s is a reason', (reason) => {
     expect(isAwaitingReason(reason)).toBe(true);
   });
 
@@ -509,7 +529,7 @@ describe('what an awaiting_user task waits on (ADR-0018, W1)', () => {
     expect(isAwaitingReason(value)).toBe(false);
   });
 
-  it.each(['input', 'checkpoint', 'conflict'] as const)('a %s wait goes on the wire with its reason', (awaitingReason) => {
+  it.each(['input', 'checkpoint', 'conflict', 'files-changed'] as const)('a %s wait goes on the wire with its reason', (awaitingReason) => {
     const task = { ...createTask({ id: 't1', title: 'T', status: 'awaiting_user' }), awaitingReason };
     expect(serializeTaskStatus(task).awaitingReason).toBe(awaitingReason);
   });

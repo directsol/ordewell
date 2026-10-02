@@ -1,4 +1,5 @@
-import { flag, positionals, readLastSession, resolveTaskId } from '../utils';
+import { flag, hasFlag, positionals, readLastSession, resolveTaskId } from '../utils';
+import { askYesNo, fail } from './shared';
 import { ensureDaemon, ApiClient, resolvePort } from '../daemonClient';
 import type { SerializedPlan } from '@ordewell/core';
 
@@ -57,13 +58,32 @@ export async function withResolvedTask(
   await run(api, sessionId, taskId, plan as SerializedPlan);
 }
 
+/** Starting a task outside the scheduler, which is what can pass a merge gate. */
+const PASSES_GATE: ReadonlySet<Action> = new Set<Action>(['run', 'force-start']);
+
+/**
+ * A start that passes a merge gate (ADR-0020) asks first, naming the work the
+ * task would act without; `--yes` is the scriptable way to have asked already.
+ */
+async function confirmPastGate(subArgs: string[], api: ApiClient, sessionId: string, taskId: string, confirm: (question: string) => Promise<boolean>): Promise<void> {
+  if (hasFlag(subArgs, '--yes')) return;
+  // A daemon that cannot say (an older one, or a session it does not hold) is
+  // left to answer the start itself.
+  const unmerged = await api.getMergeGate(sessionId, taskId).catch(() => []);
+  if (unmerged.length === 0) return;
+  const question = `This task waits for Merge all: the work of ${unmerged.map((d) => `#${d.order} ${d.title}`).join(', ')} is not merged into your branch yet, so it would act without it. Starting it now is kept on the task. Start it anyway?`;
+  if (!(await confirm(question))) fail('Not started — nothing was changed. Pass --yes to start it without a prompt.');
+}
+
 function makeHandler(action: Action, command: string = action) {
-  return async function handle(subArgs: string[], injectedApi?: ApiClient): Promise<void> {
+  const yes = PASSES_GATE.has(action) ? ' [--yes]' : '';
+  return async function handle(subArgs: string[], injectedApi?: ApiClient, confirm: (question: string) => Promise<boolean> = askYesNo): Promise<void> {
     await withResolvedTask(
       subArgs,
-      `Usage: ordewell ${command} <task-id-or-order> [--session-id <id>] [--workspace /path]`,
+      `Usage: ordewell ${command} <task-id-or-order> [--session-id <id>] [--workspace /path]${yes}`,
       injectedApi,
       async (api, sessionId, taskId) => {
+        if (PASSES_GATE.has(action)) await confirmPastGate(subArgs, api, sessionId, taskId, confirm);
         try {
           await api.taskControl(sessionId, taskId, action);
           console.log(PAST_TENSE[action]);

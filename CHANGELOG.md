@@ -24,9 +24,9 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
   depends on change tasks waits until their work is merged into your branch, and
   says so ("waits for Merge all"). Merge all now works mid-run: it merges what
   has landed, the run goes on, and the waiting tasks start by themselves. A run
-  with nothing else to do shows as paused for Merge all. Force start passes a
-  gate after a confirmation naming what is not merged. Ordewell still never
-  merges for you.
+  with nothing else to do shows as paused for Merge all. Force start, or running
+  a single task, passes a gate after a confirmation naming what is not merged
+  (`--yes` answers it in the CLI). Ordewell still never merges for you.
 
 ### Changed
 

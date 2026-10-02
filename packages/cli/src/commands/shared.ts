@@ -1,3 +1,4 @@
+import { createInterface } from 'readline';
 import { ensureDaemon, ApiClient, resolvePort } from '../daemonClient';
 import { normalizeCatalog, type Catalog } from '../catalog';
 import { findEnvFile, writeEnvVar } from '../utils/env';
@@ -17,6 +18,18 @@ export async function fetchCatalog(api: ApiClient): Promise<Catalog> {
 export function fail(...lines: string[]): never {
   for (const line of lines) console.error(line);
   process.exit(1);
+}
+
+/** A yes/no question on the terminal; no terminal to ask on is a no. */
+export async function askYesNo(question: string): Promise<boolean> {
+  if (!process.stdin.isTTY) return false;
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = await new Promise<string>((resolve) => rl.question(`${question} [y/N] `, resolve));
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
 }
 
 /** Writes each key straight to `.env` and `process.env` — no daemon round-trip. */

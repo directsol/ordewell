@@ -1,0 +1,66 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as vscode from 'vscode';
+import { createTask } from '@ordewell/core';
+import { handleSystemCommand, type PlanManagerDeps } from '../PlanManager';
+
+const showWarningMessage = vscode.window.showWarningMessage as unknown as ReturnType<typeof vi.fn>;
+
+function deps(gate: string[]) {
+  const plan = { status: 'running', tasks: [] };
+  const session = {
+    mergeGate: vi.fn(() => gate),
+    planState: { tasks: [createTask({ id: 'fix', order: 1, title: 'Fix' }), createTask({ id: 'ops', order: 2, title: 'Deploy', ops: true, dependencies: ['fix'] })] },
+    forceStartTask: vi.fn().mockResolvedValue(undefined),
+    runTask: vi.fn().mockResolvedValue(undefined),
+  };
+  const chatProvider = { showPlan: vi.fn(), clearIsolationHandoff: vi.fn() };
+  const d = {
+    session,
+    chatProvider,
+    getCurrentPlan: () => plan,
+    persistState: vi.fn(),
+    log: vi.fn(),
+  } as unknown as PlanManagerDeps;
+  return { d, session };
+}
+
+describe('starting a task past its merge gate (ADR-0020)', () => {
+  beforeEach(() => showWarningMessage.mockReset());
+
+  it.each([
+    ['forceStart', 'forceStartTask'],
+    ['runTask', 'runTask'],
+  ] as const)('%s asks in a modal naming the unmerged work, and starts nothing on a cancel', async (command, method) => {
+    showWarningMessage.mockResolvedValue(undefined);
+    const { d, session } = deps(['fix']);
+
+    await handleSystemCommand(command, 'ops', d);
+
+    const [message, options, ...choices] = showWarningMessage.mock.calls[0] as unknown as [string, { modal?: boolean }, ...string[]];
+    expect(message).toContain('the work of #1 Fix is not merged into your branch yet');
+    expect(options).toMatchObject({ modal: true });
+    expect(choices).toEqual(['Start anyway']);
+    expect(session[method]).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['forceStart', 'forceStartTask'],
+    ['runTask', 'runTask'],
+  ] as const)('%s starts the task once the user goes ahead', async (command, method) => {
+    showWarningMessage.mockResolvedValue('Start anyway');
+    const { d, session } = deps(['fix']);
+
+    await handleSystemCommand(command, 'ops', d);
+
+    expect(session[method]).toHaveBeenCalledWith('ops');
+  });
+
+  it('asks nothing of a task no gate holds', async () => {
+    const { d, session } = deps([]);
+
+    await handleSystemCommand('forceStart', 'ops', d);
+
+    expect(showWarningMessage).not.toHaveBeenCalled();
+    expect(session.forceStartTask).toHaveBeenCalledWith('ops');
+  });
+});

@@ -554,7 +554,7 @@ export function createTask(overrides: Partial<Task> = {}): Task {
     autonomy: overrides.autonomy,
     sliceType: overrides.sliceType,
     userStoriesCovered: overrides.userStoriesCovered,
-    ...(overrides.ops && (overrides.type ?? 'ai') === 'ai' ? { ops: true } : {}),
+    ...(overrides.ops === true && (overrides.type ?? 'ai') === 'ai' ? { ops: true } : {}),
   };
 }
 
@@ -683,6 +683,9 @@ export function keepExecutionState(current: readonly Task[], rewrite: Task[]): T
         verdict: prior?.verdict,
         outputSummary: prior?.outputSummary,
         transport: prior?.transport,
+        // Where a task that has run ran is fixed, like its transport (ADR-0020).
+        ...(prior?.status === 'failed' ? { ops: prior.ops } : {}),
+        forcedPastGate: prior?.forcedPastGate,
         subtasks: overlay(t.subtasks ?? [], prior?.subtasks ?? []),
       };
     });

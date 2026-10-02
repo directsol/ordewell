@@ -44,6 +44,14 @@ jobs:
       - name: Build (core first — cli, web and vscode compile against its dist/)
         run: npm run build:core
 
+      # Skills seeding, slash invocation and the settings migration, each run
+      # against the built core in a throwaway HOME.
+      - name: Verify scripts (offline, against the built core)
+        run: |
+          for f in scripts/verify-*.mjs; do
+            node "$f" || exit 1
+          done
+
       - name: Planner conversation loop — offline e2e (mock model, no API key)
         run: |
           node bench/live/mock-provider.mjs &

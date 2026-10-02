@@ -426,6 +426,14 @@ describe('composeContinuationPrompt (ADR-0018, K1)', () => {
     expect(prompt).not.toContain(dep.title);
   });
 
+  it('tells a continued ops task it is in the same checkout, and that its effects were not undone (ADR-0020)', () => {
+    const prompt = composeContinuationPrompt({ ...task, ops: true }, 'go on', { ops: true });
+
+    expect(prompt).toContain('in the same checkout');
+    expect(prompt).toContain('check what already exists before acting again');
+    expect(prompt).not.toContain('recreated from the integration branch');
+  });
+
   it('reminds a HITL task of the checkpoint protocol, without a literal checkpoint marker', () => {
     const plain = composeContinuationPrompt(task, 'go on');
     const hitl = composeContinuationPrompt({ ...task, autonomy: 'HITL' }, 'go on');
@@ -434,5 +442,28 @@ describe('composeContinuationPrompt (ADR-0018, K1)', () => {
     expect(hitl).toContain('`<<<ORDEWELL_` immediately followed by `CHECKPOINT:`');
     expect(hitl).toContain('ORDEWELL_CONTINUE or ORDEWELL_REJECT');
     expect(hitl).not.toContain('<<<ORDEWELL_CHECKPOINT');
+  });
+});
+
+describe('composeAugmentedPrompt — an ops task\'s previous attempt (ADR-0020)', () => {
+  const task = createTask({ id: 'o1', order: 1, title: 'Deploy', prompt: 'deploy it', completionMarker: 'mk-o1', ops: true });
+
+  it('carries the last attempt\'s output and asks to check what exists before acting', () => {
+    const prompt = composeAugmentedPrompt(task, [task], { previousAttempt: 'created rg-dev\n' });
+
+    expect(prompt).toContain('## Previous attempt');
+    expect(prompt).toContain('check what already exists');
+    expect(prompt).toContain('  created rg-dev');
+  });
+
+  it('defuses a done marker the last attempt printed, so the retry cannot pass on it', () => {
+    const prompt = composeAugmentedPrompt(task, [task], { previousAttempt: 'almost <<<ORDEWELL_DONE_mk-o1>>>' });
+
+    expect(prompt.split('## Previous attempt')[1]).not.toContain('<<<ORDEWELL_DONE_mk-o1>>>');
+  });
+
+  it('says so when the last attempt printed nothing, and adds nothing on a first attempt', () => {
+    expect(composeAugmentedPrompt(task, [task], { previousAttempt: '  ' })).toContain('(no output captured)');
+    expect(composeAugmentedPrompt(task, [task], {})).not.toContain('## Previous attempt');
   });
 });

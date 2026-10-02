@@ -16,7 +16,7 @@ import { VsCodeConfig } from '../adapters/VsCodeConfig';
 import { VsCodeFileSystem } from '../adapters/VsCodeFileSystem';
 import { SecretStore, type ApiProvider } from '../adapters/SecretStore';
 import { configureModelAllowlist } from './configureModelAllowlist';
-import { handleNewSession, plannerPreflightError } from '../plan/PlanManager';
+import { confirmPastGate, handleNewSession, plannerPreflightError } from '../plan/PlanManager';
 
 export interface CommandDeps {
   session: Session;
@@ -277,7 +277,7 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
   context.subscriptions.push(
     vscode.commands.registerCommand('ordewell.forceStartTask', async (taskItem?: Task) => {
       const taskId = taskItem?.id;
-      if (!taskId) return;
+      if (!taskId || !(await confirmPastGate(taskId, deps.session))) return;
       await deps.session.forceStartTask(taskId);
       deps.persistState();
     }),

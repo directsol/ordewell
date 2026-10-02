@@ -789,3 +789,46 @@ describe('canSplitTask', () => {
     expect(canSplitTask(samplePlan(), 'nope').ok).toBe(false);
   });
 });
+
+describe('applyTaskOps — the ops flag (ADR-0020)', () => {
+  it('flips a task that has not started, and reads anything but a literal true as a change task', () => {
+    const on = applyTaskOps(samplePlan(), [{ op: 'update', taskId: '#3', changes: { ops: true } }], ['claude-code']);
+    expect(on.ok).toBe(true);
+    expect(on.tasks[2].ops).toBe(true);
+
+    const garbled = applyTaskOps(on.tasks, [{ op: 'update', taskId: '#3', changes: { ops: 'yes' as unknown as boolean } }], ['claude-code']);
+    expect(garbled.ok).toBe(true);
+    expect(garbled.tasks[2].ops).toBeUndefined();
+  });
+
+  it('refuses it once the task has started, on a manual task, and on a subtask', () => {
+    const plan = samplePlan();
+    plan[0] = { ...plan[0], status: 'failed' };
+    plan[1] = { ...plan[1], subtasks: [createTask({ id: 'b1', order: 1, title: 'Sub', prompt: 'sub' })] };
+    plan.push(createTask({ id: 'u', order: 4, title: 'Check', type: 'user', userSteps: [{ order: 1, instruction: 'look', completed: false }] }));
+
+    for (const [taskId, error] of [['a', 'has started'], ['b1', 'is a subtask'], ['u', 'is a manual task']]) {
+      const res = applyTaskOps(plan, [{ op: 'update', taskId, changes: { ops: true } }], ['claude-code']);
+      expect(res.ok).toBe(false);
+      expect(res.errors.join('\n')).toContain(error);
+    }
+  });
+
+  it('adds an ops task, and a merge of ops tasks stays one', () => {
+    const added = applyTaskOps(samplePlan(), [{ op: 'add', task: { title: 'Redeploy', dependencies: ['#3'], ops: true } }], ['claude-code']);
+    expect(added.tasks[3].ops).toBe(true);
+
+    const plan = samplePlan().map((t) => (t.id === 'a' ? t : { ...t, ops: true }));
+    const merged = applyTaskOps(plan, [{ op: 'merge', taskIds: ['#2', '#3'], merged: { title: 'Ship' } }], ['claude-code']);
+    expect(merged.ok).toBe(true);
+    expect(merged.tasks.find((t) => t.title === 'Ship')?.ops).toBe(true);
+  });
+
+  it('clears it when the task becomes manual', () => {
+    const plan = samplePlan().map((t) => (t.id === 'c' ? { ...t, ops: true } : t));
+    const res = applyTaskOps(plan, [{ op: 'update', taskId: '#3', changes: { type: 'user', userSteps: [{ order: 1, instruction: 'check', completed: false }] } }], ['claude-code']);
+
+    expect(res.ok).toBe(true);
+    expect(res.tasks[2].ops).toBeUndefined();
+  });
+});

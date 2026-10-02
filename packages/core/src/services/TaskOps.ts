@@ -184,6 +184,20 @@ function refCollidesWithExisting(name: string, originalFlatAll: Task[]): boolean
   return originalFlatAll.some((t) => t.title === name);
 }
 
+/**
+ * The fields of a planner's `changes` it may set. `ops` decides where a task
+ * runs, so anything but a literal true reads as a change task, as a parsed
+ * plan reads it (ADR-0020).
+ */
+function updatableChanges(raw: Partial<Task> | undefined): Partial<Task> {
+  const changes: Partial<Task> = {};
+  for (const key of UPDATABLE_FIELDS) {
+    if (raw && key in raw) (changes as Record<string, unknown>)[key] = (raw as Record<string, unknown>)[key];
+  }
+  if ('ops' in changes) changes.ops = changes.ops === true ? true : undefined;
+  return changes;
+}
+
 function findInTasks(tasks: Task[], id: string): Task | undefined {
   return flattenTasks(tasks).find((t) => t.id === id);
 }
@@ -444,10 +458,7 @@ export function applyTaskOps(currentTasks: readonly Task[], ops: TaskOp[], runne
         if ('error' in ref) { errors.push(`${label}: ${ref.error}`); break; }
         const target = findInTasks(tasks, ref.id);
         if (!target) { errors.push(`${label}: task "${op.taskId}" no longer exists in this batch (removed, merged, or split by an earlier op)`); break; }
-        const changes: Partial<Task> = {};
-        for (const key of UPDATABLE_FIELDS) {
-          if (op.changes && key in op.changes) (changes as Record<string, unknown>)[key] = (op.changes as Record<string, unknown>)[key];
-        }
+        const changes = updatableChanges(op.changes);
         if (changes.assignedRunner && !runners.includes(changes.assignedRunner)) {
           errors.push(`${label}: runner "${changes.assignedRunner}" is not in this plan's runner set [${runners.join(', ')}]`);
           break;
@@ -635,10 +646,7 @@ export function applyTaskOps(currentTasks: readonly Task[], ops: TaskOp[], runne
         const target = findInTasks(tasks, ref.id);
         if (!target) { errors.push(`${label}: task "${op.taskId}" no longer exists in this batch (removed, merged, or split by an earlier op)`); break; }
         if (target.status === 'in_progress') { errors.push(`${label}: "${target.title}" is running and cannot be re-armed`); break; }
-        const changes: Partial<Task> = {};
-        for (const key of UPDATABLE_FIELDS) {
-          if (op.changes && key in op.changes) (changes as Record<string, unknown>)[key] = (op.changes as Record<string, unknown>)[key];
-        }
+        const changes = updatableChanges(op.changes);
         if (changes.assignedRunner && !runners.includes(changes.assignedRunner)) {
           errors.push(`${label}: runner "${changes.assignedRunner}" is not in this plan's runner set [${runners.join(', ')}]`);
           break;

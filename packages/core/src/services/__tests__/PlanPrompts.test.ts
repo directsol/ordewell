@@ -366,3 +366,20 @@ describe('the conflict repair prompt', () => {
     expect(p).toContain('What the task was asked to do:\nchange the API and its client');
   });
 });
+
+describe('planner rules for change and ops tasks (ADR-0020)', () => {
+  it('gives every planner the one test, the field, the split and the ordering of colliding git operations', () => {
+    for (const p of [conversation(false), conversation(LONE_REPO), oneShot(false), oneShot(LONE_REPO)]) {
+      expect(p).toContain('CHANGE AND OPS TASKS:');
+      expect(p).toContain('is the task\'s result a change to files in the repository?');
+      expect(p).toContain('"ops": true');
+      expect(p).toMatch(/bump the version and redeploy/);
+      expect(p).toMatch(/a push and a reword of the same branch\) must not run in parallel — make one depend on the other/);
+    }
+  });
+
+  it('tells only the conversation planner that a question is not a task', () => {
+    expect(conversation(LONE_REPO)).toContain('A question is not a task');
+    expect(oneShot(LONE_REPO)).not.toContain('A question is not a task');
+  });
+});

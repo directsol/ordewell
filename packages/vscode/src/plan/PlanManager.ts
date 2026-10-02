@@ -420,15 +420,15 @@ export function handleNewSession(deps: Pick<PlanManagerDeps,
 }
 
 /**
- * A force start passes a merge gate (ADR-0020) once the user has seen, in a
- * real modal, which work the task would act without. True when nothing gates
- * the task or the user went ahead.
+ * A force start or a single-task run passes a merge gate (ADR-0020) once the
+ * user has seen, in a real modal, which work the task would act without. True
+ * when nothing gates the task or the user went ahead.
  */
-async function confirmPastGate(taskId: string, deps: PlanManagerDeps): Promise<boolean> {
-  const unmerged = deps.session.mergeGate(taskId);
+export async function confirmPastGate(taskId: string, session: Pick<Session, 'mergeGate' | 'planState'>): Promise<boolean> {
+  const unmerged = session.mergeGate(taskId);
   if (unmerged.length === 0) return true;
   const named = unmerged.map((id) => {
-    const dep = deps.session.planState?.tasks && flattenTasks(deps.session.planState.tasks).find((t) => t.id === id);
+    const dep = session.planState?.tasks && flattenTasks(session.planState.tasks).find((t) => t.id === id);
     return dep ? `#${dep.order} ${dep.title}` : id;
   });
   const choice = await vscode.window.showWarningMessage(
@@ -459,11 +459,12 @@ export async function handleSystemCommand(
       await deps.session.markTaskIncomplete(taskId);
       break;
     case 'forceStart':
-      if (!(await confirmPastGate(taskId, deps))) return;
+      if (!(await confirmPastGate(taskId, deps.session))) return;
       deps.chatProvider.clearIsolationHandoff();
       await deps.session.forceStartTask(taskId);
       break;
     case 'runTask':
+      if (!(await confirmPastGate(taskId, deps.session))) return;
       deps.chatProvider.clearIsolationHandoff();
       await deps.session.runTask(taskId);
       break;

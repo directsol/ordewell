@@ -137,6 +137,23 @@ describe('TaskOrchestrator: ops tasks and merge gates (ADR-0020)', () => {
       expect(env.orchestrator.getMergeGate('u2')).toEqual(['t1']);
     });
 
+    it('opens a user task\'s gate on work merged by hand, too', async () => {
+      const env = setup();
+      const t1 = change('t1', 1);
+      env.orchestrator.loadPlan([t1, createTask({ id: 'u2', order: 2, title: 'Check it', type: 'user', dependencies: ['t1'] })]);
+      await env.orchestrator.approveReview();
+      env.pass(t1);
+      await vi.waitFor(() => expect(env.status('t1')).toBe('completed'));
+      await flushMicrotasks();
+      expect(env.orchestrator.getMergeGate('u2')).toEqual(['t1']);
+
+      env.isolation.mergedByHand.add('t1');
+      await env.orchestrator.tick();
+
+      expect(env.orchestrator.getMergeGate('u2')).toEqual([]);
+      expect(env.orchestrator.mergeGateView()).toBeNull();
+    });
+
     it('never holds a change task', async () => {
       const env = setup();
       const t1 = change('t1', 1);
@@ -157,6 +174,32 @@ describe('TaskOrchestrator: ops tasks and merge gates (ADR-0020)', () => {
       expect(env.spawned('o2')[0].cwd).toBe('/repo');
       expect(env.orchestrator.storeInstance.get('o2')!.forcedPastGate).toEqual(['"Task t1"']);
       expect(env.notices).toContainEqual(expect.stringContaining('force-started before the work of "Task t1" was merged'));
+    });
+
+    it('keeps a single-task run past the gate on the task, as a force start', async () => {
+      const env = await gated();
+
+      await env.orchestrator.runTask('o2');
+
+      expect(env.spawned('o2')[0].cwd).toBe('/repo');
+      expect(env.orchestrator.storeInstance.get('o2')!.forcedPastGate).toEqual(['"Task t1"']);
+    });
+
+    it('forgets the force start once the task is retried', async () => {
+      const env = await gated();
+      await env.orchestrator.forceStartTask('o2');
+      env.latest('o2').emitExit(1);
+      await vi.waitFor(() => expect(env.status('o2')).toBe('failed'));
+
+      await env.orchestrator.retryTask('o2');
+
+      expect(env.orchestrator.storeInstance.get('o2')!.forcedPastGate).toBeUndefined();
+    });
+
+    it('reports the run paused at its gates, and what Merge all would merge', async () => {
+      const env = await gated();
+
+      expect(env.orchestrator.mergeGateView()).toMatchObject({ paused: true, landed: [{ taskId: 't1' }] });
     });
 
     it('hands over only what was not merged at a gate, and clears a run merged whole', async () => {
@@ -185,6 +228,24 @@ describe('TaskOrchestrator: ops tasks and merge gates (ADR-0020)', () => {
 
       await expect(env.orchestrator.mergeRun()).rejects.toThrow(TaskControlError);
       expect(env.isolation.calls.map((c) => c.op)).not.toContain('mergeIntoCheckedOut');
+    });
+
+    it('refuses to start an ops task by hand while a merge is under way', async () => {
+      const env = setup();
+      const t1 = change('t1', 1);
+      env.orchestrator.loadPlan([t1, ops('o2', 2, { dependencies: ['t1'] })]);
+      await env.orchestrator.approveReview();
+      env.pass(t1);
+      await vi.waitFor(() => expect(env.status('t1')).toBe('completed'));
+      let refused: unknown = null;
+      env.isolation.mergeIntoCheckedOut = async () => {
+        refused = await env.orchestrator.forceStartTask('o2').then(() => null, (err: unknown) => err);
+        return { outcome: 'merged' };
+      };
+
+      await env.orchestrator.mergeRun();
+
+      expect(refused).toBeInstanceOf(TaskControlError);
     });
 
     it('starts no ops task while a merge is under way', async () => {

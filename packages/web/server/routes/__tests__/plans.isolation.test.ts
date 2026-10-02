@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Hono } from 'hono';
-import { PlanEditError } from '@ordewell/core';
+import { createTask, PlanEditError } from '@ordewell/core';
 import { OrchestratorPool } from '../../pool/orchestratorPool';
 import { plansRoute } from '../plans';
 
@@ -44,6 +44,26 @@ describe('GET /:sessionId/isolation/diff', () => {
     const app = appFor({ reviewRunDiff: vi.fn() });
 
     expect((await app.request('/api/plans/nope/isolation/diff')).status).toBe(404);
+  });
+});
+
+describe('GET /:sessionId/tasks/:taskId/merge-gate (ADR-0020)', () => {
+  it('names each dependency whose work is not merged yet', async () => {
+    const mergeGate = vi.fn().mockReturnValue(['fix']);
+    const app = appFor({ mergeGate, planState: { tasks: [createTask({ id: 'fix', order: 1, title: 'Fix' }), createTask({ id: 'ops', order: 2, title: 'Deploy', ops: true })] } });
+
+    const res = await app.request('/api/plans/s1/tasks/ops/merge-gate');
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ mergeGate: [{ id: 'fix', order: 1, title: 'Fix' }] });
+    expect(mergeGate).toHaveBeenCalledWith('ops');
+  });
+
+  it('is empty for a task nothing gates, and a 404 for a session the daemon does not hold', async () => {
+    const app = appFor({ mergeGate: vi.fn().mockReturnValue([]), planState: null });
+
+    expect(await (await app.request('/api/plans/s1/tasks/t1/merge-gate')).json()).toEqual({ mergeGate: [] });
+    expect((await app.request('/api/plans/nope/tasks/t1/merge-gate')).status).toBe(404);
   });
 });
 

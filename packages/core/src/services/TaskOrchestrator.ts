@@ -1197,7 +1197,9 @@ export class TaskOrchestrator {
 
     let readiness = this.readiness();
     // Work merged by hand opens a gate as Merge all does; only git can tell.
-    if (readiness.gated.length > 0 && (await this.runs.refreshInHead())) readiness = this.readiness();
+    // A user task's gate counts too, though the scheduler never starts one.
+    const atGate = readiness.gated.length > 0 || this.store.allTasks.some((t) => t.type === 'user' && this.getMergeGate(t.id).length > 0);
+    if (atGate && (await this.runs.refreshInHead())) readiness = this.readiness();
     if (!this.running) return;
     const { ready } = readiness;
     console.log(`[TaskOrchestrator] tick(): ${ready.length} ready, ${this.attempts.size} active, queue=${this.messageQueue.length}`);

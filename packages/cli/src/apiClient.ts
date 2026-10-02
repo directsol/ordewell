@@ -452,6 +452,18 @@ export class ApiClient {
     return { plan: res.data.plan, summary: res.data.summary, keptMessages: res.data.keptMessages };
   }
 
+  /** The dependencies a task waits on at its merge gate (ADR-0020); empty when nothing gates it. */
+  async getMergeGate(sessionId: string, taskId: string): Promise<Array<{ id: string; order: number; title: string }>> {
+    const res = await this.httpRequest<{ mergeGate: Array<{ id: string; order: number; title: string }> } & ErrorResponse>(
+      'GET',
+      `/api/plans/${sessionId}/tasks/${taskId}/merge-gate`,
+    );
+    if (res.status !== 200) {
+      throw new Error(res.data?.error || 'Could not read the merge gate');
+    }
+    return res.data.mergeGate ?? [];
+  }
+
   async reviewRunDiff(sessionId: string): Promise<string> {
     const res = await this.httpRequest<{ diff: string } & ErrorResponse>('GET', `/api/plans/${sessionId}/isolation/diff`);
     if (res.status !== 200) {

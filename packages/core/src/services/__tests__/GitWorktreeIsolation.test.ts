@@ -1442,6 +1442,18 @@ describe.skipIf(!hasGit)('WorktreeIsolation for merge gates and ops tasks (ADR-0
     expect(readFileSync(join(root, 'README.md'), 'utf8')).toBe('changed\n');
   });
 
+  it('counts a deleted tracked file and a staged change as changes', async () => {
+    const root = repo({ 'README.md': 'hello\n', 'notes.md': 'notes\n' });
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const snapshot = await iso.snapshotTree(root, []);
+
+    rmSync(join(root, 'notes.md'));
+    writeFileSync(join(root, 'README.md'), 'staged\n');
+    git(root, 'add', 'README.md');
+
+    expect(await iso.changedSince(root, snapshot!)).toEqual(['README.md', 'notes.md']);
+  });
+
   it('does not count commits an ops task made to history, only uncommitted changes', async () => {
     const root = repo();
     const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
