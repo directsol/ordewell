@@ -56,7 +56,11 @@ the surfaces is separate work.
 - **Integration is a serialized queue.** Verdicts can land concurrently. The
   module merges one task at a time with `git merge --no-ff` — a merge commit per
   task preserves any commits a Runner made itself, makes attribution visible, and
-  makes the task branch an ancestor so it is safe to delete. Among tasks already
+  makes the task branch an ancestor so it is safe to delete. Subjects name the
+  change, not the plan: the merge commit is `Merge: <task title>` and the
+  sweep-up commit (for work a Runner left uncommitted) is the title alone. The
+  plan's task `order` and the run id are Ordewell-internal and never enter a
+  message that can reach the user's branch. Among tasks already
   waiting, the lowest plan `order` merges first. It never waits for a task that
   has not finished: a dependent cannot run until its predecessor integrates, so
   blocking on a lower-order task that is waiting on the queue would deadlock.

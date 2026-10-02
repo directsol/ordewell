@@ -259,8 +259,8 @@ describe.skipIf(!hasGit)('isolated execution over a folder of three repositories
     expect(taskOf(session, 't2')!.status).toBe('completed');
     const cwdOf = (taskId: string) => env.agent.spawned.find((s) => s.taskId === taskId)!.cwd;
     expect(cwdOf('t1')).toBe(join(dir, '.ordewell', 'worktrees', env.run().id, '1-add-the-endpoint'));
-    expect(git(roots.api, 'log', '--merges', '--format=%s', `${bases.api}..${integration}`)).toBe('Merge task 1: Add the endpoint');
-    expect(git(roots.web, 'log', '--merges', '--format=%s', `${bases.web}..${integration}`)).toBe('Merge task 2: Restyle the page');
+    expect(git(roots.api, 'log', '--merges', '--format=%s', `${bases.api}..${integration}`)).toBe('Merge: Add the endpoint');
+    expect(git(roots.web, 'log', '--merges', '--format=%s', `${bases.web}..${integration}`)).toBe('Merge: Restyle the page');
     expect(git(roots.infra, 'rev-parse', integration)).toBe(bases.infra);
 
     // Task 3 merged cleanly into api, conflicted in web, and api was put back: none of it landed.
@@ -298,7 +298,7 @@ describe.skipIf(!hasGit)('isolated execution over a folder of three repositories
     expect(isAncestor(roots.web, t3Tips.web, integration)).toBe(true);
     expect(git(roots.api, 'show', `${integration}:api.txt`)).toBe('api by t3');
     expect(git(roots.web, 'show', `${integration}:web.txt`)).toBe('web by t2 and t3');
-    expect(git(roots.infra, 'log', '--merges', '--format=%s', `${bases.infra}..${integration}`)).toBe('Merge task 4: Describe the rename in infra');
+    expect(git(roots.infra, 'log', '--merges', '--format=%s', `${bases.infra}..${integration}`)).toBe('Merge: Describe the rename in infra');
     // Handed over: only the integration branches are left, and no worktree but the user's.
     for (const r of REPOS) {
       expect(git(roots[r], 'branch', '--list', 'ordewell/*', '--format=%(refname:short)'), r).toBe(integration);

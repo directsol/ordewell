@@ -925,7 +925,7 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     } catch (err) {
       return { outcome: 'failed', files: [], error: await this.integrationWorktreeError(repo, err) };
     }
-    const merge = await this.tryGit(dir, ['merge', '--no-ff', '--no-edit', '-m', `Merge task ${record.order}: ${firstLine(record.title)}`, record.branch]);
+    const merge = await this.tryGit(dir, ['merge', '--no-ff', '--no-edit', '-m', `Merge: ${firstLine(record.title)}`, record.branch]);
     if (merge.ok) return { outcome: 'merged', files: [] };
     // A hook that refuses the merge commit leaves a merge in progress with nothing unmerged: a failure, not a conflict.
     const files = await this.unmergedPaths(dir);
@@ -1019,7 +1019,7 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     await this.git(entry.worktree, ['add', '-A', '--', '.', ...excludes]);
     const staged = await this.tryGit(entry.worktree, ['diff', '--cached', '--quiet']);
     if (staged.ok) return;
-    await this.git(entry.worktree, ['commit', '-q', '-m', `ordewell: task ${record.order} ${firstLine(record.title)}`]);
+    await this.git(entry.worktree, ['commit', '-q', '-m', firstLine(record.title)]);
   }
 
   private integrationDir(run: IsolationRun, repo: IsolationRepo): string {

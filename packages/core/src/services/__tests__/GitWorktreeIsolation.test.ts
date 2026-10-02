@@ -428,7 +428,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation integration queue', () => {
     expect(outcomes).toEqual(['merged', 'merged', 'merged']);
 
     const merges = git(root, 'log', '--first-parent', '--reverse', '--merges', '--format=%s', run.repos[0].integrationBranch).split('\n');
-    expect(merges).toEqual(['Merge task 1: One', 'Merge task 2: Two', 'Merge task 3: Three']);
+    expect(merges).toEqual(['Merge: One', 'Merge: Two', 'Merge: Three']);
   });
 
   it('does not wait for a lower-order task that has not finished', async () => {
@@ -675,7 +675,7 @@ describe.skipIf(!hasGit)('WorktreeIsolation conflict repair', () => {
 
     expect(git(root, 'show', `${integration}:shared.txt`)).toBe('left and right');
     expect(git(root, 'rev-parse', `${integration}^1`)).toBe(tip);
-    expect(git(root, 'log', '-1', '--format=%s', integration)).toBe('Merge task 2: Right');
+    expect(git(root, 'log', '-1', '--format=%s', integration)).toBe('Merge: Right');
     const record = run.tasks['task-2'];
     expect(record).toMatchObject({ status: 'merged', repairs: 1, repairedFiles: ['shared.txt'] });
     expect(record.repairBase).toBeUndefined();
