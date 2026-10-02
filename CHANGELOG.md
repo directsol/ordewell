@@ -8,6 +8,8 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-10-02
+
 ### Added
 
 - **Ops tasks.** A plan can now carry a goal through to the operations around

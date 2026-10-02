@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-10-02
+
 ### Added
 
 - **Ops tasks.** A task that changes no repository files — a deploy, a cloud
