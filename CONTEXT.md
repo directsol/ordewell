@@ -51,7 +51,7 @@ broadcasts (there is no separate `onRefresh` callback for a surface to wire).
 The Session adds to the relay's observer only the saves some events owe, each
 made before the event is announced: a task that settles on its own
 (`onTaskSettled` — completed, failed or awaiting the user) is saved as it
-settles, so a shared run no longer waits for its end to record a verdict.
+settles, so a shared run does not wait for its end to record a verdict.
 These execution-event saves are *background* saves: one that lands in the
 middle of a planner turn does not settle that turn (see *PlannerConversation*).
 Mutation is an internal seam — every structural plan mutation *and every
@@ -469,7 +469,9 @@ workspace root exactly as before, and `WorktreeIsolation.isActive` says which of
 `disabled`, `git-missing`, `not-git`, `no-commits` or `dirty`
 applied (the last two may name the repositories behind them). `not-git` is
 left for a folder with no repository in it. A group's task integrates by an
-atomic *landing*. The
+atomic *landing*. Under ADR-0020 (not yet implemented) only *change tasks*
+are isolated — an *ops task* runs at the workspace root — and the decision is
+made when the run's first change task starts. The
 Runner is only ever handed a `cwd` (ADR-0007) — git never enters
 `ITerminalRunner`, `RunnerRegistry` or a runner adapter.
 *Avoid:* "sandbox" (an OS-level runner sandbox is a separate concern, ADR-0011),
@@ -495,7 +497,7 @@ worktree so it is runnable at once — never `.ordewell/`, which stays at the ma
 root. `node_modules` (the root's and each workspace package's) is a real
 directory whose entries are linked one by one, and whose own links are
 recreated, so a workspace package resolves to the worktree's code rather than
-the main checkout's (ADR-0013, update of 2026-09-26). Under ADR-0014 a task has one worktree per repo of the group, gathered in
+the main checkout's (ADR-0013). Under ADR-0014 a task has one worktree per repo of the group, gathered in
 its *task workspace*; each is bootstrapped from its own repo, with the
 `worktreeLinks` matches linked beside the defaults, and `worktreeSetupCommand`
 runs once per repo with `ORDEWELL_REPO` and `ORDEWELL_MAIN_REPO` set.
@@ -580,7 +582,7 @@ landed, and a dependent starts only then. `conflictRepo` names the repo that
 stopped it. A landing that does not go through never fails the task and never
 halts the run: a conflict gets a *conflict repair* or waits on the user, and
 one git refuses (`failed`) leaves the task `awaiting_user` with its verdict,
-worktree and branch kept (ADR-0013, update of 2026-09-28).
+worktree and branch kept (ADR-0013).
 The `Landing` module (`services/Landing.ts`) owns it, and conflict repair,
 between the scheduler and the *isolation run controller*: given a passed
 attempt it lands through the controller and answers `landed`,
@@ -628,7 +630,34 @@ merge lands or is aborted whole, so it answers `merged`, `conflict` or `failed`
 as it always has. `merged` ends the run: it is cleared up like a discard, except
 that each integration branch goes only where HEAD contains it, and the plan
 forgets it; any other answer deletes nothing.
+Under ADR-0020 (not yet implemented) Merge all is also what opens a *merge
+gate* mid-run: it merges what has landed and the run goes on, so `merged` ends
+the run only once the run has settled.
 *Avoid:* per-repo merge — there is none, by design (ADR-0014).
+
+**Change task** — a task whose result is a change to repository files: it runs
+in a worktree and lands on the integration branch. Every task is one unless it
+is marked `ops` (ADR-0020).
+*Avoid:* "code task" — docs and config edits are changes too.
+
+**Ops task** — an AI task marked `ops: true` (ADR-0020, not yet implemented):
+it changes no repository files, acting instead on systems outside the repo (a
+cloud CLI, a deployment, a pipeline) or on the git refs and history of the
+user's branch (push, tag, reword). It runs at the workspace root, never in a
+worktree, in the session's mode, and in parallel as its dependencies allow;
+never while a Merge all runs. If it leaves a new tracked change in any repo of
+the group, it waits on the user rather than completing. The planner sets the
+mark and splits a mixed request into a change task and an ops task; the user
+can flip it until the task starts.
+*Avoid:* "operation" as the term (used loosely everywhere), "external effects
+task", "checkout task" — it runs at the workspace root, which in a group is not
+one checkout.
+
+**Merge gate** — where an ops task or a user task that depends on change tasks
+waits until their work is merged into the user's branch (ADR-0020, not yet
+implemented). Only the user's Merge all opens it; Force start passes it after a
+confirmation naming what is not merged. There is no gate without isolation.
+*Avoid:* "checkpoint" — that is a task asking the user to approve its work.
 
 **Base ref** — the commit the user's checked-out branch pointed at when a run
 started, resolved once at that moment. The integration branch forks from it and
@@ -1254,7 +1283,7 @@ concept from a queued prompt, which is why the surfaces name it apart.
 the VS Code extension runs core's `Session` in-process and never connects to the
 daemon. A session planned on one surface opens unchanged on another through the
 saved-session store in `.ordewell/sessions/`, not through a shared transport
-(ADR-0006, update of 2026-09-24).
+(ADR-0006).
 *Avoid:* "web UI" — there is none; the web package is the daemon.
 
 **TUI** — `ordewell tui`, the full-screen terminal surface (ADR-0006). Its core
@@ -1423,7 +1452,7 @@ which was the last one left, in `ModelDiscovery`'s Codex app-server probe.
 macOS, and native Windows. The **TUI is not verified on Windows**: its per-task
 terminal windows are tmux-backed (ADR-0007) and `hasTmux` feature-detects
 rather than assuming. tmux is optional now that structured is the default
-(ADR-0018), but WSL remains the supported answer for the TUI. Three things about Windows are explicitly unverified rather than
-claimed — Codex's read-only sandbox enforcement, `%VAR%` expansion on the
-cmd.exe shim route, and argument fidelity on the PowerShell shim route. See
-ADR-0010.
+(ADR-0018), but WSL remains the supported answer for the TUI. Two things about Windows are explicitly unverified rather than
+claimed — Codex's read-only sandbox enforcement and `%VAR%` expansion on the
+cmd.exe shim route. Argument fidelity on the PowerShell shim route was measured
+on a Windows host. See ADR-0010.

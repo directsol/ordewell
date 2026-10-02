@@ -57,6 +57,15 @@ node bench/live/drive-conversation.mjs
 - **The plan is the source of truth** for what runs. Modes and models are never
   silently rewritten at spawn time
   ([ADR-0001](docs/adr/0001-autonomous-mode-resolution.md)).
+- **ADRs state the current decision, not a log of edits.** An ADR reads as
+  what is true now: *Decision* as if it had always been the design; *Considered
+  options* including any option once chosen and later dropped, with why; and a
+  *History* of one dated line per change, with no restated content. Do not
+  append `Update`/`Amendment` sections. When a later ADR changes an earlier
+  one, rewrite the affected part of the earlier ADR once the change is
+  implemented, and keep the full reasoning in the new ADR. Until then the
+  earlier ADR carries one *Pending* line naming the new ADR. CONTEXT.md follows
+  the same rule: it describes what is, with no dated notes.
 
 ## Cautions
 
