@@ -194,7 +194,7 @@ function fakeRunnerInstallation(installed: string[]) {
 function fakeSettings() {
   let tdd = false;
   let verification = false;
-  let runnerTransport: RunnerTransport = 'terminal';
+  let runnerTransport: RunnerTransport = 'structured';
   return {
     getTdd: vi.fn(() => tdd),
     setTdd: vi.fn((v: boolean) => { tdd = v; }),
@@ -293,7 +293,7 @@ describe('the extension host wires one state, one deps bag and one lifecycle', (
       tasks: [expect.objectContaining({ id: 't1' })],
     }));
     expect(h.chat.provider.setGoal).toHaveBeenCalledWith('build a parser');
-    expect(h.chat.provider.setRunnerTransport).toHaveBeenCalledWith('terminal');
+    expect(h.chat.provider.setRunnerTransport).toHaveBeenCalledWith('structured');
     await vi.waitFor(() => expect(h.chat.provider.setModels).toHaveBeenCalledWith(models));
     await vi.waitFor(() => expect(h.chat.provider.setPlannerBackends).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ id: 'claude-code', usable: true })]),

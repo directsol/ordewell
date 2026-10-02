@@ -189,9 +189,9 @@ function renderSkills(state: TuiState, cols: number): string {
     state.skills[id] ? style.green(`● ${id}`) : style.grey(`○ ${id}`),
   );
   const auto = state.autonomous ? style.yellow('● Full auto') : style.green('● Auto');
-  // Experimental and off by default, so only a plan that opted in shows it.
-  const structured = state.runnerTransport === 'structured' ? [style.yellow('● structured')] : [];
-  return truncate([...badges, auto, ...structured].join(' '), cols);
+  // Structured is the default, so only the fallback is worth a badge.
+  const terminal = state.runnerTransport === 'terminal' ? [style.yellow('● terminal')] : [];
+  return truncate([...badges, auto, ...terminal].join(' '), cols);
 }
 
 /**

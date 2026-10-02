@@ -198,14 +198,14 @@ describe('chat plan flow', () => {
     );
   });
 
-  it('renders the experimental structured transport pill and sets it via postMessage', () => {
+  it('renders the structured transport pill and sets it via postMessage', () => {
     api.postMessage.mockClear();
 
     send({ type: 'runnerTransport', transport: 'terminal' });
     const pill = () => Array.from(document.querySelectorAll('.skill-toggle-pill')).find(
       (b) => b.textContent?.includes('Structured'),
     ) as HTMLButtonElement;
-    expect(pill().textContent).toContain('experimental');
+    expect(pill().textContent).not.toContain('experimental');
     expect(pill().classList.contains('off')).toBeTruthy();
 
     act(() => { fireEvent.click(pill()); });

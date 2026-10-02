@@ -369,7 +369,7 @@ export interface TuiState {
   configuredProviders: string[];
   allowlist: Record<string, string[]>;
   autonomous: boolean;
-  /** The experimental `runnerTransport` setting (ADR-0018), as the daemon reports it. */
+  /** The `runnerTransport` setting (ADR-0018), as the daemon reports it. */
   runnerTransport: RunnerTransport;
   /**
    * Whether the terminal's mouse is captured for wheel scrolling. On by
@@ -540,7 +540,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
     configuredProviders: [],
     allowlist: {},
     autonomous: true,
-    runnerTransport: 'terminal',
+    runnerTransport: 'structured',
     mouseCapture: true,
     selection: null,
     workspace: process.cwd(),

@@ -57,7 +57,7 @@ export async function openTaskTerminal(
   const which = deps.which ?? defaultWhich;
 
   if (!hasTmuxImpl()) {
-    return { ok: false, message: 'tmux is not installed — install it to get a real terminal per task.' };
+    return { ok: false, message: 'No terminal window for this task: tmux is not installed. Install tmux to get one for terminal-transport tasks; a structured task has its log view instead.' };
   }
 
   const session = tmuxSessionName(port);

@@ -860,10 +860,10 @@ describe('skills and settings', () => {
 
     expect(h.api.sendCommand).toHaveBeenCalledWith('transport', { action: 'structured' });
     expect(h.actions).toContainEqual({ type: 'settingsLoaded', settings: { runnerTransport: 'structured' } });
-    expect(h.actions).toContainEqual({ type: 'notice', message: 'Runner transport is structured (experimental) — it applies from the next run.' });
+    expect(h.actions).toContainEqual({ type: 'notice', message: 'Runner transport is structured — it applies from the next run.' });
   });
 
-  it('only labels the structured transport experimental', async () => {
+  it('reports the terminal fallback the same way', async () => {
     const h = harness();
     h.api.sendCommand.mockResolvedValueOnce({ ok: true, settings: { runnerTransport: 'terminal' } });
     await runEffect({ type: 'setTransport', transport: 'terminal' }, h.deps);

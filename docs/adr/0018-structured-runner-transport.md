@@ -188,3 +188,30 @@ The decisions above carry over. Where Codex's protocol differs:
   ask in plain text and end the turn. The question then arrives as a turn
   without the marker (W1). Any other request gets `-32601` at once, so a turn
   never waits on Ordewell.
+
+## Update 2026-10-02: structured is the default; terminal is the fallback (#61)
+
+The parity checklist from S1 is met (done detection, approvals, log view, and
+a connector for Claude Code, Codex and OpenCode), so the default switches:
+`runnerTransport` is `structured` unless the user has chosen otherwise. The
+"experimental" label is gone from every surface. Everything above that says
+"opt-in", "terminal stays the default" or "Today that is Claude Code alone"
+describes the state before this update.
+
+- **Explicit choices are kept.** A settings file that stores `terminal` keeps
+  it. The default is not written back to the file, so it never turns into a
+  choice the user did not make. A file that already holds a `terminal` written
+  by an older build is indistinguishable from a deliberate one and stays
+  terminal until `/transport structured`.
+- **Going back.** `/transport terminal`, `ordewell transport terminal`, and
+  the Structured toggle in VS Code. As before it applies from the next run.
+- **tmux is optional (W2 carries over).** Nothing at start-up refuses to run
+  or warns when tmux is missing. It is needed only by a run on the terminal
+  transport, for the per-task window. On a host without it those tasks run
+  headless, the plan's first such task says what is unavailable and how to get
+  it (install tmux, or keep the structured transport), and opening a task's
+  terminal gives the same advice.
+- **Fallback-only policy.** Runner-facing features target the structured
+  transport only. The terminal transport gets bug fixes, not new features.
+  A runner with no task-mode connector (including a plugin runner) falls back
+  to the terminal transport with a visible reason (S3), never silently.

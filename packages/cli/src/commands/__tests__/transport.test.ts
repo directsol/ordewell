@@ -22,8 +22,8 @@ afterEach(() => { vi.restoreAllMocks(); });
 describe('handleTransport', () => {
   it.each([
     ['terminal', 'terminal'],
-    ['structured', 'structured (experimental)'],
-  ])('%s sets it through the daemon command and labels only structured experimental', async (transport, label) => {
+    ['structured', 'structured'],
+  ])('%s sets it through the daemon command and names it', async (transport, label) => {
     const api = fakeApi({});
     const out = await printed(() => handleTransport([transport], api as unknown as ApiClient));
     expect(api.sendCommand).toHaveBeenCalledWith('transport', { action: transport });
@@ -34,7 +34,7 @@ describe('handleTransport', () => {
     const api = fakeApi({ runnerTransport: 'structured' });
     const out = await printed(() => handleTransport([], api as unknown as ApiClient));
     expect(api.sendCommand).not.toHaveBeenCalled();
-    expect(out).toContain('Runner transport: structured (experimental)');
+    expect(out).toContain('Runner transport: structured');
     expect(out).toContain('Usage: ordewell transport [terminal|structured]');
   });
 });

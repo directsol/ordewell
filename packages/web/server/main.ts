@@ -3,7 +3,8 @@ import { createApp, attachWsHandler } from './app';
 import { createRequestListener } from './nodeAdapter';
 import { OrchestratorPool } from './pool/orchestratorPool';
 import { createServer } from 'http';
-import { clearDaemonToken, hasTmux, mintDaemonToken, StructuredRunner, TmuxRunner } from '@ordewell/core';
+import { clearDaemonToken, mintDaemonToken, StructuredRunner } from '@ordewell/core';
+import { startTerminalHost } from './adapters/TerminalHost';
 
 const args = process.argv.slice(2);
 let port = 3742;
@@ -22,18 +23,11 @@ if (portIdx !== -1 && args[portIdx + 1]) {
 const watchParentIdx = args.indexOf('--watch-parent');
 const watchParentPid = watchParentIdx !== -1 ? parseInt(args[watchParentIdx + 1], 10) : undefined;
 
-// Tasks run in a real tmux window (so `ordewell tui` can open a genuine
-// interactive terminal on them) whenever tmux is on the host; otherwise this
-// falls straight back to today's headless-per-session default (see
-// OrchestratorPool's `runner` dep).
-const tmuxRunner = hasTmux() ? new TmuxRunner({ port }) : undefined;
-if (tmuxRunner) {
-  // Failure is not fatal here: ensureSession is memoized and each spawn
-  // re-awaits it, so the next task retries the setup rather than giving up.
-  tmuxRunner.ensureSession().catch((err) => {
-    console.error(`[web] tmux session setup failed (will retry on next task spawn): ${err?.message ?? err}`);
-  });
-}
+// Terminal-transport tasks run in a real tmux window (so `ordewell tui` can
+// open a genuine interactive terminal on them) whenever tmux is on the host;
+// otherwise they fall back to the headless-per-session runner (see
+// OrchestratorPool's `runner` dep) and the first such run says so.
+const { runner: tmuxRunner, advice: terminalAdvice } = startTerminalHost(port);
 
 // Minted before the socket is listening, so no request can arrive before there
 // is a token to check it against.
@@ -42,7 +36,7 @@ const admission = { port, token, tokenFile };
 
 // Tasks of a plan run on the structured transport (ADR-0018) are plain child
 // processes: no tmux, so one runner serves every plan whatever the host has.
-const pool = new OrchestratorPool({ runner: tmuxRunner, structuredRunner: new StructuredRunner() });
+const pool = new OrchestratorPool({ runner: tmuxRunner, terminalAdvice, structuredRunner: new StructuredRunner() });
 const app = createApp(pool, admission);
 
 // Warm the model caches at startup (same as the VS Code extension's activation

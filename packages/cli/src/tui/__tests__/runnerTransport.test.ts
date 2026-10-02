@@ -26,8 +26,8 @@ describe('/transport', () => {
   });
 
   it('a bare /transport flips whatever is set', () => {
-    expect(run('/transport').effects).toEqual([{ type: 'setTransport', transport: 'structured' }]);
-    expect(run('/transport', { runnerTransport: 'structured' }).effects).toEqual([{ type: 'setTransport', transport: 'terminal' }]);
+    expect(run('/transport').effects).toEqual([{ type: 'setTransport', transport: 'terminal' }]);
+    expect(run('/transport', { runnerTransport: 'terminal' }).effects).toEqual([{ type: 'setTransport', transport: 'structured' }]);
   });
 
   it('refuses a transport that does not exist', () => {
@@ -37,8 +37,8 @@ describe('/transport', () => {
   });
 
   it('follows the setting the daemon reports', () => {
-    const { state } = reduce(initialState(), { type: 'settingsLoaded', settings: { runnerTransport: 'structured' } });
-    expect(state.runnerTransport).toBe('structured');
+    const { state } = reduce(initialState(), { type: 'settingsLoaded', settings: { runnerTransport: 'terminal' } });
+    expect(state.runnerTransport).toBe('terminal');
   });
 });
 
@@ -95,8 +95,8 @@ describe('the task row', () => {
     expect(off.tasks[0].transport).toBeUndefined();
   });
 
-  it('shows a structured badge beside the toggles only while the setting is on', () => {
-    expect(plain(planState({ runnerTransport: 'structured' }))).toContain('● structured');
-    expect(plain(planState())).not.toContain('structured');
+  it('shows a terminal badge beside the toggles only while the fallback is chosen', () => {
+    expect(plain(planState({ runnerTransport: 'terminal' }))).toContain('● terminal');
+    expect(plain(planState({ runnerTransport: 'structured' }))).not.toContain('● terminal');
   });
 });

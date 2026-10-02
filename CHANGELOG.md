@@ -10,6 +10,27 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ### Changed
 
+- **The structured transport is now the default, and tmux is optional.** Tasks
+  are driven through their runner's own protocol instead of a terminal screen
+  and keyboard, for Claude Code, Codex and OpenCode alike; the experimental
+  label is gone. To go back to the terminal transport, run `/transport terminal`
+  (or `ordewell transport terminal`), or switch off the Structured toggle in
+  VS Code; a choice you already stored is kept, and it applies from the next
+  run. tmux is now needed only by the terminal transport, to give each task a
+  terminal window you can open. Without it Ordewell starts as usual, and a run
+  on the terminal transport says what is unavailable and how to get it. A runner
+  with no structured connector still falls back to the terminal, with the reason
+  shown on the task.
+  - **Codex and OpenCode structured connectors.** Codex tasks run over
+    `codex app-server` and OpenCode tasks over `opencode serve`, so those runners
+    get the structured task log and runner approvals Claude Code already had.
+  - **Full auto and Auto.** Two autonomy levels, set with `/auto [full|auto]`
+    and shown on every surface. Each runner's manifest says what a level means
+    for it, and the plan's level is held rather than rewritten when a task
+    starts.
+  - **Claude tasks ask clarifying questions in plain text.** A Claude Code task
+    on the structured transport asks in its reply and waits for you, instead of
+    using its built-in question tool.
 - **The VS Code task log's message box works like the planner's.** Enter sends
   and Shift+Enter starts a new line; one button sends what is typed, stops the
   live turn when nothing is, and greys out when there is neither. Esc twice

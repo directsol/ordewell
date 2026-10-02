@@ -82,7 +82,7 @@ export default function App() {
   const [setupCollapsed, setSetupCollapsed] = useState(false);
   const [tddEnabled, setTddEnabled] = useState(true);
   const [verifyEnabled, setVerifyEnabled] = useState(false);
-  const [runnerTransport, setRunnerTransport] = useState<RunnerTransport>('terminal');
+  const [runnerTransport, setRunnerTransport] = useState<RunnerTransport>('structured');
   /** Discovered skills (~/.ordewell/skills/ + .ordewell/skills/) for the /skill-name suggestion dropdown. */
   const [skills, setSkills] = useState<{ name: string; description: string }[]>([]);
   const [checkpoint, setCheckpoint] = useState<{ taskId: string; taskTitle: string; summary: string; pausedAt: number } | null>(null);
@@ -1052,8 +1052,8 @@ export default function App() {
           <span className="skill-toggle-dot" /> Verify
         </button>
         <button className={`skill-toggle-pill ${runnerTransport === 'structured' ? 'on' : 'off'}`}
-          onClick={handleToggleTransport} title="Structured (experimental): run Claude Code tasks through its protocol instead of a terminal. Applies from the next run; other runners keep their terminal.">
-          <span className="skill-toggle-dot" /> Structured <span className="skill-toggle-experimental">experimental</span>
+          onClick={handleToggleTransport} title="Structured: drive tasks through each runner's protocol instead of a terminal. Switch it off to use a terminal. Applies from the next run; a runner without a structured connector keeps its terminal.">
+          <span className="skill-toggle-dot" /> Structured
         </button>
       </div>
 

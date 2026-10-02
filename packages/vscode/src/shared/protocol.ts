@@ -141,7 +141,7 @@ export type WebviewToHost =
   /** A notice the webview raised (a task action, the watchdog) — the conversation belongs to the host. */
   | { type: 'addNote'; text: string }
   | { type: 'toggleSkill'; skillId: string; enabled: boolean }
-  /** The experimental runner transport (ADR-0018); a run copies it when it starts. */
+  /** The runner transport (ADR-0018); a run copies it when it starts. */
   | { type: 'setRunnerTransport'; transport: RunnerTransport }
   /** Open (or focus) the on-demand task-log tab for a structured task (ADR-0018, V1). */
   | { type: 'openTaskLog'; taskId: string }
