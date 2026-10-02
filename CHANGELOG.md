@@ -8,6 +8,8 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-02
+
 ### Changed
 
 - **The structured transport is now the default, and tmux is optional.** Tasks

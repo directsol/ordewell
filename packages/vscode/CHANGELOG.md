@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-02
+
+### Changed
+
+- **The structured transport is now the default.** Tasks are driven through
+  their runner's own protocol — Claude Code, Codex and OpenCode alike — instead
+  of a terminal screen and keyboard. Switch off the Structured toggle to go back
+  to the terminal transport; a choice you already stored is kept, and it applies
+  from the next run. tmux is needed only by the terminal transport.
+- **The task log's message box works like the planner's.** Enter sends and
+  Shift+Enter starts a new line; one button sends what is typed, stops the live
+  turn when nothing is, and greys out when there is neither. Esc twice stops the
+  turn too. The separate Interrupt button is gone.
+
 ### Added
 
 - **The plan dock can be resized.** Drag its top edge (or focus it and use the
@@ -9,6 +23,12 @@
   The height is remembered across sessions and VS Code restarts. It is a
   ceiling, not a fixed size: a plan shorter than it, or one with its tasks
   collapsed, still shrinks to where its content ends.
+
+### Fixed
+
+- **Live logs follow new output again.** The task log, the planner conversation
+  and a task card's runner output stay on the newest lines while you are at the
+  bottom, and stop following as soon as you scroll up to read back.
 
 ## [0.5.6] — 2026-09-30
 
