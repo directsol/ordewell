@@ -622,7 +622,7 @@ export class ApiClient {
         try {
           const event: WsEvent = JSON.parse(data.toString());
           onEvent(event);
-          // A blocked run spawns nothing and waits for the user's choice, so
+          // A blocked run starts no change task until the user chooses, so
           // this stream has no completion coming. Ending it here lets the
           // choice open its own, instead of two streams reporting one run.
           if (

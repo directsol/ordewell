@@ -68,6 +68,7 @@ export async function followExecution(
     }
   }
 
+  let pausedAtGate = false;
   let settleReady: (error?: Error) => void = () => {};
   const streamReady = new Promise<void>((resolve, reject) => {
     settleReady = (error) => (error ? reject(error) : resolve());
@@ -81,6 +82,10 @@ export async function followExecution(
     }
     if (event.type === 'status_update' && event.tasks) {
       printStatus(event.tasks as TaskStatus[]);
+      // Said once per pause: the run waits on a merge only the user makes (ADR-0020).
+      const paused = event.gate?.paused === true;
+      if (paused && !pausedAtGate) process.stderr.write('· Paused for Merge all — `ordewell handoff merge` merges what has landed, and the waiting tasks start.\n');
+      pausedAtGate = paused;
     }
     if (event.type === 'review_needed') {
       console.log('\nPlan needs your sign-off — run `ordewell approve` to continue.');
