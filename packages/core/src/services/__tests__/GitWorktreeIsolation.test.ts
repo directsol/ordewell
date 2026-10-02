@@ -491,6 +491,19 @@ describe.skipIf(!hasGit)('WorktreeIsolation integration queue', () => {
     expect(run.tasks['task-1'].landingError).toMatch(/worktree/i);
     expect(run.tasks['task-1'].landingError).toContain(cwd);
   });
+
+  it('names the checkout holding the integration branch when git will not add it a second time', async () => {
+    const root = repo();
+    const iso = create({ config: fakeConfig({ worktreeIsolation: true }) });
+    const run = await iso.startRun(root);
+    const t = task(1, 'Held elsewhere');
+    const { cwd } = await iso.prepare(t, run);
+    writeFileSync(join(cwd, 'work.txt'), 'the runner wrote this\n');
+    git(root, 'checkout', '-q', run.repos[0].integrationBranch);
+
+    expect(await iso.integrate(t, run)).toBe('failed');
+    expect(run.tasks['task-1'].landingError).toBe(`the integration branch is checked out in ${root}`);
+  });
 });
 
 describe.skipIf(!hasGit)('WorktreeIsolation conflicts', () => {

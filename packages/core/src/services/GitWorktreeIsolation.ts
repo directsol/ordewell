@@ -888,9 +888,9 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
         return this.stopLanding(record, 'failed');
       }
       for (const repo of changed) {
-        const { outcome, files } = await this.mergeTask(run, repo, record);
+        const { outcome, files, error } = await this.mergeTask(run, repo, record);
         if (outcome === 'merged') continue;
-        return (await this.settleLanding(run)).length === 0 ? this.stopLanding(record, outcome, repo, files) : this.stopLanding(record, 'failed', repo);
+        return (await this.settleLanding(run)).length === 0 ? this.stopLanding(record, outcome, repo, files, error) : this.stopLanding(record, 'failed', repo);
       }
     }
 
@@ -918,12 +918,12 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
   }
 
   /** Merge the task branch into one repo's integration branch. A merge that does not complete is aborted: it is Ordewell's own. */
-  private async mergeTask(run: IsolationRun, repo: IsolationRepo, record: IsolationTaskRecord): Promise<{ outcome: IsolationOutcome; files: string[] }> {
+  private async mergeTask(run: IsolationRun, repo: IsolationRepo, record: IsolationTaskRecord): Promise<{ outcome: IsolationOutcome; files: string[]; error?: string }> {
     let dir: string;
     try {
       dir = await this.ensureIntegrationWorktree(run, repo);
-    } catch {
-      return { outcome: 'failed', files: [] };
+    } catch (err) {
+      return { outcome: 'failed', files: [], error: await this.integrationWorktreeError(repo, err) };
     }
     const merge = await this.tryGit(dir, ['merge', '--no-ff', '--no-edit', '-m', `Merge task ${record.order}: ${firstLine(record.title)}`, record.branch]);
     if (merge.ok) return { outcome: 'merged', files: [] };
@@ -931,6 +931,18 @@ class GitWorktreeIsolation implements IWorktreeIsolation {
     const files = await this.unmergedPaths(dir);
     if (await this.mergeInProgress(dir)) await this.abortMerge(dir);
     return { outcome: files.length > 0 ? 'conflict' : 'failed', files };
+  }
+
+  /**
+   * Why the integration worktree could not be prepared. Git refuses to check a
+   * branch out in two worktrees at once, so the usual cause is the integration
+   * branch sitting in the user's own checkout; naming it is the actionable part
+   * of git's error, which would otherwise be dropped.
+   */
+  private async integrationWorktreeError(repo: IsolationRepo, err: unknown): Promise<string> {
+    const holder = await this.worktreeHolding(repo, repo.integrationBranch);
+    if (holder) return `the integration branch is checked out in ${holder}`;
+    return `git could not prepare its integration worktree (${firstLine(err instanceof Error ? err.message : String(err))})`;
   }
 
   /**
