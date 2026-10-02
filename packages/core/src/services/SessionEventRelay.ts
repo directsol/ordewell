@@ -16,7 +16,7 @@ export interface SessionEventRelayDeps {
   /** Where isolation notices go, for a host whose notifications are not seen by the user. */
   onNotice?: (notice: SessionNotice) => void;
   store: Pick<PlanStore, 'allTasks' | 'snapshot'>;
-  orchestrator: Pick<TaskOrchestrator, 'getIdleSince' | 'getTaskIsolation' | 'getQueuedTaskMessages' | 'getMergeGate'>;
+  orchestrator: Pick<TaskOrchestrator, 'getIdleSince' | 'getTaskIsolation' | 'getQueuedTaskMessages' | 'getMergeGate' | 'mergeGateView'>;
   /** Shared with the Session, which snapshots, restores and clears it. */
   usage: PlannerUsageLedger;
   /** How many of a task's runner requests wait for an answer (ADR-0018, A1). */
@@ -101,6 +101,7 @@ export class SessionEventRelay {
     // Hosts that render from the plan object (VS Code) read statuses off it
     // when a status_update arrives, so it has to be current by then.
     plan.tasks = this.store.snapshot();
+    const gate = this.orchestrator.mergeGateView();
     this.broadcast({
       type: 'status_update',
       tasks: this.store.allTasks.map((t) => serializeTaskStatus(
@@ -111,6 +112,7 @@ export class SessionEventRelay {
         this.awaitingApproval(t.id),
         this.orchestrator.getMergeGate(t.id),
       )),
+      ...(gate ? { gate } : {}),
     });
   }
 

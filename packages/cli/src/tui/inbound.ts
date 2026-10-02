@@ -342,9 +342,13 @@ function dispatchLifecycle(dispatch: Dispatch, event: LifecycleMessage, sessionI
           awaitingReason: isAwaitingReason(task.awaitingReason) ? task.awaitingReason : undefined,
           ...(task.continuable ? { continuable: true } : {}),
           awaitingApproval: typeof task.awaitingApproval === 'number' && task.awaitingApproval > 0 ? task.awaitingApproval : undefined,
+          ...(task.mergeGate?.length ? { mergeGate: task.mergeGate.map(String) } : {}),
+          ...(task.forcedPastGate?.length ? { forcedPastGate: task.forcedPastGate.map(String) } : {}),
         };
       }
-      dispatch({ type: 'tasksStatus', updates, sessionId });
+      // Absent means no task waits at a gate any more, which is news too.
+      const gate = event.gate ? { paused: event.gate.paused === true, handoff: { repos: event.gate.repos, landed: event.gate.landed } } : null;
+      dispatch({ type: 'tasksStatus', updates, gate, sessionId });
       return;
     }
 

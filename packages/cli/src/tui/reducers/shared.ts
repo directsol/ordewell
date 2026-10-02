@@ -1,7 +1,7 @@
 import type { ApprovalDecision, AwaitingReason, ConversationMessage, PlannerUsage, ResearchLogEntry, RunnerTransport, SessionMessage, TaskLogEvent } from '@ordewell/core';
 import type { Key } from '../keys';
 import type {
-  HandoffView, LandedTaskView, ModelView, ModeView, RewindTargetView, RunnerView, SessionView,
+  GateView, HandoffView, LandedTaskView, ModelView, ModeView, RewindTargetView, RunnerView, SessionView,
   TaskIsolationView, TaskTransportView, TuiState,
 } from '../state';
 import { say } from '../transcript';
@@ -15,6 +15,8 @@ export interface TaskStatusUpdate {
   awaitingReason?: AwaitingReason;
   continuable?: boolean;
   awaitingApproval?: number;
+  mergeGate?: string[];
+  forcedPastGate?: string[];
 }
 
 /** Side effects the runtime performs; the reducer itself stays pure. */
@@ -48,7 +50,8 @@ export type Effect =
   | { type: 'compactConversation'; sessionId: string }
   | { type: 'isolationReviewDiff'; sessionId: string }
   /** `branch` is only for the words the result is reported in; `repaired` likewise (ADR-0015). */
-  | { type: 'isolationMerge'; sessionId: string; branch: string; group?: boolean; repaired?: LandedTaskView[] }
+  /** `midRun`: merged at a merge gate (ADR-0020), so the run and its record stay. */
+  | { type: 'isolationMerge'; sessionId: string; branch: string; group?: boolean; repaired?: LandedTaskView[]; midRun?: boolean }
   | { type: 'isolationDiscard'; sessionId: string; branch: string }
   | { type: 'isolationCleanup'; sessionId: string; branch: string }
   /** Replays a run a dirty tree parked; `stash` puts tracked changes aside first, `shared` runs in the working tree this once. */
@@ -105,7 +108,7 @@ export type Action =
   | { type: 'taskViewRequested'; taskId: string; sessionId: string }
   | { type: 'taskStarted'; taskId: string; title: string; runner?: string; sessionId?: string }
   | { type: 'taskStatus'; taskId: string; status: string; sessionId?: string }
-  | { type: 'tasksStatus'; updates: Record<string, TaskStatusUpdate>; sessionId?: string }
+  | { type: 'tasksStatus'; updates: Record<string, TaskStatusUpdate>; gate?: GateView | null; sessionId?: string }
   | { type: 'isolationBlocked'; message: string; repos?: string[]; sessionId?: string }
   | { type: 'isolationHandoff'; handoff: HandoffView; sessionId?: string }
   | { type: 'handoffDiff'; diff: string; sessionId?: string }

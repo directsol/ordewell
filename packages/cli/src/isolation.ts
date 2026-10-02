@@ -37,6 +37,8 @@ interface RunRecord {
   conflictRepo?: unknown;
   conflictFiles?: unknown;
   repairedFiles?: unknown;
+  /** Its work is in the user's branch already, merged at a merge gate (ADR-0020). */
+  inHead?: unknown;
 }
 
 type RepoFields = Omit<HandoffRepoView, 'landed'>;
@@ -94,7 +96,7 @@ export function isolationOfPlan(plan: unknown): PlanIsolationView | null {
       // `tasksStatus` update fills it in once the stream catches up.
       ...(repairedFiles ? { repairedFiles } : {}),
     };
-    if (state === 'integrated') {
+    if (state === 'integrated' && record.inHead !== true) {
       landed.push({ taskId, order: Number(record.order ?? 0), title: String(record.title ?? taskId), changed, ...(repairedFiles ? { repairedFiles } : {}) });
     }
   }

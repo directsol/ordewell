@@ -6,7 +6,7 @@ import {
   stopHint,
 } from './layout';
 import { chatEditorRoomFor, chatPaneWidth, chatPromptLabel, paneColumns, planPaneWidth } from './geometry';
-import { diffRoom, handoffActions } from './handoff';
+import { currentHandoff, diffRoom, handoffActions } from './handoff';
 import { handoffBase, handoffBranch, isRepoGroup, repoResultLines } from '../isolation';
 import { capConflictFiles } from '@ordewell/core';
 import { SKILL_IDS, plannerInFlight, visibleItems, type Overlay, type PickerState, type TuiState } from './state';
@@ -455,7 +455,7 @@ function renderHandoff(
   rows: number,
   cols: number,
 ): string[] {
-  const handoff = state.handoff;
+  const handoff = currentHandoff(state);
   if (!handoff) return frame('Handoff', [style.grey('Nothing to hand off.')], rows, cols);
 
   if (overlay.diff) {

@@ -67,6 +67,7 @@ export function toTaskView(task: SerializedTask & { status?: string }): TaskView
     taskMode: task.taskMode || undefined,
     assignedModel: task.assignedModel ?? undefined,
     subtasks: [...(task.subtasks ?? [])].sort((a, b) => a.order - b.order).map(toTaskView),
+    ...(task.ops ? { ops: true } : {}),
   };
 }
 

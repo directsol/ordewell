@@ -25,7 +25,7 @@ import { handleAuto, handleRefresh, handleRunners } from './runners';
 import { handleApprove } from './approve';
 import { handleTerminal } from './terminal';
 import {
-  handleTaskDeps, handleTaskEffort, handleTaskMode, handleTaskModel, handleTaskRunner,
+  handleTaskDeps, handleTaskEffort, handleTaskMode, handleTaskModel, handleTaskOps, handleTaskRunner,
 } from './task-assign';
 import { handleTui } from '../tui';
 
@@ -76,6 +76,7 @@ export const COMMANDS: Record<string, (args: string[]) => Promise<void> | void> 
   'task-effort': handleTaskEffort,
   'task-mode': handleTaskMode,
   'task-deps': handleTaskDeps,
+  'task-ops': handleTaskOps,
   terminal: handleTerminal,
   'sessions': handleSessions,
   fork: handleFork,

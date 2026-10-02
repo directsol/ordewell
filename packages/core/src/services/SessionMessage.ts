@@ -39,6 +39,17 @@ export type SerializedTaskStatus = {
   forcedPastGate?: string[];
 };
 
+/**
+ * A run with tasks at a merge gate (ADR-0020), as a surface offers Merge all
+ * mid-run: what has landed and is not merged yet, and whether nothing else is
+ * running, so the run waits on the user alone.
+ */
+export interface MergeGateView {
+  paused: boolean;
+  repos: IsolationHandoff['repos'];
+  landed: IsolationHandoff['landed'];
+}
+
 export type SerializedTask = {
   id: string;
   order: number;
@@ -161,7 +172,10 @@ export type SessionMessage =
    * planner; `usage` is its own share, already counted in `planner_usage`.
    */
   | { type: 'subagent_finished'; turnId?: string; subagentId: string; outcome: SubagentOutcome; digest: string; usage?: UsageTotals }
-  | { type: 'status_update'; tasks: SerializedTaskStatus[] }
+  // `gate` is present while a task waits at a merge gate (ADR-0020): what Merge
+  // all would merge now, and whether the run is paused there with nothing else
+  // running.
+  | { type: 'status_update'; tasks: SerializedTaskStatus[]; gate?: MergeGateView }
   | { type: 'review_needed'; tasks: SerializedTask[] }
   | { type: 'review_approved' }
   | { type: 'checkpoint'; taskId: string; taskTitle: string; summary: string }

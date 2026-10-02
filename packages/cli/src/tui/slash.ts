@@ -43,6 +43,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'task-effort', usage: '/task-effort <id> [level]', description: "Choose or set a task's thinking effort", category: 'tasks' },
   { name: 'task-mode', usage: '/task-mode <id> [mode]', description: "Choose or set a task's runner mode", category: 'tasks' },
   { name: 'task-deps', usage: '/task-deps <id>', description: "Edit which earlier tasks a task waits for", category: 'tasks' },
+  { name: 'task-ops', usage: '/task-ops <id> [on|off]', description: 'Make a task an ops task — run in your checkout once its dependencies are merged — or a change task', category: 'tasks' },
 
   // Models & providers
   { name: 'planner', usage: '/planner [<provider>]', description: 'Choose who plans — an API provider or a coding agent (no API key)', category: 'models' },

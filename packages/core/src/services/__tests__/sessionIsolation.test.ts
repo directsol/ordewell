@@ -52,12 +52,14 @@ describe('Session with worktree isolation', () => {
     await session.executePlan();
     pass(t1);
     await vi.waitFor(() => expect(lastStatus()!.tasks.find((t) => t.id === 'o2')!.mergeGate).toEqual(['t1']));
+    expect(lastStatus()!.gate).toMatchObject({ paused: true, landed: [{ taskId: 't1', title: 'Task t1' }] });
     expect(messages.map((m) => m.type)).not.toContain('execution_complete');
 
     expect(await session.mergeRun()).toEqual({ outcome: 'merged' });
 
     await vi.waitFor(() => expect(spawn.mock.calls.map(([o]) => o.taskId)).toContain('o2'));
     expect(lastStatus()!.tasks.find((t) => t.id === 'o2')!.mergeGate).toBeUndefined();
+    expect(lastStatus()!.gate).toBeUndefined();
     expect(session.isolationView()).not.toBeNull();
   });
 

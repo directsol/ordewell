@@ -68,9 +68,10 @@ export async function handleHandoff(
       return;
     }
     case 'merge': {
+      // A run still going keeps its branches for the tasks still to land (ADR-0020).
       await confirmed((group
-        ? `Merge ${branch} into the branch checked out in each of ${reposWithWork(handoff).join(', ')}? Nothing is merged unless every repository can take it; once all have, the run's worktrees and branches are removed.`
-        : `Merge ${branch} into the branch you have checked out? Once merged, the run's worktrees and branches are removed.`) + repairedNotice(handoff));
+        ? `Merge ${branch} into the branch checked out in each of ${reposWithWork(handoff).join(', ')}? Nothing is merged unless every repository can take it; once a finished run has merged everything, its worktrees and branches are removed.`
+        : `Merge ${branch} into the branch you have checked out? Once a finished run has merged everything, its worktrees and branches are removed.`) + repairedNotice(handoff));
       const { ok, message } = mergeOutcome(await attempt(() => api.mergeRun(sessionId)), branch, group, repairedLanded(handoff));
       if (ok) console.log(message);
       else fail(message);

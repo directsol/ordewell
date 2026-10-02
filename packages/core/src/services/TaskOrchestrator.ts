@@ -31,6 +31,7 @@ import { capConflictFiles } from './conflictFiles';
 import { resolveWorkspaceEnv, type WorkspaceEnv } from './workspaceEnv';
 import { routeTransport } from './TransportRouter';
 import { continuability } from './continuation';
+import type { MergeGateView } from './SessionMessage';
 
 /**
  * The one notification channel out of the orchestrator. Everything that used
@@ -576,6 +577,17 @@ export class TaskOrchestrator {
     }
     await this.tick();
     return result;
+  }
+
+  /**
+   * The run as a surface offers Merge all mid-run (ADR-0020): what has landed
+   * and is not merged, and whether the run is paused at its gates with nothing
+   * else running. Null while no task waits at a gate.
+   */
+  mergeGateView(): MergeGateView | null {
+    const handoff = this.runs.view()?.handoff;
+    if (!handoff || !this.store.allTasks.some((t) => this.getMergeGate(t.id).length > 0)) return null;
+    return { paused: this.running && this.attempts.size === 0, repos: handoff.repos, landed: handoff.landed };
   }
 
   /**

@@ -102,6 +102,7 @@ export type {
   SessionNotice,
   SerializedTask,
   SerializedTaskStatus,
+  MergeGateView,
   SerializedPlan,
 } from './services/SessionMessage';
 export { serializeTask, serializeTaskStatus, serializePlan, executionSummary, truncateCheckpointSummary, CHECKPOINT_TRUNCATE_LENGTH } from './services/SessionMessage';

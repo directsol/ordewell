@@ -74,7 +74,7 @@ export function footerHints(state: TuiState): string[] {
     }
     return [
       ...(escHint ? [escHint] : []),
-      'enter expand', 'R runner', 'o model', 'e effort', 'M mode', 'D deps', 'f start',
+      'enter expand', 'R runner', 'o model', 'e effort', 'M mode', 'D deps', 'O ops', 'f start',
       'E run plan', 'S stop', 'c cancel', markHint, 's skip', 'a add', 'd remove', 't terminal', ...resolveHint,
       'pgup/pgdn scroll', 'tab chat',
     ];
@@ -448,6 +448,7 @@ const AWAITING_LABEL: Record<AwaitingReason, string> = {
   input: 'waiting for your input',
   checkpoint: 'checkpoint',
   conflict: 'merge conflict',
+  'files-changed': 'changed tracked files',
 };
 
 function approvalLabel(count: number): string {
@@ -602,7 +603,9 @@ function taskLines(state: TuiState, row: PlanRow, index: number, cols: number): 
     ? style.yellow('RUN')
     : task.type === 'user'
       ? style.yellow('MAN')
-      : style.grey(' AI');
+      : task.ops
+        ? style.magenta('OPS')
+        : style.grey(' AI');
   const caret = selected ? style.cyan('❯') : ' ';
 
   // A subtask row names itself by its dotted order ("2.1") and steps in under
@@ -665,6 +668,17 @@ function taskLines(state: TuiState, row: PlanRow, index: number, cols: number): 
     const attempt = task.isolation.repair ? ` (attempt ${task.isolation.repair.attempt}/${task.isolation.repair.limit})` : '';
     lines.push(style.yellow(truncate(`${bodyPad}↻ repairing conflict${files}${attempt}`, cols)));
   }
+  // A merge gate holds the task as plainly as a task that waits on the user (ADR-0020).
+  if (task.mergeGate?.length) {
+    const deps = task.mergeGate.map((id) => {
+      const dep = state.tasks.find((t) => t.id === id);
+      return dep ? `#${dep.order}` : id;
+    });
+    lines.push(style.yellow(truncate(`${bodyPad}⏸ waits for Merge all — ${deps.join(', ')} not merged into your branch yet`, cols)));
+  }
+  if (task.status === 'awaiting_user' && task.awaitingReason === 'files-changed') {
+    lines.push(style.yellow(truncate(`${bodyPad}⚠ an ops task changed tracked files — check them, then m done or /retry`, cols)));
+  }
   if (task.isolation?.state === 'integrated' && task.isolation.repairedFiles?.length) {
     lines.push(style.grey(truncate(`${bodyPad}↻ landed after repairing conflict in ${capConflictFiles(task.isolation.repairedFiles)}`, cols)));
   }
@@ -680,6 +694,12 @@ function taskLines(state: TuiState, row: PlanRow, index: number, cols: number): 
       if (task.isolation.state !== 'integrated' && task.isolation.worktree) {
         lines.push(...taskText('Worktree', task.isolation.worktree, cols, bodyPad));
       }
+    }
+    if (task.ops) {
+      lines.push(...taskText('Ops', 'Runs in your checkout, not a worktree, once the work it depends on is merged. O makes it a change task.', cols, bodyPad));
+    }
+    if (task.forcedPastGate?.length) {
+      lines.push(...taskText('Forced', `Started before the work of ${task.forcedPastGate.join(', ')} was merged into your branch.`, cols, bodyPad));
     }
     if (modeInfo?.autonomous) {
       lines.push(...taskText('Autonomy', 'Runs without permission prompts (Full auto). Change the level with /auto.', cols, bodyPad));

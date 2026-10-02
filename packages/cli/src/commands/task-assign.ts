@@ -214,3 +214,28 @@ export async function handleTaskDeps(subArgs: string[], injectedApi?: ApiClient)
       : `Task #${task.order} no longer depends on anything.`);
   });
 }
+
+const OPS_USAGE = 'Usage: ordewell task-ops <task-id-or-order> [on|off] [--session-id <id>]';
+
+/**
+ * Change versus ops (ADR-0020). The daemon refuses a task that has started,
+ * so only what is known here — a manual task, a subtask — is refused first.
+ */
+export async function handleTaskOps(subArgs: string[], injectedApi?: ApiClient): Promise<void> {
+  await withTask(subArgs, OPS_USAGE, injectedApi, async (api, sessionId, task, tasks, value) => {
+    if (!value) {
+      console.log(`\n#${task.order} ${task.title} is ${task.ops ? 'an ops task: it runs in your checkout once the work it depends on is merged' : 'a change task: it runs in its own worktree'}.`);
+      console.log(`\n  ${OPS_USAGE}`);
+      return;
+    }
+    const to = value.toLowerCase();
+    if (to !== 'on' && to !== 'off') fail(OPS_USAGE);
+    if (task.type !== 'ai') fail('Only an AI task can be an ops task — a manual task already runs outside any worktree.');
+    if (!tasks.some((t) => t.id === task.id)) fail('A subtask runs with its parent; make the parent an ops task instead.');
+
+    await api.updateTask(sessionId, task.id, { ops: to === 'on' });
+    console.log(to === 'on'
+      ? `Task #${task.order} is an ops task: it runs in your checkout once the work it depends on is merged.`
+      : `Task #${task.order} is a change task: it runs in its own worktree.`);
+  });
+}

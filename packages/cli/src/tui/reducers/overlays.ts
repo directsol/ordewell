@@ -7,6 +7,7 @@ import { keyPrompt, newSession, pickRewindTarget, withIdlePlanner } from './comm
 import { chooseBlocked, confirmedHandoff, handleHandoffKey, type BlockedChoice } from '../handoff';
 import { DEFAULT_EFFORT, pickerItemsFor } from './pickers';
 import { WHEEL_NOTCH, isWheel, pageNotch, scrollPointed } from './pointer';
+import { taskActionEffect } from './planPane';
 import { assignTaskEffort, assignTaskMode, assignTaskModel, assignTaskRunner } from './taskEdits';
 import { say } from '../transcript';
 import { clamp, fail, step, type Step } from './shared';
@@ -65,6 +66,10 @@ function runConfirm(
   if (overlay.action.kind === 'remove-task') {
     if (!state.sessionId) return step(closed);
     return step(closed, [{ type: 'removeTask', sessionId: state.sessionId, taskId: overlay.action.taskId }]);
+  }
+  if (overlay.action.kind === 'force-start-gated') {
+    if (!state.sessionId) return step(closed);
+    return step(closed, [taskActionEffect(closed, state.sessionId, overlay.action.taskId, 'force-start')]);
   }
   if (overlay.action.kind === 'merge-run' || overlay.action.kind === 'discard-run') {
     return confirmedHandoff(state, overlay.action.kind);

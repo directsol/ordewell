@@ -5,8 +5,8 @@ import type { Key } from '../keys';
 import { scrollDelta, scrollPlan, settlePlan } from './pointer';
 import { openTaskTerminalOrView } from './taskView';
 import {
-  addTask, confirmRemoveTask, openTaskDepsPicker, openTaskEffortPicker, openTaskModePicker, openTaskModelPicker,
-  openTaskRunnerPicker,
+  addTask, confirmForceStartPastGate, confirmRemoveTask, openTaskDepsPicker, openTaskEffortPicker, openTaskModePicker, openTaskModelPicker,
+  openTaskRunnerPicker, toggleTaskOps,
 } from './taskEdits';
 import { clampSelection, step, type Effect, type Step, type TaskAction } from './shared';
 
@@ -102,9 +102,11 @@ export function handlePlanKey(state: TuiState, key: Key): Step {
   if (key.char === 'S') return step(state, [{ type: 'stopExecution', sessionId: state.sessionId }]);
 
   const action = key.char === 'm' ? markAction(task) : PLAN_SHORTCUTS[key.char ?? ''];
+  if (action === 'force-start' && task.mergeGate?.length) return confirmForceStartPastGate(state, task);
   if (action) {
     return step(state, [taskActionEffect(state, state.sessionId, task.id, action)]);
   }
+  if (key.char === 'O') return toggleTaskOps(state, task, row.parent !== null);
   if (key.char === 'd') return confirmRemoveTask(state, task);
   if (key.char === 't') return openTaskTerminalOrView(state, state.sessionId, task.id);
   // Adds a task, so it is asked for by name — and only where a conflict exists.

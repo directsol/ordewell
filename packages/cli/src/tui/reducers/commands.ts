@@ -10,7 +10,7 @@ import { DEFAULT_EFFORT, picker, pickerItemsFor, plannerEffortItems, plannerItem
 import { taskActionEffect } from './planPane';
 import { continueTaskStep, openTaskTerminalOrView } from './taskView';
 import {
-  addTask, openTaskDepsPicker, taskCommand, taskEffortCommand, taskModeCommand, taskModelCommand, taskRunnerCommand,
+  addTask, confirmForceStartPastGate, openTaskDepsPicker, taskCommand, taskOpsCommand, taskEffortCommand, taskModeCommand, taskModelCommand, taskRunnerCommand,
 } from './taskEdits';
 import { stopPlanning } from './turnQueue';
 import { fail, step, withSession, type Effect, type Step, type TaskAction } from './shared';
@@ -123,6 +123,8 @@ export function runCommand(state: TuiState, { name, args }: ParsedCommand): Step
       return taskEffortCommand(state, args);
     case 'task-mode':
       return taskModeCommand(state, args);
+    case 'task-ops':
+      return taskOpsCommand(state, args);
     case 'task-deps':
       return taskCommand(state, args[0], (_sessionId, taskId) =>
         openTaskDepsPicker(state, findTask(state.tasks, taskId)!),
@@ -133,9 +135,11 @@ export function runCommand(state: TuiState, { name, args }: ParsedCommand): Step
     case 'retry':
     case 'cancel':
     case 'force-start':
-      return taskCommand(state, args[0], (sessionId, taskId) =>
-        step(state, [taskActionEffect(state, sessionId, taskId, name as TaskAction)]),
-      );
+      return taskCommand(state, args[0], (sessionId, taskId) => {
+        const task = findTask(state.tasks, taskId);
+        if (name === 'force-start' && task?.mergeGate?.length) return confirmForceStartPastGate(state, task);
+        return step(state, [taskActionEffect(state, sessionId, taskId, name as TaskAction)]);
+      });
   }
 
   return fail(state, `/${name} is not wired up yet.`);

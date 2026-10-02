@@ -562,10 +562,11 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
 
     // A conflict or a refusal is an answer, not a fault: either way the user's
     // tree is exactly as it was, and the words say what to do next. A full
-    // merge leaves nothing to hand over — the daemon has cleared the run up.
+    // merge of a settled run leaves nothing to hand over — the daemon has
+    // cleared the run up; one mid-run leaves the run going (ADR-0020).
     case 'isolationMerge': {
       const { ok, message } = mergeOutcome(await api.mergeRun(effect.sessionId), effect.branch, effect.group === true, effect.repaired ?? []);
-      if (ok) dispatch({ type: 'runCleared', sessionId: effect.sessionId });
+      if (ok && !effect.midRun) dispatch({ type: 'runCleared', sessionId: effect.sessionId });
       dispatch({ type: ok ? 'notice' : 'failed', message });
       return;
     }

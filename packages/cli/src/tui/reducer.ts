@@ -6,7 +6,7 @@ import { activeToken, findCommand, parseSlash, tokenCompletions } from './slash'
 import { applyKey, commit } from './editor';
 import { say, wiped } from './transcript';
 import { blockedPicker, clearIsolation, handoffArrived, isolationForPlan, sameIsolation, showDiff } from './handoff';
-import { continuesTask, findTask, isTaskRunning, planRows, plannerInFlight, type RunStatus, type TaskTransportView, type TaskView, type TuiState } from './state';
+import { continuesTask, findTask, isTaskRunning, planRows, plannerInFlight, type GateView, type RunStatus, type TaskTransportView, type TaskView, type TuiState } from './state';
 import type { Key } from './keys';
 import { handleOverlayKey } from './reducers/overlays';
 import { handlePlanKey } from './reducers/planPane';
@@ -150,7 +150,7 @@ function reduceAction(state: TuiState, action: Action): Step {
       // The indicator follows the tasks, not the stream: once none is running
       // the run is over, whatever the daemon's scheduler still holds armed.
       const status = runStatus(state, tasks);
-      return step({ ...state, status, tasks, busyLabel: status === 'executing' ? runLabel(tasks) : state.busyLabel });
+      return step({ ...state, status, tasks, busyLabel: status === 'executing' ? runLabel(tasks, state.gate) : state.busyLabel });
     }
 
     case 'tasksStatus': {
@@ -168,22 +168,29 @@ function reduceAction(state: TuiState, action: Action): Step {
         const awaitingReason = update.awaitingReason;
         const continuable = update.continuable === true;
         const awaitingApproval = update.awaitingApproval;
+        const mergeGate = update.mergeGate;
+        const forcedPastGate = update.forcedPastGate;
         if (
           update.status !== t.status || idleSince !== (t.idleSince ?? null) || !sameIsolation(isolation, t.isolation)
           || !sameTransport(transport, t.transport) || awaitingReason !== t.awaitingReason
           || continuable !== (t.continuable ?? false) || awaitingApproval !== t.awaitingApproval
+          || !sameList(mergeGate, t.mergeGate) || !sameList(forcedPastGate, t.forcedPastGate)
         ) {
           changed = true;
-          return { ...t, status: update.status, idleSince, isolation, transport, awaitingReason, continuable, awaitingApproval };
+          return { ...t, status: update.status, idleSince, isolation, transport, awaitingReason, continuable, awaitingApproval, mergeGate, forcedPastGate };
         }
         return t;
       });
+      // An update that does not say (an older daemon) leaves the gate as it was.
+      const gate = action.gate === undefined ? state.gate : action.gate;
+      const gateChanged = !sameGate(gate, state.gate);
       // Skip a new state object when nothing actually changed — a no-op
       // status_update still triggers a render via dispatch, but at least
       // the reference equality lets downstream memos keep their hits.
-      if (!changed) return step(state);
-      const status = runStatus(state, tasks);
-      return step({ ...state, status, tasks, busyLabel: status === 'executing' ? runLabel(tasks) : state.busyLabel });
+      if (!changed && !gateChanged) return step(state);
+      const next = { ...state, tasks, gate };
+      const status = runStatus(next, tasks);
+      return step({ ...next, status, busyLabel: status === 'executing' ? runLabel(tasks, gate) : state.busyLabel });
     }
 
     case 'queueReady': {
@@ -358,11 +365,21 @@ function sameTransport(a: TaskTransportView | undefined, b: TaskTransportView | 
   return a?.kind === b?.kind && a?.fallback === b?.fallback;
 }
 
+function sameList(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+  return (a ?? []).join('\0') === (b ?? []).join('\0');
+}
+
+function sameGate(a: GateView | null, b: GateView | null): boolean {
+  if (!a || !b) return a === b;
+  return a.paused === b.paused && JSON.stringify(a.handoff) === JSON.stringify(b.handoff);
+}
+
 function runStatus(state: TuiState, tasks: TaskView[]): RunStatus {
   if (tasks.some(isTaskRunning)) return 'executing';
   // A task waiting on the user is not executing, but the run is not over
-  // either — the indicator says it waits rather than going idle.
-  if (tasks.some((t) => t.status === 'awaiting_user')) return 'executing';
+  // either — the indicator says it waits rather than going idle. A run paused
+  // at a merge gate waits on the user the same way.
+  if (tasks.some((t) => t.status === 'awaiting_user') || state.gate?.paused) return 'executing';
   return plannerInFlight(state) ? state.status : 'idle';
 }
 

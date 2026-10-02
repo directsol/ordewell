@@ -40,6 +40,46 @@ export function confirmRemoveTask(state: TuiState, task: TaskView): Step {
   });
 }
 
+/**
+ * Change versus ops (ADR-0020): `O` flips it, and the daemon refuses once the
+ * task has started. Said up front where the answer is already known.
+ */
+export function toggleTaskOps(state: TuiState, task: TaskView, subtask: boolean, to: boolean = !task.ops): Step {
+  if (!state.sessionId) return fail(state, 'No active plan.');
+  if (task.type !== 'ai') return fail(state, 'Only an AI task can be an ops task — a manual task already runs outside any worktree.');
+  if (subtask) return fail(state, 'A subtask runs with its parent; make the parent an ops task instead.');
+  if (!!task.ops === to) return fail(state, `#${task.order} is already ${to ? 'an ops' : 'a change'} task.`);
+  return step(state, [{
+    type: 'updateTask',
+    sessionId: state.sessionId,
+    taskId: task.id,
+    changes: { ops: to },
+    message: to
+      ? `Task #${task.order} is an ops task: it runs in your checkout once the work it depends on is merged.`
+      : `Task #${task.order} is a change task: it runs in its own worktree.`,
+  }]);
+}
+
+/**
+ * A force start passes a merge gate (ADR-0020), but only once the user has
+ * seen which work it acts without.
+ */
+export function confirmForceStartPastGate(state: TuiState, task: TaskView): Step {
+  const named = (task.mergeGate ?? []).map((id) => {
+    const dep = findTask(state.tasks, id);
+    return dep ? `#${dep.order} ${dep.title}` : id;
+  });
+  return step({
+    ...state,
+    overlay: {
+      kind: 'confirm',
+      title: `Force start #${task.order} ${task.title}?`,
+      message: `It waits for Merge all: the work of ${named.join(', ')} is not merged into your branch yet, so it would act without it. Starting it now is kept on the task.`,
+      action: { kind: 'force-start-gated', taskId: task.id },
+    },
+  });
+}
+
 export function openTaskDepsPicker(state: TuiState, task: TaskView): Step {
   const action = { kind: 'set-task-deps' as const, taskId: task.id };
   const items = pickerItemsFor(state, action);
@@ -237,6 +277,16 @@ export function taskEffortCommand(state: TuiState, args: string[]): Step {
       return fail(state, `Unsupported effort "${value}" for ${task.assignedModel.modelLabel}.`);
     }
     return assignTaskEffort(state, sessionId, task, value);
+  });
+}
+
+export function taskOpsCommand(state: TuiState, args: string[]): Step {
+  return taskCommand(state, args[0], (_sessionId, taskId) => {
+    const task = findTask(state.tasks, taskId)!;
+    const subtask = !state.tasks.some((t) => t.id === taskId);
+    const value = args[1]?.toLowerCase();
+    if (value !== undefined && value !== 'on' && value !== 'off') return fail(state, 'Usage: /task-ops <id> [on|off]');
+    return toggleTaskOps(state, task, subtask, value === undefined ? !task.ops : value === 'on');
   });
 }
 

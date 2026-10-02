@@ -32,6 +32,12 @@ export interface TaskView {
   continuable?: boolean;
   /** How many of its runner's tool requests wait for an answer (ADR-0018, A1); absent when none do. */
   awaitingApproval?: number;
+  /** An ops task (ADR-0020): it runs in the user's checkout, never a worktree. */
+  ops?: boolean;
+  /** The dependencies whose work must be merged into the user's branch before this task can go on (ADR-0020). */
+  mergeGate?: string[];
+  /** The dependencies, by title, a force start went past the merge gate of. */
+  forcedPastGate?: string[];
   /** Child tasks, recursively shaped the same way; absent until populated by `toTaskView`. */
   subtasks?: TaskView[];
 }
@@ -76,6 +82,15 @@ export interface HandoffRepoView {
 export interface HandoffView {
   repos: HandoffRepoView[];
   landed: LandedTaskView[];
+}
+
+/**
+ * A run with tasks at a merge gate (ADR-0020): what Merge all would merge
+ * now, and whether the run waits on it with nothing else running.
+ */
+export interface GateView {
+  paused: boolean;
+  handoff: HandoffView;
 }
 
 /** One mode a runner's manifest declares, as the mode picker offers it. */
@@ -246,6 +261,7 @@ export type PromptAction =
 export type ConfirmAction =
   | { kind: 'new-session' }
   | { kind: 'remove-task'; taskId: string }
+  | { kind: 'force-start-gated'; taskId: string }
   | { kind: 'merge-run' }
   | { kind: 'discard-run' }
   | { kind: 'init-workspace'; goal: string; workspace: string }
@@ -387,6 +403,8 @@ export interface TuiState {
   workspace: string;
   /** The isolated run awaiting a decision, if any. Cleared once it is discarded. */
   handoff: HandoffView | null;
+  /** A run whose tasks wait at a merge gate, so Merge all is offered mid-run; null otherwise. */
+  gate: GateView | null;
   overlay: Overlay | null;
   /**
    * Approval prompts not yet shown. The planner blocks on each one, so they are
@@ -545,6 +563,7 @@ export function initialState(overrides: Partial<TuiState> = {}): TuiState {
     selection: null,
     workspace: process.cwd(),
     handoff: null,
+    gate: null,
     overlay: null,
     pendingApprovals: [],
     queuedPrompts: EMPTY_HOLD,

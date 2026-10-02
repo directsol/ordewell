@@ -372,6 +372,7 @@ describe('execution', () => {
 
     expect(h.actions).toContainEqual({
       type: 'tasksStatus',
+      gate: null,
       updates: { a: { status: 'in_progress', idleSince: null } },
       sessionId: 's1',
     });
@@ -406,6 +407,7 @@ describe('execution', () => {
 
     expect(h.actions).toContainEqual({
       type: 'tasksStatus',
+      gate: null,
       updates: { a: { status: 'completed', idleSince: null }, b: { status: 'running', idleSince: null } },
       sessionId: 's1',
     });
@@ -731,6 +733,7 @@ describe('task control', () => {
     expect(order).toEqual(['streamExecution', 'taskControl']);
     expect(h.actions).toContainEqual({
       type: 'tasksStatus',
+      gate: null,
       updates: { t1: { status: 'in_progress', idleSince: null } },
       sessionId: 's1',
     });
@@ -1544,7 +1547,7 @@ describe('worktree isolation', () => {
 
     await runEffect({ type: 'execute', sessionId: 's1' }, h.deps);
 
-    expect(h.actions).toContainEqual({ type: 'tasksStatus', sessionId: 's1', updates: { b: { status: 'awaiting_user', idleSince: null, isolation } } });
+    expect(h.actions).toContainEqual({ type: 'tasksStatus', sessionId: 's1', gate: null, updates: { b: { status: 'awaiting_user', idleSince: null, isolation } } });
   });
 
   it('turns isolation_blocked into the stash / run-without / cancel question', async () => {

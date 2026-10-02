@@ -1,7 +1,7 @@
 import { isAwaitingReason, isRunnerTransport, type DisplayBlock, type SessionMessage } from '@ordewell/core';
 import { sanitize } from '../ansi';
 import {
-  isTaskRunning, plannerInFlight, SKILL_IDS, type SkillId, type TaskView, type TuiState,
+  isTaskRunning, plannerInFlight, SKILL_IDS, type GateView, type SkillId, type TaskView, type TuiState,
 } from '../state';
 import { hear } from '../transcript';
 import { dropApproval, enqueueApproval } from './approvals';
@@ -95,6 +95,8 @@ function toTaskView(t: Record<string, unknown>, index: number): TaskView {
           .sort((a, b) => wireOrder(a) - wireOrder(b))
           .map((s, i) => toTaskView(asRecord(s), i))
       : undefined,
+    ...(t.ops === true ? { ops: true } : {}),
+    ...(Array.isArray(t.forcedPastGate) && t.forcedPastGate.length > 0 ? { forcedPastGate: t.forcedPastGate.map((title: unknown) => planLabel(title)) } : {}),
   };
 }
 
@@ -139,7 +141,7 @@ export function applySettings(state: TuiState, settings: Record<string, unknown>
  * last `task_started` title, which went on naming a task long after it had
  * finished — and said nothing once the run was only waiting on the user.
  */
-export function runLabel(tasks: TaskView[]): string {
+export function runLabel(tasks: TaskView[], gate: GateView | null = null): string {
   const running = tasks.filter(isTaskRunning);
   if (running.length > 0) {
     const [first] = running;
@@ -147,8 +149,9 @@ export function runLabel(tasks: TaskView[]): string {
     return running.length > 1 ? `${name} (+${running.length - 1} more)` : name;
   }
   const waiting = tasks.filter((t) => t.status === 'awaiting_user').length;
-  if (waiting === 0) return '';
-  return waiting === 1 ? '1 task waits for you' : `${waiting} tasks wait for you`;
+  if (waiting > 0) return waiting === 1 ? '1 task waits for you' : `${waiting} tasks wait for you`;
+  // As plain as a task that waits on the user: the run waits on a merge (ADR-0020).
+  return gate?.paused ? 'paused for Merge all — /handoff merge' : '';
 }
 
 /** A label for the status row, which is one row: text from a model flattened onto it. */

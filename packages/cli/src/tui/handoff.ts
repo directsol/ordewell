@@ -40,9 +40,20 @@ export const diffRoom = (rows: number): number => Math.max(1, rows - 3);
 
 const fail = (state: TuiState, content: string): Step => ({ state: say(state, 'error', content), effects: [] });
 
+/**
+ * What Merge all would merge now: mid-run, what a merge gate reports as landed
+ * and not merged (ADR-0020); otherwise the run's end-of-run handoff.
+ */
+export function currentHandoff(state: TuiState): HandoffView | null {
+  return state.gate?.handoff ?? state.handoff;
+}
+
+/** A merge while the run is still going leaves the run in place: its later tasks land on the same branch. */
+const midRun = (state: TuiState): boolean => state.status === 'executing';
+
 /** `/handoff` alone opens the overlay; `/handoff <action>` takes that action without the detour. */
 export function handoffCommand(state: TuiState, arg: string | undefined): Step {
-  if (!state.sessionId || !state.handoff) return fail(state, 'No isolated run to hand off — a plan that ran in worktrees leaves one here.');
+  if (!state.sessionId || !currentHandoff(state)) return fail(state, 'No isolated run to hand off — a plan that ran in worktrees leaves one here.');
   if (arg === undefined) return { state: { ...state, overlay: { kind: 'handoff', index: 0, diff: null } }, effects: [] };
   const action = HANDOFF_ACTIONS.find((a) => a.id === arg.toLowerCase());
   if (!action) return fail(state, `Usage: ${HANDOFF_USAGE}`);
@@ -62,7 +73,8 @@ export function handoffArrived(state: TuiState, handoff: HandoffView): TuiState 
 }
 
 export function runHandoffAction(state: TuiState, id: HandoffActionId): Step {
-  const { sessionId, handoff } = state;
+  const { sessionId } = state;
+  const handoff = currentHandoff(state);
   if (!sessionId || !handoff) return fail(state, 'No isolated run to hand off.');
   const closed: TuiState = { ...state, overlay: null };
 
@@ -72,6 +84,20 @@ export function runHandoffAction(state: TuiState, id: HandoffActionId): Step {
     case 'cleanup':
       return { state: closed, effects: [{ type: 'isolationCleanup', sessionId, branch: handoffBranch(handoff) }] };
     case 'merge':
+      if (midRun(state)) {
+        return {
+          state: {
+            ...state,
+            overlay: {
+              kind: 'confirm',
+              title: isRepoGroup(handoff) ? 'Merge what has landed into your branches?' : 'Merge what has landed into your branch?',
+              message: `Merge ${handoffBranch(handoff)} as it stands now into whatever ${isRepoGroup(handoff) ? `each of ${reposWithWork(handoff).join(', ')} has` : 'you have'} checked out. Ordewell never does this on its own. The run goes on: tasks waiting for Merge all start once it has merged, and later tasks land on the same branch for the next Merge all. A merge that conflicts is aborted, and your ${isRepoGroup(handoff) ? 'trees stay' : 'tree stays'} as ${isRepoGroup(handoff) ? 'they were' : 'it was'}.${repairedNotice(handoff)}`,
+              action: { kind: 'merge-run' },
+            },
+          },
+          effects: [],
+        };
+      }
       return {
         state: {
           ...state,
@@ -110,14 +136,16 @@ export function runHandoffAction(state: TuiState, id: HandoffActionId): Step {
 /** Answers `merge-run` / `discard-run` confirmations. */
 export function confirmedHandoff(state: TuiState, kind: 'merge-run' | 'discard-run'): Step {
   const closed: TuiState = { ...state, overlay: null };
-  if (!state.sessionId || !state.handoff) return { state: closed, effects: [] };
-  const { sessionId, handoff } = state;
+  const handoff = currentHandoff(state);
+  if (!state.sessionId || !handoff) return { state: closed, effects: [] };
+  const { sessionId } = state;
   const repaired = repairedLanded(handoff);
   const effect: Effect = kind === 'merge-run'
     ? {
       type: 'isolationMerge', sessionId, branch: handoffBranch(handoff),
       ...(isRepoGroup(handoff) ? { group: true } : {}),
       ...(repaired.length > 0 ? { repaired } : {}),
+      ...(midRun(state) ? { midRun: true } : {}),
     }
     : { type: 'isolationDiscard', sessionId, branch: handoffBranch(handoff) };
   return { state: closed, effects: [effect] };
@@ -125,7 +153,8 @@ export function confirmedHandoff(state: TuiState, kind: 'merge-run' | 'discard-r
 
 /** The diff arrived: show it in the overlay, opening it if the request came from `/handoff review`. */
 export function showDiff(state: TuiState, diff: string): TuiState {
-  if (diff.trim() === '') return say(state, 'system', `Nothing differs from ${state.handoff ? handoffBase(state.handoff, 8) : 'the base commit'}.`);
+  const handoff = currentHandoff(state);
+  if (diff.trim() === '') return say(state, 'system', `Nothing differs from ${handoff ? handoffBase(handoff, 8) : 'the base commit'}.`);
   const index = state.overlay?.kind === 'handoff' ? state.overlay.index : 0;
   // Tabs are expanded before sanitizing, which would turn each into one space
   // and flatten tab-indented code — the one thing a review needs to read.
@@ -233,6 +262,7 @@ export function clearIsolation(state: TuiState): TuiState {
   return {
     ...state,
     handoff: null,
+    gate: null,
     tasks: mapTasks(state.tasks, ({ isolation: _dropped, ...task }) => task),
   };
 }
