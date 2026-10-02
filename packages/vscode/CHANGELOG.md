@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Ops tasks.** A task that changes no repository files — a deploy, a cloud
+  CLI call, a push — can be an ops task: it runs in your checkout instead of a
+  worktree. Its card says Ops, and a pending AI task's card can flip it.
+- **Merge all during a run.** A task waiting for work to be merged into your
+  branch says "Waits for Merge all", and the handoff card offers Merge all
+  mid-run: the run goes on, and the waiting tasks start once it has merged.
+  Starting a waiting task anyway asks first.
+
 ## [0.6.0] — 2026-10-02
 
 ### Changed

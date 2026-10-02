@@ -1,12 +1,6 @@
 # 0014 — Multi-repo workspaces: isolate a repo group, land it atomically
 
-**Status:** accepted — extends [ADR-0013](0013-worktree-isolation.md); nested repositories per [ADR-0019](0019-nested-repos-shared-live.md)
-
-**Pending — [ADR-0020](0020-ops-tasks-and-merge-gates.md)** (accepted, not yet
-implemented): *Every task is isolated* below becomes "every change task is
-isolated" — an ops task (`ops: true`) runs at the workspace root behind a merge
-gate — and the dirty-tree hold moves to the run's first change task. Until #67
-lands, the text below describes the code.
+**Status:** accepted — extends [ADR-0013](0013-worktree-isolation.md); nested repositories per [ADR-0019](0019-nested-repos-shared-live.md); ops tasks per [ADR-0020](0020-ops-tasks-and-merge-gates.md)
 
 Worktree isolation (ADR-0013) assumed the workspace is one git repository. Many
 users open a plain folder that holds several independent repositories — any
@@ -101,12 +95,15 @@ unmerged) is `failed`, not `conflict`, in a group of one too.
   task's re-landing finds its branch already merged wherever the resolver merged
   it, and merges the rest.
 
-### Every task is isolated
+### Every change task is isolated
 
-There is no per-task opt-out. Effects outside the repos — cloud resources, files
-elsewhere on the machine — are the planner's and the user's responsibility;
-isolation makes edits to repositories safe, and nothing in git can make a
-deployment safe. (Pending: ADR-0020 adds ops tasks — see the note at the top.)
+A change task gets one worktree per repo of the group; there is no per-repo
+opt-out. A task that changes no repository files — an ops task, acting on
+outside systems or on the refs of the user's branch — runs at the workspace root
+instead, once the change tasks it depends on are merged into the user's branch
+in every repo of the group (ADR-0020). Isolation makes edits to repositories
+safe; nothing in git can make a deployment safe, which is why an ops task waits
+for the user's merge rather than for a landing.
 
 ### Shared paths
 
@@ -148,8 +145,9 @@ command can rely on it.
 
 ### Dirty trees
 
-If any repo in the group has uncommitted changes to tracked files, the whole run
-is held (`dirty`) and the notice names those repos. "Stash" stashes every dirty
+If any repo in the group has uncommitted changes to tracked files, the run's
+first change task is held (`dirty`) and the notice names those repos; ops tasks
+are not held (ADR-0020). "Stash" stashes every dirty
 repo through one call; there is no per-repo stash. "Run without isolation" turns
 isolation off for the whole group. A group whose repos all lack commits reports
 `no-commits` naming them; `not-git` is left for a folder with no repository in
@@ -174,7 +172,8 @@ stopped in and the repos already `landed`, which stay merged. On git older than
 the first failure. A group of one needs no preflight — its one merge lands or is
 aborted whole — so it answers `merged`, `conflict` or `failed`, never `blocked`.
 Session broadcasts the answer as `isolation_merge`, so every surface can show
-it. Ordewell never resets a user branch — the rollback under *Atomic
+it. During a run, the same Merge all merges what has landed so far and the run
+goes on (ADR-0020). Ordewell never resets a user branch — the rollback under *Atomic
 integration* is only ever applied to branches Ordewell created.
 
 Whether an integration branch is deleted once merged is decided per repo,
@@ -251,11 +250,11 @@ Core, daemon, TUI, CLI and VS Code.
   land in one repo and not the other, leaving the integration branches
   inconsistent with each other and `merged` meaning "some of it". A dependent
   would start from a tree that is neither before nor after the task.
-- **An "external effects" task marker.** Rejected here: it adds a plan field, a
-  scheduling rule (such tasks must not run in parallel, or must run in the shared
-  root) and a decision the planner would have to get right. ADR-0020 reverses
-  this (pending): operations in worktrees run on unmerged code, in the wrong
-  order.
+- **Every task isolated, with no "external effects" task marker.** It was the
+  rule until ADR-0020, which rejected it: a plan field, a scheduling rule and a
+  decision the planner has to get right cost less than operations run in
+  worktrees on unmerged code, in the wrong order, or not at all. ADR-0020's ops
+  task is that marker.
 - **Isolating per repo.** Rejected: isolating the clean repos and running in the
   dirty ones brings back exactly the collision isolation exists to prevent, in a
   group where tasks span repos.
@@ -290,4 +289,6 @@ Core, daemon, TUI, CLI and VS Code.
   daemon, TUI and CLI; an end-to-end review against real repositories (dangling
   links not shared, the envelope confirmed unwidened).
 - 2026-09-30 — nested repositories shared live instead of refused (ADR-0019).
-- 2026-10-02 — ADR-0020 accepted (pending): ops tasks outside worktrees.
+- 2026-10-02 — only change tasks are isolated; ops tasks run at the workspace
+  root behind a merge gate, and the dirty-tree hold moves to the first change
+  task (ADR-0020).

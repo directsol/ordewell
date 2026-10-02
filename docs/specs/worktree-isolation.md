@@ -7,7 +7,10 @@
 > `workspaceRepos` (`ORDEWELL_WORKSPACE_REPOS`) and `worktreeLinks`
 > (`ORDEWELL_WORKTREE_LINKS`) settings. [ADR-0015](../adr/0015-conflict-repair.md)
 > adds a bounded, evidenced conflict repair before a conflict reaches the user.
-> Where they differ from this spec, the ADRs are current.
+> [ADR-0020](../adr/0020-ops-tasks-and-merge-gates.md) isolates only change
+> tasks: an ops task runs at the workspace root behind a merge gate, Merge all
+> can run mid-run, and a run decides whether it isolates at its first change
+> task. Where they differ from this spec, the ADRs are current.
 
 ## Problem Statement
 

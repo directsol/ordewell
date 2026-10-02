@@ -364,8 +364,9 @@ tasks run headless and the first one says what is missing.
 *Avoid:* "mode" (that is permission mode, ADR-0001), "backend", "provider".
 
 **Waiting for input** — a structured task whose turn ended without the done
-marker: `awaiting_user` with a saved reason, `input | checkpoint | conflict`
-(a checkpoint wins over input). No verdict and no automatic nudge; the user
+marker: `awaiting_user` with a saved reason, `input | checkpoint | conflict |
+files-changed` (a checkpoint wins over input; `files-changed` is an *ops task*
+that changed tracked files, ADR-0020). No verdict and no automatic nudge; the user
 answers or marks the task complete. A pending runner approval is *not* waiting
 for input — it arrives mid-turn, leaves the status alone, and "waiting for
 approval" is derived from the task's pending approvals.
@@ -460,18 +461,18 @@ registry keyed by task let the old attempt's exit unregister the new one.
 field of the attempt. Do not add another per-task map to the orchestrator for
 state that ends with the run; put it on the attempt.
 
-**Isolated execution** — running each AI task in its own *worktree* instead of
-the shared workspace root, then integrating the results deterministically
-(ADR-0013, amended by ADR-0014). Available when the workspace forms a *repo
+**Isolated execution** — running each *change task* in its own *worktree*
+instead of the shared workspace root, then integrating the results
+deterministically (ADR-0013, amended by ADR-0014 and ADR-0020). Available when the workspace forms a *repo
 group* — a git repository, or a folder of them — with a clean tracked tree in
 each repository and `worktreeIsolation` on; otherwise every task runs in the
 workspace root exactly as before, and `WorktreeIsolation.isActive` says which of
 `disabled`, `git-missing`, `not-git`, `no-commits` or `dirty`
 applied (the last two may name the repositories behind them). `not-git` is
 left for a folder with no repository in it. A group's task integrates by an
-atomic *landing*. Under ADR-0020 (not yet implemented) only *change tasks*
-are isolated — an *ops task* runs at the workspace root — and the decision is
-made when the run's first change task starts. The
+atomic *landing*. An *ops task* runs at the workspace root instead, and a run
+decides whether it isolates when its first change task starts, so a run of only
+ops tasks never asks. The
 Runner is only ever handed a `cwd` (ADR-0007) — git never enters
 `ITerminalRunner`, `RunnerRegistry` or a runner adapter.
 *Avoid:* "sandbox" (an OS-level runner sandbox is a separate concern, ADR-0011),
@@ -627,12 +628,12 @@ aborted where it failed, and the answer names the repos that landed before it,
 which stay merged. On git older than 2.38 there is no preflight: repo by repo,
 stopping at the first failure. A group of one needs none either, since its one
 merge lands or is aborted whole, so it answers `merged`, `conflict` or `failed`
-as it always has. `merged` ends the run: it is cleared up like a discard, except
+as it always has. `merged` on a settled run clears it up like a discard, except
 that each integration branch goes only where HEAD contains it, and the plan
-forgets it; any other answer deletes nothing.
-Under ADR-0020 (not yet implemented) Merge all is also what opens a *merge
-gate* mid-run: it merges what has landed and the run goes on, so `merged` ends
-the run only once the run has settled.
+forgets it; any other answer deletes nothing. During a run, Merge all is what
+opens a *merge gate*: it merges what has landed so far and the run goes on, its
+branches kept for the tasks still to land (ADR-0020). It never runs while an
+*ops task* does, and takes turns with landings.
 *Avoid:* per-repo merge — there is none, by design (ADR-0014).
 
 **Change task** — a task whose result is a change to repository files: it runs
@@ -640,27 +641,31 @@ in a worktree and lands on the integration branch. Every task is one unless it
 is marked `ops` (ADR-0020).
 *Avoid:* "code task" — docs and config edits are changes too.
 
-**Ops task** — an AI task marked `ops: true` (ADR-0020, not yet implemented):
-it changes no repository files, acting instead on systems outside the repo (a
+**Ops task** — an AI task marked `ops: true` (ADR-0020): it changes no repository files, acting instead on systems outside the repo (a
 cloud CLI, a deployment, a pipeline) or on the git refs and history of the
 user's branch (push, tag, reword). It runs at the workspace root, never in a
 worktree, in the session's mode, and in parallel as its dependencies allow;
 never while a Merge all runs. If it leaves a new tracked change in any repo of
-the group, it waits on the user rather than completing. The planner sets the
-mark and splits a mixed request into a change task and an ops task; the user
-can flip it until the task starts.
+the group, it waits on the user (`awaitingReason: 'files-changed'`) rather than
+completing. A retry is told what the attempt before it did, since its effects
+are never rolled back. The planner sets the mark and splits a mixed request into
+a change task and an ops task; the user can flip it until the task starts. A
+subtask runs with its top-level task.
 *Avoid:* "operation" as the term (used loosely everywhere), "external effects
 task", "checkout task" — it runs at the workspace root, which in a group is not
 one checkout.
 
 **Merge gate** — where an ops task or a user task that depends on change tasks
-waits until their work is merged into the user's branch (ADR-0020, not yet
-implemented). Only the user's Merge all opens it; Force start passes it after a
-confirmation naming what is not merged. There is no gate without isolation.
+waits until their work is merged into the user's branch (ADR-0020): until the
+checked-out HEAD contains the integration tip each of them landed at. The
+user's Merge all opens it, as does a merge made by hand; Force start passes it
+after a confirmation naming what is not merged, and the task keeps that choice
+(`forcedPastGate`). A run with nothing else to do is *paused* at its gates.
+There is no gate without isolation.
 *Avoid:* "checkpoint" — that is a task asking the user to approve its work.
 
 **Base ref** — the commit the user's checked-out branch pointed at when a run
-started, resolved once at that moment. The integration branch forks from it and
+minted its record, resolved once at that moment. The integration branch forks from it and
 the review diff is taken against it, so switching or advancing the user's branch
 mid-run does not retarget the run.
 

@@ -43,8 +43,12 @@ freely within one plan.
   or remove tasks, and rewire dependencies without another round trip to the model.
 - **The right model for each task.** A security refactor and a README update get
   different models, and you see every assignment before a token is spent.
-- **Isolated execution.** Every task works on its own branch. Passing work lands on
-  one integration branch in plan order, and you choose when to merge it.
+- **Isolated execution.** Every task that changes code works on its own branch.
+  Passing work lands on one integration branch in plan order, and you choose when
+  to merge it.
+- **Operations in the right place and order.** A deploy, a cloud CLI call or a
+  push runs as an ops task in your own checkout, and waits until the change it
+  depends on is merged into your branch.
 - **Verdicts from evidence.** Completion is decided by a marker in the runner's
   output, never by a model's opinion of its own work.
 - **A planner that cannot write.** It reads, asks, and plans. Commands that would
@@ -97,8 +101,9 @@ ordewell task-deps 3 1,2            # make it wait for tasks 1 and 2
 
 1. **Plan.** The planner explores your workspace without modifying it, asks
    clarifying questions, and produces an ordered list of tasks with dependencies.
-2. **Execute.** Each task starts a fresh coding agent session in its own worktree,
-   given the results of the tasks it depends on. Independent tasks run concurrently,
+2. **Execute.** Each task starts a fresh coding agent session — in its own
+   worktree, or in your checkout for an ops task — given the results of the tasks
+   it depends on. Independent tasks run concurrently,
    three at a time by default.
 3. **Verify.** A task passes when its unique completion marker appears in the
    agent's output. The exit code is kept as supporting evidence.

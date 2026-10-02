@@ -1,10 +1,11 @@
 # 0020 — Ops tasks run in the workspace, behind a merge gate
 
-**Status:** accepted (2026-10-02; not yet implemented) — amends [ADR-0013](0013-worktree-isolation.md) and [ADR-0014](0014-multi-repo-workspaces.md)
+**Status:** accepted — amends [ADR-0013](0013-worktree-isolation.md) and [ADR-0014](0014-multi-repo-workspaces.md)
 
-**Amends:** ADR-0013 (worktree isolation), whose Merge all ends the run and
-whose isolation is decided when a run starts; ADR-0014 (multi-repo workspaces),
-whose *Every task is isolated* rejected the task marker this ADR adds.
+**Amends:** ADR-0013 (worktree isolation) — what Merge all does to a run still
+going, and when a run decides whether it isolates; ADR-0014 (multi-repo
+workspaces) — which tasks are isolated, where it had rejected the task marker
+this ADR adds.
 
 ## Context
 
@@ -66,8 +67,11 @@ that depends on.**
 - **A task that does not run in a worktree — an ops task or a user task — and
   depends on change tasks waits until their work is merged into the user's
   branch.** "Merged" is the same ancestry check the integration branch's clean-up
-  already uses: each dependency's landed work is contained in the checked-out
-  HEAD. The gate is the user's Merge all; nothing passes it on its own.
+  already uses: each landing records the integration tip it produced in each repo
+  it changed, and the task's work is merged once the checked-out HEAD contains
+  those tips. A merge made by hand with git counts as Merge all does, and is
+  found the next time the scheduler looks. The gate is the user's merge; nothing
+  passes it on its own.
 - A user task is gated for the same reason as an ops task: what the user tests
   or checks by hand is their checkout or their deployment, and before the merge
   neither holds the work the task depends on.
@@ -76,11 +80,15 @@ that depends on.**
   of it, not only the gated task's dependencies. Running change tasks keep their
   worktrees, the integration branch stays, and later tasks land on it. The
   end-of-run Merge all merges the rest; what was merged at a gate is already in
-  the user's history. The run is cleared up only when it has settled and
-  everything is merged.
+  the user's history, and the handoff names only what is not. The run is cleared
+  up only when it has settled and everything is merged — by a last Merge all, or
+  already at its gates, which leaves nothing to hand over. Merge all and landings
+  take turns on one queue, so a merge never reads an integration branch
+  mid-landing.
 - When the merge goes through, the gated tasks start by themselves. When it does
-  not — a conflict with the user's branch, a dirty overlap — Merge all aborts as
-  it does today, leaves the user's tree as it was, and the gated tasks wait on.
+  not — a conflict with the user's branch, a dirty overlap — Merge all is aborted
+  as at the end of a run, the user's tree is left as it was, and the gated tasks
+  wait on.
 - **Force start passes a gate after one confirmation** that names the
   dependencies whose work is not merged yet. The choice is logged on the task;
   the gate stands for every other task.
@@ -88,7 +96,9 @@ that depends on.**
   belongs with the autonomy work (#21–#43), not here; until then this ADR keeps
   ADR-0013's rule that Ordewell never merges for the user.
 - The plan shows it: an ops task carries an `ops` mark, and a gated task "waits
-  for Merge all".
+  for Merge all". Status updates carry each task's gate and, while any task
+  waits at one, what Merge all would merge now and whether the run is paused
+  there with nothing else running — so every surface offers Merge all mid-run.
 - **Without isolation there is no gate.** Every task already runs in the
   workspace, so a dependent sees its dependency's work as soon as it is done.
 
@@ -106,10 +116,15 @@ that depends on.**
   workspace's tracked files in every repo of the group are compared with a
   snapshot taken when it started; a new tracked change makes the task
   `awaiting_user` with a notice naming the files, and nothing is committed.
-  Untracked and ignored output (logs, build artifacts) does not count. The check
-  is the evidence the rule rests on — a runner cannot be stopped from writing,
-  only caught. It runs only in an isolated run: without isolation every task
-  shares the workspace, and a change task's edits would trip it.
+  Untracked and ignored output (logs, build artifacts) does not count, nor does
+  history the task rewrites (a reword, a rebase): a tracked change is one not
+  committed. The snapshot comes from `git stash create`, which records the
+  working tree without touching it, the index or the stash. The check is the
+  evidence the rule rests on — a runner cannot be stopped from writing, only
+  caught. It never runs in a run that shares the workspace root, where every
+  task's edits land in it and a change task's would trip it; a run that has not
+  yet decided, having started only ops tasks, checks wherever its workspace
+  could isolate.
 - **Retry carries the attempt before.** An ops task's effects are outside
   Ordewell and cannot be rolled back, and a half-done one may have created what
   it was making. A retry's prompt carries the previous attempt's output and asks
@@ -119,12 +134,12 @@ that depends on.**
 
 ### Isolation is decided at the first change task
 
-ADR-0013 decides isolation when a run starts, and a dirty tree parks the start.
-An ops task needs no isolation, so the decision moves to **when the first change
-task of the run starts**: an ops-only run never asks and is never blocked by a
-dirty tree, and a run that begins with ops tasks asks at its first change task,
-with the same stash or continue-without choice. Once decided, a run keeps it, as
-today.
+An ops task needs no isolation, so a run decides whether it isolates **when its
+first change task starts**, not when it opens: an ops-only run never asks and is
+never blocked by a dirty tree, and a run that begins with ops tasks asks at its
+first change task, with the same stash or continue-without choice (ADR-0013).
+Ops tasks already running carry on while it waits. Once decided, a run keeps
+it.
 
 ## Considered options
 
@@ -172,3 +187,7 @@ today.
   ordering of colliding git operations.
 - A false alarm is possible: a user editing tracked files in their checkout
   while an ops task runs makes that task wait. It costs a look, not work.
+
+## History
+
+- 2026-10-02 — accepted, and implemented (#67).

@@ -8,6 +8,31 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Ops tasks.** A plan can now carry a goal through to the operations around
+  it — redeploy and watch the pipeline, whitelist an address, provision a
+  resource, push a tag, reword commits. An ops task changes no repository files:
+  it runs in your checkout, never in a worktree, in the session's mode, and in
+  parallel as its dependencies allow. The planner decides which tasks are ops
+  and splits "bump the version and redeploy" into a change and an ops task; you
+  can flip a task with `O` in the TUI, `/task-ops`, `ordewell task-ops` or the
+  task card in VS Code until it starts. An ops task that changes tracked files
+  waits for you instead of completing, and a retry is told what the attempt
+  before it did. (ADR-0020)
+- **Merge gates, and Merge all during a run.** An ops task or a manual task that
+  depends on change tasks waits until their work is merged into your branch, and
+  says so ("waits for Merge all"). Merge all now works mid-run: it merges what
+  has landed, the run goes on, and the waiting tasks start by themselves. A run
+  with nothing else to do shows as paused for Merge all. Force start passes a
+  gate after a confirmation naming what is not merged. Ordewell still never
+  merges for you.
+
+### Changed
+
+- **A dirty tree holds a run at its first change task**, not at its start, so a
+  run of only ops tasks is never blocked by uncommitted changes.
+
 ## [0.6.0] — 2026-10-02
 
 ### Changed

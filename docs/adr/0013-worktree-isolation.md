@@ -1,12 +1,6 @@
 # 0013 — Worktree isolation: one checkout per task, one branch per run
 
-**Status:** accepted — extended by [ADR-0014](0014-multi-repo-workspaces.md) (repo groups), [ADR-0015](0015-conflict-repair.md) (conflict repair) and [ADR-0019](0019-nested-repos-shared-live.md) (nested repositories)
-
-**Pending — [ADR-0020](0020-ops-tasks-and-merge-gates.md)** (accepted, not yet
-implemented): only *change tasks* will be isolated; an *ops task* runs at the
-workspace root behind a merge gate, Merge all can happen mid-run without ending
-the run, and isolation is decided when the run's first change task starts. Until
-#67 lands, the text below describes the code.
+**Status:** accepted — extended by [ADR-0014](0014-multi-repo-workspaces.md) (repo groups), [ADR-0015](0015-conflict-repair.md) (conflict repair), [ADR-0019](0019-nested-repos-shared-live.md) (nested repositories) and [ADR-0020](0020-ops-tasks-and-merge-gates.md) (ops tasks and merge gates)
 
 Every AI task ran in the same working directory — the workspace root. With
 `maxParallelSessions` above one, several Runners edited that one tree at once.
@@ -22,8 +16,10 @@ tree — nothing stops a run trampling uncommitted work.
 ## Decision
 
 **When the workspace forms a repo group — a git repository, or a folder of them
-(ADR-0014) — each AI task runs in its own worktree, and the results are
-integrated deterministically on a per-run branch.** A `WorktreeIsolation`
+(ADR-0014) — each change task runs in its own worktree, and the results are
+integrated deterministically on a per-run branch.** A change task is every AI
+task that is not an ops task; an ops task runs at the workspace root, behind a
+merge gate (ADR-0020). A `WorktreeIsolation`
 module in core owns every git and filesystem operation for this. The
 orchestrator gets a `cwd` from `prepare`, spawns the Runner there, and after the
 evidence-based Verdict lands the work. A single repository is a group of one;
@@ -39,7 +35,8 @@ everything below applies per repo of the group.
   `FakeWorktreeIsolation`, and git behavior is tested against real temporary
   repositories asserting porcelain state — worktrees listed, branch contents,
   files present — never command lines.
-- **Isolation is run-scoped.** An `IsolationRun` is minted when a run starts:
+- **Isolation is run-scoped.** An `IsolationRun` is minted when a run's first
+  change task starts:
   an id, per repo the base ref resolved to a commit *then* and the integration
   branch name, and per-task branch/worktree/status. It is plain JSON so it can
   be persisted with the plan state. Because task ids are only unique within one
@@ -112,15 +109,18 @@ everything below applies per repo of the group.
   files do not, because the bootstrap accounts for them. `isActive` returns the
   reason (`disabled`, `git-missing`, `not-git`, `no-commits`, `dirty`, the last
   two possibly naming repos) rather than a boolean.
-- **Activation.** A run starts (Execute Plan, Run task, or Force start with
-  nothing running) by asking `isActive`. `not-git`, `git-missing`, `no-commits`
-  and `disabled` run in the workspace root with one notice. `dirty` does not
-  start: an `isolation_blocked` message names the dirty repos, and the start is
+- **Activation.** A run opens with Execute Plan, Run task, or Force start with
+  nothing running, and decides whether it isolates when its first change task
+  starts, by asking `isActive` (ADR-0020): an ops task needs no worktree, so a
+  run of only ops tasks never asks. `not-git`, `git-missing`, `no-commits` and
+  `disabled` run in the workspace root with one notice. `dirty` starts no change
+  task: an `isolation_blocked` message names the dirty repos, and the start is
   parked until `Session.continueWithStash` (a `git stash push` in every dirty
   repo, through the module like every other git operation) or
   `Session.continueWithoutIsolation` (this run only, the whole group) replays it.
-  Continuing a run on a dirty tree is not blocked — its base is already fixed,
-  so the user's edits could not reach it either way.
+  Ops tasks already running carry on meanwhile. Continuing a run on a dirty tree
+  is not blocked — its base is already fixed, so the user's edits could not
+  reach it either way.
 - **Bootstrap makes a worktree runnable.** Ignored artifacts — `node_modules`,
   `vendor`, `.venv`, `.env*`, `.envrc`, `.claude`, `.opencode`, `.codegraph` —
   are linked from the main worktree per repo, only where the checkout does not
@@ -160,18 +160,25 @@ everything below applies per repo of the group.
   latter, so anything after it is lost. What follows is the user's: review the
   diff against the base refs (one section per repo), *Merge all* (preflighted in
   every repo, merging all or none, ADR-0014; a normal `git merge`, aborted on
-  conflict so the user's tree is left as it was), clean up, or discard.
+  conflict so the user's tree is left as it was), clean up, or discard. Merge
+  all is also how the user opens a merge gate during a run (ADR-0020); it takes
+  turns with the landing queue, so it never reads an integration branch
+  mid-landing.
 - **Integration branches go once their work is merged, never before.** Ordewell
   never deletes landed work the user has not merged, and never touches a branch
-  it does not own. A Merge all that answers `merged` ends the run: it is
-  discarded as clean-up does — worktrees and task branches, a kept or conflicted
-  attempt's included — and each repo's integration branch is deleted where the
-  repo's checked-out HEAD contains it (`git merge-base --is-ancestor <branch>
-  HEAD`, then `git branch -d`, which adds git's own refusal for a branch a
-  worktree has checked out). The orchestrator then forgets the run, so the
+  it does not own. A Merge all that answers `merged` on a settled run clears it
+  up: it is discarded as clean-up does — worktrees and task branches, a kept or
+  conflicted attempt's included — and each repo's integration branch is deleted
+  where the repo's checked-out HEAD contains it (`git merge-base --is-ancestor
+  <branch> HEAD`, then `git branch -d`, which adds git's own refusal for a branch
+  a worktree has checked out). The orchestrator then forgets the run, so the
   plan's record, every surface's handoff and every task mark go with it, and the
-  next run starts from a HEAD that holds the work. `blocked`, `conflict` and
-  `failed` — part-way or not — delete nothing. Clean-up keeps the integration
+  next run starts from a HEAD that holds the work. A Merge all during a run
+  leaves the run going (ADR-0020): its branches stay for the tasks still to
+  land, each landed task whose tip HEAD now contains is marked merged, and a run
+  that settles with all of its landed work merged that way is cleared up as
+  above instead of handed over. A handoff names only landed work not yet merged.
+  `blocked`, `conflict` and `failed` — part-way or not — delete nothing. Clean-up keeps the integration
   branch for a user who has not decided; discard deletes it. `discard` takes
   `integration: 'keep' | 'delete' | 'delete-merged'`; `delete-merged` is the
   only mode that decides per branch, and is how a replaced run that holds landed
@@ -215,7 +222,8 @@ everything below applies per repo of the group.
 - **A run closes however its last attempt ends.** Cancel, Mark complete or a
   failed spawn close a run the scheduler is not driving — a manual task run, or
   a halted plan's remaining attempts — as a verdict does; an idle `tick` closes
-  it. Left open, the next run would inherit its mode.
+  it. Left open, the next run would inherit its mode. A run paused at a merge
+  gate is not closed: it waits on the user, as one waiting on a user task does.
 - **The planner is told.** `PlannerModes.isolatedExecution` (one-shot and
   mid-run edits) and `ConversationVariant.isolatedExecution` (the conversation)
   swap the overlap-avoidance rule for one that allows same-file parallelism and
@@ -244,7 +252,8 @@ everything below applies per repo of the group.
   [review|merge|discard|cleanup]` and `ordewell run --stash` /
   `--without-isolation`. VS Code shows the same marks on its task cards, a
   handoff card, and a host modal for a blocked run; merge and discard are
-  confirmed first everywhere. The stream reports isolation only as it changes,
+  confirmed first everywhere. While tasks wait at a merge gate, each surface
+  offers Merge all mid-run (ADR-0020). The stream reports isolation only as it changes,
   so a surface that was not listening is re-told from the record:
   `Session.isolationView` reads the marks and the handoff from the run record;
   VS Code replays it when its webview reconnects or a session is loaded (the
@@ -292,6 +301,12 @@ everything below applies per repo of the group.
 - **`release(…, { keep: false })` after `merged`** — the obvious wiring.
   Rejected: it drops the record, and the task vanishes from the handoff it
   landed in.
+- **Merge all ends the run.** It did, until ADR-0020. Rejected: a merge gate
+  needs the user's merge while the run still has work to do, and ending the run
+  there would stall parallel work no one asked to stop.
+- **Decide isolation when a run starts.** It did, until ADR-0020. Rejected: an
+  ops task needs no worktree, so a run of only ops tasks would be parked on a
+  dirty tree for nothing.
 - **A failed landing fails the task and halts the run.** It did, until
   2026-09-28. Rejected: a red X contradicts the completion marker, and halting
   stops every other task over one git problem the user has to fix anyway.
@@ -338,4 +353,5 @@ everything below applies per repo of the group.
   run; cancel keeps the worktree.
 - 2026-09-30 — nested repositories shared live instead of refused (ADR-0019).
 - 2026-10-02 — commit subjects name the change, not the plan's task number or run
-  id; ADR-0020 accepted (pending).
+  id; only change tasks are isolated, isolation is decided at the first change
+  task, and Merge all can run mid-run (ADR-0020).
