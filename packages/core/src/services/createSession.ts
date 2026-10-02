@@ -19,7 +19,7 @@ import { plannerModesFrom, plannerRuntimeToggles } from './plannerModes';
 import type { UserSettings } from './SettingsService';
 import { SkillsService } from './SkillsService';
 import { buildMergePrompt, buildSplitPrompt } from './PlanPrompts';
-import type { SessionBroadcaster, SessionNotice } from './SessionMessage';
+import type { MergeGateView, SessionBroadcaster, SessionNotice } from './SessionMessage';
 import { SessionEventRelay } from './SessionEventRelay';
 import { conflictResolverTask } from './Landing';
 import { saveSession } from '../utils/sessionStore';
@@ -1213,6 +1213,11 @@ export class Session {
   /** The dependencies a task waits on at its merge gate (ADR-0020); empty when it waits for no Merge all. */
   mergeGate(taskId: string): string[] {
     return this.orchestrator.getMergeGate(taskId);
+  }
+
+  /** What Merge all would merge mid-run, while any task waits at a merge gate; null otherwise. */
+  mergeGateView(): MergeGateView | null {
+    return this.orchestrator.mergeGateView();
   }
 
   /** The run's integration branch against its base ref, as a unified diff. */

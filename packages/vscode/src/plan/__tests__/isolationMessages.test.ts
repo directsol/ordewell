@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { handleSessionMessage } from '../PlanManager';
 import type { PlanManagerDeps } from '../PlanManager';
 import { replayIsolation } from '../isolation';
-import type { IsolationView, TaskIsolation } from '@ordewell/core';
+import type { IsolationView, LegacyPlanState, MergeGateView, TaskIsolation } from '@ordewell/core';
 
 function deps() {
   const chatProvider = {
@@ -134,11 +134,25 @@ describe('replaying isolation to a webview that was not listening', () => {
     },
   };
 
-  function replay(opts: { view: IsolationView | null; executing: boolean }) {
-    const chatProvider = { sendTaskIsolation: vi.fn(), showIsolationHandoff: vi.fn() };
-    replayIsolation({ isolationView: () => opts.view, isExecuting: opts.executing }, chatProvider);
+  function replay(opts: { view: IsolationView | null; executing: boolean; gate?: MergeGateView | null; gates?: Record<string, string[]> }) {
+    const chatProvider = { sendTaskIsolation: vi.fn(), showIsolationHandoff: vi.fn(), showMergeGate: vi.fn() };
+    const planState = { tasks: [{ id: 't1', subtasks: [] }, { id: 'o2', subtasks: [] }] } as unknown as LegacyPlanState;
+    replayIsolation({
+      isolationView: () => opts.view,
+      isExecuting: opts.executing,
+      mergeGateView: () => opts.gate ?? null,
+      mergeGate: (taskId: string) => opts.gates?.[taskId] ?? [],
+      planState,
+    }, chatProvider);
     return chatProvider;
   }
+
+  it('re-tells a run paused at a merge gate (ADR-0020)', () => {
+    const gate: MergeGateView = { paused: true, repos: view.handoff.repos, landed: view.handoff.landed };
+    const chatProvider = replay({ view, executing: true, gate, gates: { o2: ['t1'] } });
+
+    expect(chatProvider.showMergeGate).toHaveBeenCalledWith(gate, { o2: ['t1'] });
+  });
 
   it('re-sends every task mark and the handoff card of a settled run', () => {
     const chatProvider = replay({ view, executing: false });

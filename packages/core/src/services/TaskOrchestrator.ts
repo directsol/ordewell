@@ -1201,7 +1201,6 @@ export class TaskOrchestrator {
     if (!this.running) return;
     const { ready } = readiness;
     console.log(`[TaskOrchestrator] tick(): ${ready.length} ready, ${this.attempts.size} active, queue=${this.messageQueue.length}`);
-    if (readiness.gated.length === 0) this.gateNotice = '';
 
     if (ready.length === 0 && this.attempts.size === 0) {
       const remaining = this.store.allTasks.filter(t => t.status !== 'completed');

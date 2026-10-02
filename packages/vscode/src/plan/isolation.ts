@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { IsolationHandoff, Session } from '@ordewell/core';
+import { flattenTasks, type IsolationHandoff, type Session } from '@ordewell/core';
 import type { PlanManagerDeps } from './PlanManager';
 import type { ChatViewProvider } from '../providers/ChatViewProvider';
 
@@ -40,13 +40,22 @@ export function handleIsolationHandoff(handoff: IsolationHandoff, deps: PlanMana
  * as it would have on the stream.
  */
 export function replayIsolation(
-  session: Pick<Session, 'isolationView' | 'isExecuting'>,
-  chatProvider: Pick<ChatViewProvider, 'sendTaskIsolation' | 'showIsolationHandoff'>,
+  session: Pick<Session, 'isolationView' | 'isExecuting' | 'mergeGateView' | 'mergeGate' | 'planState'>,
+  chatProvider: Pick<ChatViewProvider, 'sendTaskIsolation' | 'showIsolationHandoff' | 'showMergeGate'>,
 ): void {
   const view = session.isolationView();
   if (!view) return;
   for (const [taskId, isolation] of Object.entries(view.tasks)) chatProvider.sendTaskIsolation(taskId, isolation);
   if (!session.isExecuting) chatProvider.showIsolationHandoff(view.handoff);
+  // A run paused at a merge gate is told again too (ADR-0020): no status update may come until the user acts.
+  const gate = session.mergeGateView();
+  if (!gate) return;
+  const gates: Record<string, string[]> = {};
+  for (const task of flattenTasks(session.planState?.tasks ?? [])) {
+    const waits = session.mergeGate(task.id);
+    if (waits.length > 0) gates[task.id] = waits;
+  }
+  chatProvider.showMergeGate(gate, gates);
 }
 
 /**
