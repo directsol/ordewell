@@ -6,7 +6,7 @@ import { Hono } from 'hono';
 import { OrchestratorPool } from '../orchestratorPool';
 import { settingsRoute } from '../../routes/settings';
 
-/** The experimental transport setting (ADR-0018) through the real pool, onto the settings file every surface shares. */
+/** The transport setting (ADR-0018) through the real pool, onto the settings file every surface shares. */
 describe('runnerTransport over /api/settings', () => {
   let dir: string;
   let saved: string | undefined;
@@ -33,21 +33,21 @@ describe('runnerTransport over /api/settings', () => {
     body: JSON.stringify(body),
   });
 
-  it('reports terminal until the user opts in', async () => {
-    expect((await get()).runnerTransport).toBe('terminal');
+  it('reports structured until the user picks the terminal', async () => {
+    expect((await get()).runnerTransport).toBe('structured');
   });
 
-  it('persists structured to the shared settings file and reports it back', async () => {
-    expect((await patch({ runnerTransport: 'structured' })).status).toBe(200);
+  it('persists terminal to the shared settings file and reports it back', async () => {
+    expect((await patch({ runnerTransport: 'terminal' })).status).toBe(200);
 
-    expect((await get()).runnerTransport).toBe('structured');
+    expect((await get()).runnerTransport).toBe('terminal');
     const file = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf-8')) as { runnerTransport: string };
-    expect(file.runnerTransport).toBe('structured');
+    expect(file.runnerTransport).toBe('terminal');
   });
 
   it('ignores a value that is not a transport', async () => {
-    await patch({ runnerTransport: 'structured' });
+    await patch({ runnerTransport: 'terminal' });
     await patch({ runnerTransport: 'telepathy' });
-    expect((await get()).runnerTransport).toBe('structured');
+    expect((await get()).runnerTransport).toBe('terminal');
   });
 });

@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { resolveArgs, resolveTaskRunnerFlags, ResolveError } from '../resolveArgs';
+import { resolveArgs, resolveTaskRunnerFlags, resolveModeSettings, ResolveError } from '../resolveArgs';
 import { CODEX_MANIFEST } from '../builtin/codex.manifest';
 import { CLAUDE_CODE_MANIFEST } from '../builtin/claude-code.manifest';
+import { OPENCODE_MANIFEST } from '../builtin/opencode.manifest';
 import type { RunnerPluginManifest, ResolveContext } from '../types';
 
 function basicManifest(overrides?: Partial<RunnerPluginManifest>): RunnerPluginManifest {
@@ -356,6 +357,7 @@ describe('resolveArgs — Codex manifest', () => {
     expect(result.command).toBe('codex');
     expect(result.args).toEqual([
       'exec', '--skip-git-repo-check',
+      '-c', 'approval_policy=on-request', '-c', 'approvals_reviewer=auto_review',
       '-m', 'gpt-5.6-sol',
       '-c', 'model_reasoning_effort=high',
       '--sandbox', 'workspace-write',
@@ -368,7 +370,7 @@ describe('resolveArgs — Codex manifest', () => {
       prompt: 'do it', mode: 'agent', model: 'gpt-5.6-terra', thinkingEffort: 'ultra', headless: false,
     });
     expect(result.args).toEqual([
-      '-a', 'never',
+      '-a', 'on-request', '-c', 'approvals_reviewer=auto_review',
       '-m', 'gpt-5.6-terra',
       '-c', 'model_reasoning_effort=ultra',
       '--sandbox', 'workspace-write',
@@ -384,7 +386,7 @@ describe('resolveArgs — Codex manifest', () => {
       prompt: 'do it', mode: 'agent', model: 'gpt-5.6-sol', headless: true, interactive: true, cwd: '/w/s',
     });
     expect(result.args).toEqual([
-      '-a', 'never',
+      '-a', 'on-request', '-c', 'approvals_reviewer=auto_review',
       '-c', 'projects."/w/s".trust_level="trusted"',
       '-m', 'gpt-5.6-sol',
       '--sandbox', 'workspace-write',
@@ -407,7 +409,10 @@ describe('resolveArgs — Codex manifest', () => {
     const result = resolveArgs(CODEX_MANIFEST, {
       prompt: 'do it', mode: 'agent', headless: true, interactive: true,
     });
-    expect(result.args).toEqual(['-a', 'never', '--sandbox', 'workspace-write', 'do it']);
+    expect(result.args).toEqual([
+      '-a', 'on-request', '-c', 'approvals_reviewer=auto_review',
+      '--sandbox', 'workspace-write', 'do it',
+    ]);
   });
 
   it('quotes a workspace path with spaces as a single TOML-keyed argument', () => {
@@ -437,6 +442,26 @@ describe('resolveArgs — Codex manifest', () => {
     expect(result.args).toContain('danger-full-access');
   });
 
+  // Full auto: nothing to review, so neither shape carries a reviewer, and the
+  // interactive shape keeps `-a never`; `exec` already implies it.
+  it.each([
+    ['interactive', { interactive: true }, ['-a', 'never', '--sandbox', 'danger-full-access', 'go']],
+    ['headless', { headless: true }, ['exec', '--skip-git-repo-check', '--sandbox', 'danger-full-access', 'go']],
+  ])('fullAccess on the %s shape never asks and has no reviewer', (_shape, shape, expected) => {
+    const result = resolveArgs(CODEX_MANIFEST, { prompt: 'go', mode: 'fullAccess', ...shape });
+    expect(result.args).toEqual(expected);
+  });
+
+  it('plan mode stays approval-free on the interactive shape', () => {
+    const result = resolveArgs(CODEX_MANIFEST, { prompt: 'look', mode: 'plan', interactive: true });
+    expect(result.args).toEqual(['-a', 'never', '--sandbox', 'read-only', 'look']);
+  });
+
+  it('an unmapped mode id keeps the previous interactive default of never asking', () => {
+    const result = resolveArgs(CODEX_MANIFEST, { prompt: 'go', mode: 'custom', interactive: true });
+    expect(result.args.slice(0, 2)).toEqual(['-a', 'never']);
+  });
+
   it('omits the effort config pair when no thinking effort is set', () => {
     const result = resolveArgs(CODEX_MANIFEST, {
       prompt: 'go', mode: 'agent', model: 'gpt-5.4', headless: true,
@@ -452,55 +477,114 @@ describe('resolveArgs — Codex manifest', () => {
   });
 });
 
+describe('resolveModeSettings', () => {
+  it('reads the approval policy and reviewer a Codex mode carries', () => {
+    expect(resolveModeSettings(CODEX_MANIFEST, 'agent')).toEqual({ approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' });
+    expect(resolveModeSettings(CODEX_MANIFEST, 'fullAccess')).toEqual({ approvalPolicy: 'never' });
+    expect(resolveModeSettings(CODEX_MANIFEST, 'plan')).toEqual({ approvalPolicy: 'never' });
+  });
+
+  it('is empty for a runner whose manifest declares neither map', () => {
+    expect(resolveModeSettings(CLAUDE_CODE_MANIFEST, 'auto')).toEqual({});
+  });
+
+  it('treats a missing mode like an unmapped one', () => {
+    expect(resolveModeSettings(CODEX_MANIFEST, undefined)).toEqual({});
+  });
+});
+
 /**
  * The structured transport reads a task's mode and effort from the same
- * manifest as the terminal template (ADR-0018, C1), so the same plan task
- * runs under the same permission mode and thinking flags either way.
+ * manifest as the terminal template (ADR-0018, C1). The resolver stays
+ * runner-neutral: it hands over the raw effort id, and each adapter maps it
+ * to its own protocol.
  */
-describe('resolveTaskRunnerFlags — Claude Code manifest', () => {
-  /** The permission-mode value and the thinking args the terminal command line carries. */
-  function terminalFlags(mode: string, model: string | undefined, thinkingEffort: string | undefined) {
-    const { args } = resolveArgs(CLAUDE_CODE_MANIFEST, { prompt: 'go', mode, model, thinkingEffort });
-    const at = args.indexOf('--permission-mode');
-    const from = model ? args.indexOf('--model') + 2 : 0;
-    return { permissionMode: args[at + 1], effortArgs: args.slice(from, at) };
-  }
+describe('resolveTaskRunnerFlags', () => {
+  it('hands a Codex task its sandbox value and the raw effort id, with no Claude flags', () => {
+    expect(resolveTaskRunnerFlags(CODEX_MANIFEST, { mode: 'agent', model: 'gpt-5.5', thinkingEffort: 'high' })).toEqual({
+      permissionMode: 'workspace-write',
+      effort: 'high',
+      modeSettings: { approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' },
+    });
+  });
 
-  const modes = ['', 'default', 'acceptEdits', 'plan', 'bypassPermissions', 'build'];
-  const efforts = [undefined, 'adaptive', 'low', 'medium', 'high', 'xhigh', 'max', 'disabled', 'thinking-16k'];
-  const cases = modes.flatMap((mode) => efforts.flatMap((thinkingEffort) =>
-    [undefined, 'sonnet'].map((model) => ({ mode, thinkingEffort, model }))));
+  it('hands a Claude task the raw effort id too: the thinking flags are the adapter\'s to build', () => {
+    expect(resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode: 'bypassPermissions', model: 'sonnet', thinkingEffort: 'max' })).toEqual({
+      permissionMode: 'bypassPermissions',
+      effort: 'max',
+      modeSettings: {},
+    });
+  });
 
-  it.each(cases)('agrees with the terminal template: mode "$mode", effort $thinkingEffort, model $model', ({ mode, model, thinkingEffort }) => {
-    expect(resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode, model, thinkingEffort })).toEqual(terminalFlags(mode, model, thinkingEffort));
+  it.each([
+    [CLAUDE_CODE_MANIFEST, 'default'],
+    [CODEX_MANIFEST, 'agent'],
+  ])('drops the effort without a model, behind the same gate as the template (%#)', (manifest, mode) => {
+    expect(resolveTaskRunnerFlags(manifest, { mode, thinkingEffort: 'high' })).not.toHaveProperty('effort');
   });
 
   it.each([
     ['build', 'acceptEdits'],
     ['', 'default'],
+    ['default', 'default'],
+    ['auto', 'auto'],
     ['plan', 'plan'],
     // A mode the manifest does not map is passed through as its own id, as the template does.
     ['dontAsk', 'dontAsk'],
-  ])('maps mode "%s" to --permission-mode %s', (mode, expected) => {
+  ])('maps Claude mode "%s" to --permission-mode %s', (mode, expected) => {
     expect(resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode }).permissionMode).toBe(expected);
   });
 
   it.each([
-    ['adaptive', ['--thinking', 'adaptive']],
-    ['high', ['--thinking', 'enabled', '--effort', 'high']],
-    ['disabled', ['--thinking', 'disabled']],
-    ['thinking-16k', ['--thinking', 'adaptive']],
-  ])('splits effort %s into separate argv entries', (thinkingEffort, expected) => {
-    expect(resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode: 'default', model: 'sonnet', thinkingEffort }).effortArgs).toEqual(expected);
+    // The terminal transport runs every mode but plan with `--auto`; the structured one answers the same requests.
+    ['build', true, { permissionMode: 'build', modeSettings: { approvals: 'auto' } }],
+    ['plan', false, { permissionMode: 'plan', modeSettings: {} }],
+  ])('hands an OpenCode %s task its agent and how its requests are answered', (mode, auto, expected) => {
+    expect(resolveTaskRunnerFlags(OPENCODE_MANIFEST, { mode })).toEqual(expected);
+    expect(resolveArgs(OPENCODE_MANIFEST, { mode, prompt: 'p', headless: true }).args.includes('--auto')).toBe(auto);
   });
 
-  it('drops the effort without a model, behind the same gate as the template', () => {
-    expect(resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode: 'default', thinkingEffort: 'max' }).effortArgs).toEqual([]);
+  describe('per-mode settings', () => {
+    const manifest = basicManifest({
+      features: {
+        modelSelection: true, thinkingEffort: true, planMode: true, planModeFlag: '--sandbox',
+        permissionModeValues: { agent: 'workspace-write', plan: 'read-only', fullAccess: 'danger-full-access' },
+        modeSettings: {
+          approvalPolicy: { agent: 'on-request', fullAccess: 'never', default: 'untrusted' },
+          approvalsReviewer: { agent: 'user' },
+        },
+      },
+    });
+
+    it.each([
+      ['agent', { approvalPolicy: 'on-request', approvalsReviewer: 'user' }],
+      ['fullAccess', { approvalPolicy: 'never' }],
+      // A mode no map names leaves every setting to the runner's default.
+      ['plan', {}],
+      // No mode reads as `default`, as it does for the permission-mode value.
+      ['', { approvalPolicy: 'untrusted' }],
+    ])('resolves mode "%s" to %j', (mode, expected) => {
+      expect(resolveTaskRunnerFlags(manifest, { mode }).modeSettings).toEqual(expected);
+    });
+  });
+});
+
+describe('Claude Code manifest — autonomy levels', () => {
+  const byId = (id: string) => CLAUDE_CODE_MANIFEST.modes?.find((m) => m.id === id);
+
+  it('Auto is the safe mode and Bypass permissions the autonomous one', () => {
+    expect(byId('auto')).toMatchObject({ label: 'Auto', cliValue: 'auto', safe: true });
+    expect(byId('bypassPermissions')).toMatchObject({ label: 'Bypass permissions', autonomous: true });
+    expect(CLAUDE_CODE_MANIFEST.modes?.filter((m) => m.safe).map((m) => m.id)).toEqual(['auto']);
   });
 
-  it('never carries the headless skip-permissions flag: the structured transport has no headless shape', () => {
-    const flags = resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode: 'bypassPermissions', model: 'sonnet', thinkingEffort: 'max' });
-    expect(flags.effortArgs).not.toContain('--dangerously-skip-permissions');
-    expect(flags.permissionMode).toBe('bypassPermissions');
+  it('keeps Ask before edits selectable without a level tag', () => {
+    expect(byId('default')).toBeDefined();
+    expect(byId('default')?.safe).toBeUndefined();
+    expect(byId('default')?.autonomous).toBeUndefined();
+  });
+
+  it('describes Auto as a classifier deciding each action', () => {
+    expect(byId('auto')?.description).toMatch(/classifier/i);
   });
 });

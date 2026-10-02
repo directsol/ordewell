@@ -9,7 +9,7 @@ interface CommandDescriptor {
 const COMMANDS: CommandDescriptor[] = [
   { name: 'tdd', description: 'Toggle Test-Driven Development mode (on|off|status)' },
   { name: 'verify', description: 'Toggle verification mode — adds a final evidence-based verification task that runs the full suite (on|off|status)' },
-  { name: 'transport', description: 'Experimental: drive Claude Code tasks through its protocol instead of a terminal, from the next run (terminal|structured|status)' },
+  { name: 'transport', description: 'Drive tasks through each runner\'s protocol (structured) or a terminal, from the next run (terminal|structured|status)' },
 ];
 
 export function commandsRoute(pool: OrchestratorPool) {

@@ -48,6 +48,11 @@ export const OPENCODE_MANIFEST: RunnerPluginManifest = {
     planModeFlag: 'plan',
     buildModeFlag: 'build',
     headlessFlag: '--auto',
+    // The structured transport's `--auto`: build answers every request the
+    // way `opencode run --auto` does, so a plan behaves the same on both.
+    modeSettings: {
+      approvals: { build: 'auto' },
+    },
   },
 
   modelDiscovery: {

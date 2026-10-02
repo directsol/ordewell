@@ -57,7 +57,7 @@ describe('OrchestratorPool shared runner injection', () => {
 
     const meta = saveSession(savedPlan(), 'Rate limiting', workspace, 'session-shared');
     pool.adoptSavedSession(meta.id, workspace);
-    await routerOf().spawn({ ...spawnOpts, runner: 'opencode', transport: 'structured' });
+    await routerOf().spawn({ ...spawnOpts, runner: 'my-plugin', transport: 'structured' });
 
     expect(runner.spawn).toHaveBeenCalledOnce();
     expect(structuredRunner.spawn).not.toHaveBeenCalled();

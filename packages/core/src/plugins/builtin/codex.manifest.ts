@@ -22,9 +22,18 @@ export const CODEX_MANIFEST: RunnerPluginManifest = {
     // for both by default, and an orchestrated task has nobody to answer —
     // without these it stalls on a menu instead of working. `-a` does not exist
     // on `exec`, hence the shape gate rather than a `{{if headless}}` one.
+    //
+    // Approvals follow the mode. `agent` asks (`on-request`) and hands each
+    // request to Codex's `auto_review` subagent, so it stays unattended without
+    // an open sandbox; `exec` takes the same two values as `-c` overrides
+    // (`approval_policy`, `approvals_reviewer`; `-a` is the TUI's spelling), so
+    // both shapes run the mode the same way. A mode with policy `never` needs
+    // nothing on `exec`, which already implies it.
     argsTemplate: [
       '{{if headlessSession}}', 'exec', '--skip-git-repo-check', '{{/if}}',
-      '{{if interactive}}', '-a', 'never', '{{/if}}',
+      '{{if interactive}}', '-a', '{{feature:approvalPolicyVal}}', '{{/if}}',
+      '{{if headlessSession}}', '{{feature:approvalPolicyConfig}}', '{{/if}}',
+      '{{feature:approvalsReviewerConfig}}',
       '{{if projectTrust}}', '-c', '{{projectTrust}}', '{{/if}}',
       '{{if model}}', '-m', '{{model}}', '{{/if}}',
       '{{if thinking}}', '{{feature:reasoningEffortConfig}}', '{{/if}}',
@@ -40,14 +49,24 @@ export const CODEX_MANIFEST: RunnerPluginManifest = {
     planMode: true,
     planModeFlag: '--sandbox',
     permissionModeValues: {
-      // Map mode IDs to --sandbox CLI values. Approvals are off on both shapes
-      // (implicitly under `exec`, via `-a never` in the TUI), so the sandbox
-      // axis is the whole permission story for a Codex task.
+      // Map mode IDs to --sandbox CLI values; approvals ride beside them below.
       'agent': 'workspace-write',
       'plan': 'read-only',
       'fullAccess': 'danger-full-access',
       // Legacy alias used by older tasks
       'build': 'workspace-write',
+    },
+    modeSettings: {
+      approvalPolicy: {
+        'agent': 'on-request',
+        'plan': 'never',
+        'fullAccess': 'never',
+        'build': 'on-request',
+      },
+      approvalsReviewer: {
+        'agent': 'auto_review',
+        'build': 'auto_review',
+      },
     },
   },
 
@@ -90,7 +109,7 @@ export const CODEX_MANIFEST: RunnerPluginManifest = {
   contextFile: 'AGENTS.md',
 
   modes: [
-    { id: 'agent', label: 'Agent', description: 'Workspace-write sandbox: edits files inside the workspace', cliValue: 'workspace-write', safe: true },
+    { id: 'agent', label: 'Agent', description: 'Workspace-write sandbox: edits files inside the workspace, and Codex\'s reviewer subagent assesses each approval request', cliValue: 'workspace-write', safe: true },
     { id: 'plan', label: 'Plan', description: 'Read-only sandbox for analysis and exploration', cliValue: 'read-only' },
     { id: 'fullAccess', label: 'Full access', description: 'No sandbox — full disk and network access for autonomous runs', cliValue: 'danger-full-access', autonomous: true },
   ],

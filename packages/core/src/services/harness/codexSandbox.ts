@@ -71,7 +71,7 @@ export async function probeCodexSandbox(
 }
 
 /** The message shown when Codex has no working sandbox, naming both documented fixes. */
-export function codexSandboxUnavailableMessage(): string {
+export function codexSandboxUnavailableMessage(role: 'planner' | 'task' = 'planner'): string {
   return [
     'Codex cannot start a sandbox on this machine, so it can run no command and cannot read the workspace.',
     '',
@@ -80,7 +80,7 @@ export function codexSandboxUnavailableMessage(): string {
     'Either allow them:',
     '  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0',
     '',
-    'or install an AppArmor profile for bwrap, then plan with Codex again.',
+    `or install an AppArmor profile for bwrap, then ${role === 'task' ? 'run the task again' : 'plan with Codex again'}.`,
   ].join('\n');
 }
 

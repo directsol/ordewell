@@ -1,6 +1,6 @@
 import { execSync } from 'child_process';
 import {
-  ALL_PROVIDERS, clipboardCopyCommand, isCliProvider, type AiProvider, type ApprovalAnswer, type HasBinFn, type LegacyPlanState,
+  ALL_PROVIDERS, autonomyLevelLabel, clipboardCopyCommand, isCliProvider, type AiProvider, type ApprovalAnswer, type HasBinFn, type LegacyPlanState,
   type PlannerModelRecall, type SerializedPlan, type SessionMeta, type TaskLogEvent,
 } from '@ordewell/core';
 import { describeConnectionRefused, isConnectionRefused } from '../daemonClient';
@@ -372,7 +372,7 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
     case 'setTransport': {
       const result = await api.sendCommand('transport', { action: effect.transport });
       if (result.settings) dispatch({ type: 'settingsLoaded', settings: result.settings });
-      dispatch({ type: 'notice', message: `Runner transport is ${effect.transport}${effect.transport === 'structured' ? ' (experimental)' : ''} — it applies from the next run.` });
+      dispatch({ type: 'notice', message: `Runner transport is ${effect.transport} — it applies from the next run.` });
       return;
     }
 
@@ -469,7 +469,7 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
 
     case 'setAutonomous':
       deps.setEnvVar('ORDEWELL_AUTONOMOUS_MODE', String(effect.enabled));
-      dispatch({ type: 'notice', message: `Autonomous mode ${effect.enabled ? 'on' : 'off'}.` });
+      dispatch({ type: 'notice', message: `Autonomy level: ${autonomyLevelLabel(effect.enabled)} for new plans.` });
       return;
 
     case 'setMouseCapture':

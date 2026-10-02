@@ -3,7 +3,7 @@ import { parsePlanJson, looksLikePlanAttempt } from '../PlanValidator';
 import { generatePlanWithRepair, JSON_REPAIR_INSTRUCTION } from '../PlanRepair';
 import { extractJsonObject, PlanParseError } from '../JsonExtractor';
 import { parsePartialPlan } from '../PartialPlanParser';
-import { buildModeGuide } from '../ModeResolver';
+import { buildModeGuide, autonomyLevelLabel, parseAutonomyLevel } from '../ModeResolver';
 import { buildResearchPrompt, buildPlanWithResults, buildModifyPlanPrompt } from '../PlanPrompts';
 
 import { DEFAULT_PLANNER_MODES, type PlannerModes } from '../plannerModes';
@@ -527,21 +527,22 @@ describe('generatePlanWithRepair', () => {
 
 describe('buildModeGuide', () => {
   const claudeModes = [
-    { id: 'default', label: 'Ask before edits', description: 'Standard mode: asks permission before editing files', safe: true },
+    { id: 'default', label: 'Ask before edits', description: 'Standard mode: asks permission before editing files' },
+    { id: 'auto', label: 'Auto', description: 'Classifier approves or blocks each action', safe: true },
     { id: 'acceptEdits', label: 'Edit automatically', description: 'Edits files without asking' },
     { id: 'plan', label: 'Plan mode', description: 'Read-only analysis' },
-    { id: 'bypassPermissions', label: 'Auto mode', description: 'Skips all permission prompts', autonomous: true },
+    { id: 'bypassPermissions', label: 'Bypass permissions', description: 'Skips all permission prompts', autonomous: true },
   ];
   const opencodeModes = [
     { id: 'build', label: 'Build', description: 'Full access agent', autonomous: true, safe: true },
     { id: 'plan', label: 'Plan', description: 'Read-only agent' },
   ];
 
-  it('shows only autonomous-compatible modes for claude-code when toggle is ON, safe-only modes hidden', () => {
+  it('shows only autonomous-compatible modes for claude-code under Full auto, safe-only modes hidden', () => {
     const guide = buildModeGuide({ 'claude-code': claudeModes, 'opencode': opencodeModes }, true);
     expect(guide).toContain('AVAILABLE MODES PER RUNNER');
-    // safe-only "default" is filtered out
-    expect(guide).not.toContain('default (');
+    // safe-only "auto" is filtered out
+    expect(guide).not.toContain('auto (');
     // autonomous-tagged mode shown as DEFAULT
     expect(guide).toContain('bypassPermissions (DEFAULT)');
     // neutral untagged mode still listed
@@ -550,18 +551,38 @@ describe('buildModeGuide', () => {
     expect(guide.indexOf('bypassPermissions')).toBeLessThan(guide.indexOf('acceptEdits'));
   });
 
-  it('shows only safe-compatible modes for claude-code when toggle is OFF, autonomous-only modes hidden', () => {
+  it('shows only safe-compatible modes for claude-code under Auto, autonomous-only modes hidden', () => {
     const guide = buildModeGuide({ 'claude-code': claudeModes, 'opencode': opencodeModes }, false);
     const ccLine = guide.split('\n').find((l) => l.startsWith('- claude-code:'))!;
     const ocLine = guide.split('\n').find((l) => l.startsWith('- opencode:'))!;
     // autonomous-only "bypassPermissions" is filtered out
     expect(ccLine).not.toContain('bypassPermissions');
     // safe-tagged mode shown as DEFAULT
-    expect(ccLine).toContain('default (DEFAULT)');
+    expect(ccLine).toContain('auto (DEFAULT)');
+    expect(ccLine.indexOf('auto (DEFAULT)')).toBeLessThan(ccLine.indexOf('default ('));
     // neutral untagged mode still listed
     expect(ccLine).toContain('acceptEdits (');
     // opencode.build wears both tags — visible under OFF too, annotated
     expect(ocLine).toContain('build (DEFAULT)');
+  });
+
+  it('names the autonomy level the plan is generated under', () => {
+    const runners = { 'claude-code': claudeModes };
+    expect(buildModeGuide(runners, true)).toContain('Autonomy level: Full auto');
+    expect(buildModeGuide(runners, false)).toContain('Autonomy level: Auto');
+  });
+
+  it('labels the two levels', () => {
+    expect(autonomyLevelLabel(true)).toBe('Full auto');
+    expect(autonomyLevelLabel(false)).toBe('Auto');
+  });
+
+  it.each([
+    ['full', true], ['FULL', true], ['on', true],
+    ['auto', false], ['Auto', false], ['off', false],
+    ['maybe', null], ['', null], [undefined, null],
+  ])('parses the level argument %s', (arg, expected) => {
+    expect(parseAutonomyLevel(arg)).toBe(expected);
   });
 
   it('omits plan modes from the guide listing', () => {
@@ -589,7 +610,7 @@ describe('parsePlanJson with dynamic modes', () => {
       { id: 'default', label: 'Ask before edits', description: 'Standard mode' },
       { id: 'acceptEdits', label: 'Edit automatically', description: 'Edits without asking' },
       { id: 'plan', label: 'Plan mode', description: 'Read-only' },
-      { id: 'bypassPermissions', label: 'Auto mode', description: 'CI only' },
+      { id: 'bypassPermissions', label: 'Bypass permissions', description: 'CI only' },
     ],
     'opencode': [
       { id: 'build', label: 'Build', description: 'Full access' },

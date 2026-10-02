@@ -1,5 +1,5 @@
 import {
-  ALL_PROVIDERS, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, PROVIDER_PRIORITY, isRunnerTransport, parseMaxParallel, runnerForProvider, type AiProvider,
+  ALL_PROVIDERS, EMPTY_CONVERSATION, EMPTY_HOLD, NO_TURN, PROVIDER_PRIORITY, autonomyLevelLabel, isRunnerTransport, parseAutonomyLevel, parseMaxParallel, runnerForProvider, type AiProvider,
 } from '@ordewell/core';
 import { handoffCommand } from '../handoff';
 import { findCommand, type ParsedCommand } from '../slash';
@@ -405,8 +405,9 @@ function setMaxParallel(state: TuiState, arg: string | undefined): Step {
 }
 
 function setAutonomous(state: TuiState, arg: string | undefined): Step {
-  const enabled = resolveToggle(arg, state.autonomous);
-  if (enabled === null) return fail(state, 'Usage: /auto [on|off]');
+  if (arg === undefined) return step(say(state, 'system', `Autonomy level: ${autonomyLevelLabel(state.autonomous)} — /auto full or /auto auto changes it for new plans.`));
+  const enabled = parseAutonomyLevel(arg);
+  if (enabled === null) return fail(state, 'Usage: /auto [full|auto]');
   // Updated here, not from the effect: nothing round-trips this setting back
   // (it lives in .env), and a stale flag would freeze the toggle and the badge.
   return step({ ...state, autonomous: enabled }, [{ type: 'setAutonomous', enabled }]);

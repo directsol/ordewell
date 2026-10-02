@@ -1,6 +1,7 @@
 import type { SubagentOutcome } from '../../models/Task';
 import { partedPromptUsage, type UsageRecord } from '../../models/Usage';
 import type { ApprovalDecision } from '../../interfaces/IApproval';
+import { claudeThinkingArgs } from '../../plugins/resolveArgs';
 import type { AgentEvent, AgentStartOptions, TaskModeAgentAdapter, TaskStartOptions } from './AgentAdapter';
 import { StdioAgentAdapter, type SpawnSpec } from './StdioAgentAdapter';
 
@@ -10,6 +11,14 @@ import { StdioAgentAdapter, type SpawnSpec } from './StdioAgentAdapter';
  * permission-mode change cannot quietly hand the planner a `Write` (T1).
  */
 const DISALLOWED_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'KillShell'];
+
+/**
+ * `AskUserQuestion` reaches us as a tool request whose allow must carry the
+ * user's `answers`, which no surface collects yet. Left on, the agent gets an
+ * empty answer and carries on guessing; off, it asks in plain text and ends its
+ * turn, which the task reads as "waiting for input" (ADR-0018, W1).
+ */
+const TASK_DISALLOWED_TOOLS = ['AskUserQuestion'];
 
 /**
  * The flags that make Claude Code speak its bidirectional protocol, the same
@@ -32,6 +41,13 @@ const PROTOCOL_ARGS = [
  * why nothing downstream treats its absence as "no agents are running".
  */
 const ASYNC_LAUNCH_MARKER = 'Async agent launched successfully';
+
+/**
+ * After the last background task finishes behind a held `result`, how long the
+ * CLI has to start the follow-on turn it normally opens itself. Past it, the
+ * agent is taken to have nothing more to say.
+ */
+const FOLLOW_ON_TURN_GRACE_MS = 5000;
 
 /** A denial's `message` is required by the CLI; this stands in when nobody wrote a note. */
 const DEFAULT_DENIAL = 'Denied in Ordewell. Continue without it, or say what you need.';
@@ -68,6 +84,8 @@ interface ClaudeLine {
   type: string;
   subtype?: string;
   session_id?: string;
+  /** `init`: the mode the CLI actually started in. */
+  permissionMode?: string;
   result?: string;
   is_error?: boolean;
   /** A failed result's own words when it has no `result` text — a refused `--resume`, say. */
@@ -85,6 +103,8 @@ interface ClaudeLine {
   /** Cumulative over the whole agent session — including turns before a `--resume`. */
   total_cost_usd?: number;
   modelUsage?: Record<string, { contextWindow?: number }>;
+  /** `background_tasks_changed`: every background task still running, not just the change. */
+  tasks?: unknown[];
   /** `task_notification`: which `Agent` call finished, how, and what it reported. */
   tool_use_id?: string;
   status?: string;
@@ -177,6 +197,18 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
   private readonly openSubagents = new Map<string, { background: boolean }>();
   /** Subagent messages already counted. A message arrives as one line per content block, each repeating its usage. */
   private readonly countedSubagentMessages = new Set<string>();
+  /** Background tasks (shells, agents) the CLI reports as still running, as of its last `background_tasks_changed`. */
+  private backgroundTaskCount = 0;
+  /**
+   * A task's turn whose `result` arrived while background work was still open.
+   * The CLI reports that result when the model stops talking, then opens a turn
+   * of its own when the work finishes; a turn ended at the first result would
+   * lose everything said after it, the completion marker included.
+   */
+  private resultHeld = false;
+  private followOnTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The mode a task asked for, to hold the CLI to it once its `init` says what it started in. */
+  private requestedMode: string | null = null;
   /** The session `--resume` asked for, until the CLI's `init` shows it was taken up. */
   private pendingResume: string | null = null;
 
@@ -212,11 +244,13 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
    * without it `-p` refuses them silently and nothing can ever surface one.
    */
   private taskSpawnSpec(opts: TaskStartOptions): SpawnSpec {
+    this.requestedMode = opts.flags.permissionMode;
     const args = [
       ...PROTOCOL_ARGS,
       '--permission-prompt-tool', 'stdio',
       '--permission-mode', opts.flags.permissionMode,
-      ...opts.flags.effortArgs,
+      '--disallowedTools', TASK_DISALLOWED_TOOLS.join(','),
+      ...(opts.flags.effort ? claudeThinkingArgs(opts.flags.effort) : []),
     ];
     if (opts.model) args.push('--model', opts.model);
     if (opts.resumeSessionId) {
@@ -286,9 +320,21 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
     return true;
   }
 
+  dispose(): void {
+    this.clearFollowOnTimer();
+    super.dispose();
+  }
+
+  private clearFollowOnTimer(): void {
+    if (this.followOnTimer) clearTimeout(this.followOnTimer);
+    this.followOnTimer = null;
+  }
+
   protected turnPayload(message: string): string {
     this.turnHasText = false;
     this.interruptRequested = false;
+    this.resultHeld = false;
+    this.clearFollowOnTimer();
     return `${JSON.stringify({
       type: 'user',
       message: { role: 'user', content: [{ type: 'text', text: message }] },
@@ -364,6 +410,7 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
       }
 
       case 'assistant':
+        if (!subagentId) this.clearFollowOnTimer();
         if (subagentId) {
           this.handleSubagentMessage(msg, subagentId, emit);
           return;
@@ -403,6 +450,14 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
         return;
 
       case 'system':
+        if (msg.subtype === 'init') {
+          this.clearFollowOnTimer();
+          if (this.refuseOtherMode(msg, emit)) return;
+        }
+        if (msg.subtype === 'background_tasks_changed' && Array.isArray(msg.tasks)) {
+          this.backgroundTaskCount = msg.tasks.length;
+          if (this.resultHeld && this.backgroundTaskCount === 0) this.awaitFollowOnTurn(emit);
+        }
         // A backgrounded subagent's only completion signal: its `Agent` call
         // returned at launch, long before the work ended.
         if (msg.subtype === 'task_notification' && msg.tool_use_id && this.openSubagents.get(msg.tool_use_id)?.background) {
@@ -421,7 +476,10 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
           emit({ type: 'turn_end', interrupted: true });
         } else if (msg.is_error || (msg.subtype && msg.subtype !== 'success')) {
           emit({ type: 'error', message: msg.result?.trim() || msg.errors?.join('\n').trim() || `Claude Code ended the turn: ${msg.subtype ?? 'error'}` });
+        } else if (this.role === 'task' && this.backgroundTaskCount > 0) {
+          this.resultHeld = true;
         } else {
+          this.resultHeld = false;
           emit({ type: 'turn_end' });
         }
         return;
@@ -434,6 +492,30 @@ export class ClaudeCodeAdapter extends StdioAgentAdapter implements TaskModeAgen
       default:
         return;
     }
+  }
+
+  /**
+   * `--permission-mode auto` on a model or account without auto mode is not
+   * refused: the CLI says nothing and starts in `default`, then asks about every
+   * write — a request nobody is there to answer. The plan, not the CLI, decides
+   * the mode (ADR-0001), so a different one fails the turn rather than running.
+   */
+  private refuseOtherMode(msg: ClaudeLine, emit: (event: AgentEvent) => void): boolean {
+    const asked = this.requestedMode;
+    if (this.role !== 'task' || !asked || !msg.permissionMode || msg.permissionMode === asked) return false;
+    emit({ type: 'error', message: `Claude Code started in "${msg.permissionMode}" mode, not the "${asked}" mode the plan asked for. It does not report why; the model or the account may not offer it.` });
+    this.dispose();
+    return true;
+  }
+
+  private awaitFollowOnTurn(emit: (event: AgentEvent) => void): void {
+    this.clearFollowOnTimer();
+    this.followOnTimer = setTimeout(() => {
+      this.followOnTimer = null;
+      this.resultHeld = false;
+      emit({ type: 'turn_end' });
+    }, FOLLOW_ON_TURN_GRACE_MS);
+    this.followOnTimer.unref?.();
   }
 
   private startSubagent(id: string, input: Record<string, unknown>, emit: (event: AgentEvent) => void): void {

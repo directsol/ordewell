@@ -1,9 +1,10 @@
 import type { ChildProcess } from 'child_process';
-import { augmentedPath, withPath } from '../../utils/shellPath';
+import { augmentedPath } from '../../utils/shellPath';
 import { planDirectLaunch, isExecutableResolved, ExecutableNotFoundError } from '../../utils/launch';
 import { assertWorkspaceExists } from '../../utils/workspace';
 import { killTree } from '../../utils/processTree';
 import { workspaceEnvOf } from '../workspaceEnv';
+import { runnerEnv } from './runnerEnv';
 import { LineBuffer, type AgentAdapter, type AgentEvent, type AgentProcessDeps, type AgentStartOptions } from './AgentAdapter';
 
 /** Stderr kept for the failure message; a dying CLI's last words are the only useful diagnostic. */
@@ -65,6 +66,8 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
   private betweenTurns: AgentEvent[] = [];
   /** Set once a turn has ended: after that, out-of-turn events are stale, not startup. */
   private hadTurn = false;
+  /** A task's session, which wants what the agent says on its own after a turn closed; a planner registers none and drops it. */
+  private outOfTurnListener: ((event: AgentEvent) => void) | null = null;
   private disposed = false;
   /** Resolves when the process ends, so a handshake can lose the race instead of waiting out its timeout. */
   protected processEnded!: Promise<void>;
@@ -106,7 +109,7 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
     const PATH = await resolvePath();
 
     const workspace = await (this.deps.workspaceEnv ?? workspaceEnvOf)(opts.cwd);
-    this.spawnEnv = withPath(process.env, PATH, { ...workspace, ...spec.env });
+    this.spawnEnv = runnerEnv(PATH, { ...workspace, ...spec.env });
     // On POSIX this hands back `spec` untouched; on Windows it resolves the
     // agent's `.exe` (or routes its `.cmd` shim through cmd.exe), because
     // CreateProcess performs no PATHEXT lookup of its own.
@@ -136,6 +139,7 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
         this.turnActivity?.();
         this.handleLine(line, (event) => {
           if (this.turnEmit) this.turnEmit(event);
+          else if (this.hadTurn && this.outOfTurnListener) this.outOfTurnListener(event);
           else if (!this.hadTurn && !TURN_SCOPED_EVENTS.has(event.type) && this.betweenTurns.length < BETWEEN_TURN_EVENT_CAP) {
             this.betweenTurns.push(event);
           }
@@ -145,6 +149,10 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
     this.process.stderr?.on('data', (chunk: Buffer) => {
       this.stderrTail = (this.stderrTail + chunk.toString()).slice(-STDERR_TAIL_CHARS);
     });
+    // A write racing the process's death (a turn, an interrupt, a permission
+    // answer) fails with EPIPE asynchronously; unheard, it crashes the host.
+    // The exit path already reports the death, with its stderr tail.
+    this.process.stdin?.on('error', () => {});
     this.process.on('exit', (code, signal) => { this.exited = { code, signal }; this.markEnded?.(); });
     this.process.on('error', (err) => {
       this.stderrTail = (this.stderrTail + `\n${err.message}`).slice(-STDERR_TAIL_CHARS);
@@ -219,6 +227,10 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
     });
   }
 
+  onOutOfTurn(listener: (event: AgentEvent) => void): void {
+    this.outOfTurnListener = listener;
+  }
+
   nativeSessionId(): string | null { return this.sessionId; }
 
   onProcessExit(listener: (code: number) => void): void {
@@ -231,6 +243,7 @@ export abstract class StdioAgentAdapter implements AgentAdapter {
     if (this.disposed) return;
     this.disposed = true;
     this.turnEmit = null;
+    this.outOfTurnListener = null;
     const proc = this.process;
     this.process = null;
     // Tree-wide, because on Windows the direct child may be the cmd.exe shim

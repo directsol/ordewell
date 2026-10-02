@@ -1,9 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { ClaudeCodeAdapter } from '../harness/ClaudeCodeAdapter';
 import { CodexAdapter } from '../harness/CodexAdapter';
 import { OpenCodeAdapter } from '../harness/OpenCodeAdapter';
 import { TaskModeUnsupportedError, type AgentEvent, type AgentProcessDeps, type AgentStartOptions, type TaskStartOptions } from '../harness/AgentAdapter';
 import { supportsTaskMode, createTaskAdapter } from '../harness/taskAdapters';
+import { resolveArgs, resolveTaskRunnerFlags } from '../../plugins/resolveArgs';
+import { CLAUDE_CODE_MANIFEST } from '../../plugins/builtin/claude-code.manifest';
 import { fakeSpawn, fixture, type ScriptedReply } from './harnessTestKit';
 
 /**
@@ -31,9 +33,14 @@ function taskStart(overrides: Partial<TaskStartOptions> = {}): TaskStartOptions 
     kind: 'task',
     cwd: '/repo',
     mode: 'acceptEdits',
-    flags: { permissionMode: 'acceptEdits', effortArgs: [] },
+    flags: { permissionMode: 'acceptEdits', modeSettings: {} },
     ...overrides,
   };
+}
+
+/** A task in the mode a fixture was recorded under: the adapter holds the CLI to the mode asked for. */
+function taskIn(permissionMode: string): TaskStartOptions {
+  return taskStart({ mode: permissionMode, flags: { permissionMode, modeSettings: {} } });
 }
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -69,8 +76,8 @@ describe('ClaudeCodeAdapter start switch', () => {
     ['nothing else', {}],
     ['a model, an effort and a resume', { model: 'opus', effort: 'max', resumeSessionId: 'sess-1' }],
     // Task fields smuggled onto a planner start: nothing on the planner path reads them.
-    ['a task\'s bypass mode and flags', { mode: 'bypassPermissions', flags: { permissionMode: 'bypassPermissions', effortArgs: ['--dangerously-skip-permissions'] } }],
-    ['the legacy build alias a task resolves to acceptEdits', { mode: 'build', flags: { permissionMode: 'acceptEdits', effortArgs: [] } }],
+    ['a task\'s bypass mode and flags', { mode: 'bypassPermissions', flags: { permissionMode: 'bypassPermissions', effort: 'max', modeSettings: {} } }],
+    ['the legacy build alias a task resolves to acceptEdits', { mode: 'build', flags: { permissionMode: 'acceptEdits', modeSettings: {} } }],
   ])('starts a planner read-only whatever else its start carries: %s', async (_label, extra) => {
     const { spawned, processDeps } = deps([]);
     const adapter = new ClaudeCodeAdapter(processDeps);
@@ -91,7 +98,7 @@ describe('ClaudeCodeAdapter start switch', () => {
     await adapter.start(taskStart({
       model: 'opus',
       resumeSessionId: 'sess-9',
-      flags: { permissionMode: 'default', effortArgs: ['--thinking', 'enabled', '--effort', 'max'] },
+      flags: { permissionMode: 'default', effort: 'max', modeSettings: {} },
     }));
     expect(spawned.lastArgs()).toEqual([
       '-p',
@@ -101,6 +108,7 @@ describe('ClaudeCodeAdapter start switch', () => {
       '--include-partial-messages',
       '--permission-prompt-tool', 'stdio',
       '--permission-mode', 'default',
+      '--disallowedTools', 'AskUserQuestion',
       '--thinking', 'enabled', '--effort', 'max',
       '--model', 'opus',
       '--resume', 'sess-9',
@@ -109,28 +117,160 @@ describe('ClaudeCodeAdapter start switch', () => {
   });
 });
 
-describe('task mode support', () => {
-  it('is Claude Code alone for now', () => {
-    expect(supportsTaskMode('claude-code')).toBe(true);
-    expect(supportsTaskMode('codex')).toBe(false);
-    expect(supportsTaskMode('opencode')).toBe(false);
-    expect(supportsTaskMode('toString')).toBe(false);
-    expect(() => createTaskAdapter('codex', deps([]).processDeps)).toThrow(TaskModeUnsupportedError);
+/**
+ * The adapter maps the task's raw effort itself now; the argv a Claude task
+ * starts with, and its parity with the terminal command line, must not move.
+ */
+describe('ClaudeCodeAdapter task argv for every effort and mode', () => {
+  const thinking: Array<[string, string[]]> = [
+    ['adaptive', ['--thinking', 'adaptive']],
+    ['low', ['--thinking', 'enabled', '--effort', 'low']],
+    ['medium', ['--thinking', 'enabled', '--effort', 'medium']],
+    ['high', ['--thinking', 'enabled', '--effort', 'high']],
+    ['xhigh', ['--thinking', 'enabled', '--effort', 'xhigh']],
+    ['max', ['--thinking', 'enabled', '--effort', 'max']],
+    ['disabled', ['--thinking', 'disabled']],
+    // A legacy variant id an old task may still carry.
+    ['thinking-16k', ['--thinking', 'adaptive']],
+  ];
+  const modes: Array<[string, string]> = [
+    ['default', 'default'],
+    ['acceptEdits', 'acceptEdits'],
+    ['plan', 'plan'],
+    ['bypassPermissions', 'bypassPermissions'],
+    ['build', 'acceptEdits'],
+  ];
+  const cases = modes.flatMap(([mode, permissionMode]) => [
+    ...thinking.map(([effort, thinkingArgs]) => ({ mode, permissionMode, effort, model: 'sonnet' as string | undefined, thinkingArgs })),
+    // Effort only rides with a model, on both transports.
+    { mode, permissionMode, effort: 'max', model: undefined, thinkingArgs: [] },
+  ]);
+
+  async function taskArgs(mode: string, model: string | undefined, effort: string): Promise<string[]> {
+    const { spawned, processDeps } = deps([]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart({ mode, model, flags: resolveTaskRunnerFlags(CLAUDE_CODE_MANIFEST, { mode, model, thinkingEffort: effort }) }));
+    adapter.dispose();
+    return spawned.lastArgs();
+  }
+
+  it.each(cases)('mode $mode, effort $effort, model $model', async ({ mode, permissionMode, effort, model, thinkingArgs }) => {
+    expect(await taskArgs(mode, model, effort)).toEqual([
+      '-p',
+      '--input-format', 'stream-json',
+      '--output-format', 'stream-json',
+      '--verbose',
+      '--include-partial-messages',
+      '--permission-prompt-tool', 'stdio',
+      '--permission-mode', permissionMode,
+      '--disallowedTools', 'AskUserQuestion',
+      ...thinkingArgs,
+      ...(model ? ['--model', model] : []),
+    ]);
   });
 
-  it.each([
-    ['codex', (d: AgentProcessDeps) => new CodexAdapter(d)],
-    ['opencode', (d: AgentProcessDeps) => new OpenCodeAdapter(d)],
-  ])('%s refuses task mode with a typed error and spawns nothing', async (runner, make) => {
-    const { spawned, processDeps } = deps([]);
-    const started = make(processDeps).start(taskStart());
-    await expect(started).rejects.toBeInstanceOf(TaskModeUnsupportedError);
-    await expect(started).rejects.toThrow(`${runner} has no structured task connector yet`);
-    expect(spawned.processes).toHaveLength(0);
+  it.each(cases)('runs under the terminal template\'s flags: mode $mode, effort $effort, model $model', async ({ mode, effort, model }) => {
+    const terminal = resolveArgs(CLAUDE_CODE_MANIFEST, { prompt: 'go', mode, model, thinkingEffort: effort }).args;
+    const structured = await taskArgs(mode, model, effort);
+    const valueOf = (args: string[], flag: string) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined);
+    for (const flag of ['--permission-mode', '--thinking', '--effort', '--model']) {
+      expect(valueOf(structured, flag)).toBe(valueOf(terminal, flag));
+    }
+  });
+});
+
+describe('task mode support', () => {
+  it('is every built-in runner', () => {
+    expect(supportsTaskMode('claude-code')).toBe(true);
+    expect(supportsTaskMode('codex')).toBe(true);
+    expect(supportsTaskMode('opencode')).toBe(true);
+    expect(createTaskAdapter('codex', deps([]).processDeps)).toBeInstanceOf(CodexAdapter);
+    expect(createTaskAdapter('opencode', deps([]).processDeps)).toBeInstanceOf(OpenCodeAdapter);
+    expect(supportsTaskMode('toString')).toBe(false);
+  });
+
+  it('refuses a runner without a connector with a typed error', () => {
+    expect(() => createTaskAdapter('my-plugin', deps([]).processDeps)).toThrow(TaskModeUnsupportedError);
+    expect(() => createTaskAdapter('my-plugin', deps([]).processDeps)).toThrow('my-plugin has no structured task connector yet');
   });
 });
 
 describe('ClaudeCodeAdapter in task mode', () => {
+  it('disables the question tool, so the agent asks in plain text and ends its turn (ADR-0018, M1)', async () => {
+    const { spawned, processDeps } = deps([]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart());
+    const args = spawned.lastArgs();
+    expect(args.flatMap((arg, i) => (arg === '--disallowedTools' ? [args[i + 1]] : []))).toEqual(['AskUserQuestion']);
+    adapter.dispose();
+  });
+
+  describe('background work', () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    // Recorded from `claude` 2.1.286: a background `sleep 20`, a `result` line while it
+    // still runs, then — on its own — a second turn once it finishes.
+    it('holds the turn open while a background task runs, so what the agent says after it is the same turn\'s', async () => {
+      const { processDeps } = deps([fixture('claude-code', 'task-background')]);
+      const adapter = new ClaudeCodeAdapter(processDeps);
+      await adapter.start(taskStart());
+      const events: AgentEvent[] = [];
+      await adapter.send('wait for it', (e) => events.push(e));
+
+      expect(events.filter((e) => e.type === 'turn_end')).toEqual([{ type: 'turn_end' }]);
+      expect(events.at(-1)).toEqual({ type: 'turn_end' });
+      const text = events.flatMap((e) => (e.type === 'assistant_text' ? [e.text] : [])).join('');
+      expect(text).toContain('Waiting for the background command to complete');
+      expect(text.trim().endsWith('FINISHED')).toBe(true);
+      adapter.dispose();
+    });
+
+    it('ends the held turn once the work is done and the CLI starts no follow-on turn', async () => {
+      vi.useFakeTimers();
+      const { processDeps } = deps([fixture('claude-code', 'task-background-no-wake')]);
+      const adapter = new ClaudeCodeAdapter(processDeps);
+      await adapter.start(taskStart());
+      const events: AgentEvent[] = [];
+      let ended = false;
+      void adapter.send('wait for it', (e) => events.push(e)).then(() => { ended = true; });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(events.some((e) => e.type === 'turn_end')).toBe(false);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(ended).toBe(true);
+      expect(events.at(-1)).toEqual({ type: 'turn_end' });
+      adapter.dispose();
+    });
+
+    it('does not hold a planner\'s turn', async () => {
+      const { processDeps } = deps([fixture('claude-code', 'task-background')]);
+      const adapter = new ClaudeCodeAdapter(processDeps);
+      await adapter.start({ kind: 'planner', cwd: '/repo', systemPrompt: 'PLAN' });
+      const events: AgentEvent[] = [];
+      await adapter.send('wait for it', (e) => events.push(e));
+      expect(events.at(-1)).toEqual({ type: 'turn_end' });
+      expect(events.some((e) => e.type === 'assistant_text' && e.text.trim() === 'FINISHED')).toBe(false);
+      adapter.dispose();
+    });
+  });
+
+  it('fails the turn in plain words when the CLI starts in another mode than the plan asked for', async () => {
+    const { processDeps } = deps([
+      // Recorded from `claude` 2.1.286 asked for `--permission-mode auto` on haiku: no refusal, no warning.
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-1', cwd: '/repo', permissionMode: 'default', model: 'claude-haiku-4-5-20251001' }) + '\n',
+    ]);
+    const adapter = new ClaudeCodeAdapter(processDeps);
+    await adapter.start(taskStart({ mode: 'auto', model: 'haiku', flags: { permissionMode: 'auto', modeSettings: {} } }));
+    const events: AgentEvent[] = [];
+    await adapter.send('go', (e) => events.push(e));
+
+    expect(events).toEqual([{
+      type: 'error',
+      message: 'Claude Code started in "default" mode, not the "auto" mode the plan asked for. It does not report why; the model or the account may not offer it.',
+    }]);
+    adapter.dispose();
+  });
+
   it('reports a resume the CLI cannot find as a failed turn in its own words, and lets the process go (ADR-0018, K1)', async () => {
     const { spawned, processDeps } = deps([]);
     const adapter = new ClaudeCodeAdapter(processDeps);
@@ -185,7 +325,7 @@ describe('ClaudeCodeAdapter in task mode', () => {
   it('leaves a tool request open for someone to answer, and passes the whole request on', async () => {
     const { spawned, processDeps } = deps([fixture('claude-code', 'permission-task')]);
     const adapter = new ClaudeCodeAdapter(processDeps);
-    await adapter.start(taskStart({ mode: 'default', flags: { permissionMode: 'default', effortArgs: [] } }));
+    await adapter.start(taskStart({ mode: 'default', flags: { permissionMode: 'default', modeSettings: {} } }));
     const events: AgentEvent[] = [];
     void adapter.send('Write a.txt', (e) => events.push(e));
     await until(() => events.some((e) => e.type === 'permission_request'));
@@ -212,7 +352,7 @@ describe('ClaudeCodeAdapter in task mode', () => {
       fixture('claude-code', 'permission-task-allowed-for-task'),
     ]);
     const adapter = new ClaudeCodeAdapter(processDeps);
-    await adapter.start(taskStart({ mode: 'default', flags: { permissionMode: 'default', effortArgs: [] } }));
+    await adapter.start(taskStart({ mode: 'default', flags: { permissionMode: 'default', modeSettings: {} } }));
     const events: AgentEvent[] = [];
     const turn = adapter.send('Write a.txt and b.txt', (e) => events.push(e));
     const requests = () => events.filter((e) => e.type === 'permission_request');
@@ -255,7 +395,7 @@ describe('ClaudeCodeAdapter in task mode', () => {
   it('answers Deny with the note as the message the agent reads', async () => {
     const { spawned, processDeps } = deps([fixture('claude-code', 'permission-task-deny'), fixture('claude-code', 'permission-task-denied')]);
     const adapter = new ClaudeCodeAdapter(processDeps);
-    await adapter.start(taskStart({ mode: 'default', flags: { permissionMode: 'default', effortArgs: [] } }));
+    await adapter.start(taskStart({ mode: 'default', flags: { permissionMode: 'default', modeSettings: {} } }));
     const events: AgentEvent[] = [];
     void adapter.send('Write d.txt', (e) => events.push(e));
     await until(() => events.some((e) => e.type === 'permission_request'));
@@ -277,7 +417,7 @@ describe('ClaudeCodeAdapter in task mode', () => {
   it('denies without a note in words of its own, since the CLI requires a message', async () => {
     const { spawned, processDeps } = deps([fixture('claude-code', 'permission-task-deny')]);
     const adapter = new ClaudeCodeAdapter(processDeps);
-    await adapter.start(taskStart());
+    await adapter.start(taskIn('default'));
     const events: AgentEvent[] = [];
     void adapter.send('Write d.txt', (e) => events.push(e));
     await until(() => events.some((e) => e.type === 'permission_request'));
@@ -292,7 +432,7 @@ describe('ClaudeCodeAdapter in task mode', () => {
     const noSuggestions = fixture('claude-code', 'permission-task').replace(/,"permission_suggestions":\[[^\]]*\]/, '');
     const { spawned, processDeps } = deps([noSuggestions]);
     const adapter = new ClaudeCodeAdapter(processDeps);
-    await adapter.start(taskStart());
+    await adapter.start(taskIn('default'));
     const events: AgentEvent[] = [];
     void adapter.send('Write a.txt', (e) => events.push(e));
     await until(() => events.some((e) => e.type === 'permission_request'));
@@ -306,7 +446,7 @@ describe('ClaudeCodeAdapter in task mode', () => {
   it('answers each request once, and nothing it never asked', async () => {
     const { spawned, processDeps } = deps([fixture('claude-code', 'permission-task')]);
     const adapter = new ClaudeCodeAdapter(processDeps);
-    await adapter.start(taskStart());
+    await adapter.start(taskIn('default'));
     const events: AgentEvent[] = [];
     void adapter.send('Write a.txt', (e) => events.push(e));
     await until(() => events.some((e) => e.type === 'permission_request'));
@@ -327,7 +467,7 @@ describe('ClaudeCodeAdapter in task mode', () => {
       },
     ]);
     const adapter = new ClaudeCodeAdapter(processDeps);
-    await adapter.start(taskStart());
+    await adapter.start(taskIn('default'));
     const events: AgentEvent[] = [];
     const turn = adapter.send('Write d.txt', (e) => events.push(e));
     await until(() => events.some((e) => e.type === 'permission_request'));

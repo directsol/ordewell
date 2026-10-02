@@ -1,5 +1,6 @@
-import { plannerOnly, type AgentEvent, type AgentStartOptions, type PlannerStartOptions } from './AgentAdapter';
+import type { AgentEvent, AgentStartOptions, TaskModeAgentAdapter } from './AgentAdapter';
 import type { SubagentOutcome } from '../../models/Task';
+import type { ApprovalDecision } from '../../interfaces/IApproval';
 import type { UsageRecord } from '../../models/Usage';
 import { StdioAgentAdapter, type SpawnSpec } from './StdioAgentAdapter';
 import { probeCodexSandbox, codexSandboxUnavailableMessage, type CodexSandboxDecision } from './codexSandbox';
@@ -45,6 +46,8 @@ interface ThreadItem {
   model?: string | null;
   /** `collabAgentToolCall`: threads on the receiving end of the call. */
   receiverThreadIds?: string[];
+  /** `fileChange`: the files the patch touches. */
+  changes?: Array<{ path?: string; diff?: string }>;
   /** `collabAgentToolCall`: last known status of each target thread. */
   agentsStates?: Record<string, { status?: string; message?: string | null } | undefined>;
 }
@@ -113,11 +116,71 @@ const DECLINE_RESULTS: Record<string, Record<string, unknown>> = {
   applyPatchApproval: { decision: 'denied' },
 };
 
-const LANDLOCK_FALLBACK_NOTE = [
-  "Codex's bubblewrap sandbox cannot create user namespaces on this machine, so planning fell back to its legacy Landlock backend.",
-  'Exploration works and writes are still denied, but that backend is deprecated upstream. To fix the host:',
-  '  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0',
-].join('\n');
+/**
+ * The task-mode requests a person can answer (ADR-0018, A1): how each is
+ * named in the timeline, the session-wide grant "Allow for this task" stands
+ * for where the protocol has one, and the answer each decision becomes in the
+ * request's own result schema.
+ */
+interface TaskApproval {
+  name: string;
+  forSession?: Record<string, unknown>;
+  answer(decision: ApprovalDecision['decision'], params: Record<string, unknown>): Record<string, unknown>;
+}
+
+const REVIEW_DECISIONS = { allow: 'accept', allowForTask: 'acceptForSession', deny: 'decline' } as const;
+
+const TASK_APPROVALS: Record<string, TaskApproval> = {
+  'item/commandExecution/requestApproval': {
+    name: 'shell',
+    forSession: { decision: 'acceptForSession' },
+    answer: (decision) => ({ decision: REVIEW_DECISIONS[decision] }),
+  },
+  'item/fileChange/requestApproval': {
+    name: 'file_change',
+    forSession: { decision: 'acceptForSession' },
+    answer: (decision) => ({ decision: REVIEW_DECISIONS[decision] }),
+  },
+  // A denial grants nothing rather than refusing: the schema has no "no".
+  'item/permissions/requestApproval': {
+    name: 'permissions',
+    forSession: { scope: 'session' },
+    answer: (decision, params) => (decision === 'deny'
+      ? { permissions: {}, scope: 'turn' }
+      : { permissions: params.permissions ?? {}, scope: decision === 'allowForTask' ? 'session' : 'turn' }),
+  },
+  // Only the yes-or-no kind reaches here — see `isYesNoElicitation`. MCP has
+  // no session-wide answer.
+  'mcpServer/elicitation/request': {
+    name: 'mcp_elicitation',
+    answer: (decision) => (decision === 'deny' ? { action: 'decline', content: null } : { action: 'accept', content: {} }),
+  },
+};
+
+/**
+ * An elicitation whose form asks for nothing is a yes-or-no question an
+ * approval card can answer. One that asks for fields, or sends the user to a
+ * URL, is a structured question, refused like `requestUserInput`.
+ */
+function isYesNoElicitation(params: Record<string, unknown>): boolean {
+  const schema = params.requestedSchema as { properties?: Record<string, unknown> } | undefined;
+  return params.mode === 'form' && Object.keys(schema?.properties ?? {}).length === 0;
+}
+
+/** Plain-text questions for now (#54): a structured one would wait on a form no surface renders. */
+const ASK_IN_PLAIN_TEXT = 'Ordewell cannot show structured questions. Ask in plain text in your reply instead, then end your turn; the answer arrives as the next message.';
+
+function landlockFallbackNote(role: 'planner' | 'task'): string {
+  return [
+    role === 'task'
+      ? "Codex's bubblewrap sandbox cannot create user namespaces on this machine, so this task runs under its legacy Landlock backend."
+      : "Codex's bubblewrap sandbox cannot create user namespaces on this machine, so planning fell back to its legacy Landlock backend.",
+    role === 'task'
+      ? 'The sandbox still holds, but that backend is deprecated upstream. To fix the host:'
+      : 'Exploration works and writes are still denied, but that backend is deprecated upstream. To fix the host:',
+    '  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0',
+  ].join('\n');
+}
 
 /** Requests worth showing in the timeline: the planner reached for something it may not have. */
 const ANNOUNCED_REQUESTS = new Set([
@@ -128,8 +191,10 @@ const ANNOUNCED_REQUESTS = new Set([
 ]);
 
 /**
- * Codex as a planner, over its `app-server` stdio JSON-RPC transport
- * (ADR-0009).
+ * Codex as a planner (ADR-0009) and as a task's runner (ADR-0018, #54), over
+ * its `app-server` stdio JSON-RPC transport. The start switch decides the
+ * thread's settings and who answers its requests; everything a turn reports
+ * is read the same way for both.
  *
  * Ordewell already speaks a slice of this protocol — `ModelDiscovery` drives
  * `initialize` → `model/list` to build the Codex model catalog — so the
@@ -141,7 +206,7 @@ const ANNOUNCED_REQUESTS = new Set([
  * version that renames them will surface as a visible dead turn rather than a
  * hang, because the base class watches the process as well as the protocol.
  */
-export class CodexAdapter extends StdioAgentAdapter {
+export class CodexAdapter extends StdioAgentAdapter implements TaskModeAgentAdapter {
   readonly agentId = 'codex';
 
   private threadId: string | null = null;
@@ -150,9 +215,31 @@ export class CodexAdapter extends StdioAgentAdapter {
   private nextRequestId = 100;
   private settleHandshake: ((ok: boolean) => void) | null = null;
   private handshakeError: string | null = null;
-  private startOpts: PlannerStartOptions | null = null;
+  private startOpts: AgentStartOptions | null = null;
   /** Whether this turn has already emitted prose — see the `agentMessage` case. */
   private turnHasText = false;
+  /**
+   * The turn in flight. Its id arrives with `turn/started` or the `turn/start`
+   * response, whichever lands first; `turn/interrupt` cannot be sent without it.
+   */
+  private turn: { id: string | null } | null = null;
+  /** The JSON-RPC id of the `turn/start` that opened {@link turn}. */
+  private turnRequestId: number | null = null;
+  /** The last turn this adapter ended — so its second end signal, landing late, ends nothing. */
+  private endedTurnId: string | null = null;
+  /** An interrupt was asked for during this turn, so however it ends, it was cut short. */
+  private interruptRequested = false;
+  /** An interrupt asked for before Codex named the turn, sent once it does. */
+  private interruptOnStart: (() => void) | null = null;
+  /** A task's approval requests still waiting for an answer, by the request id as a string. */
+  private readonly openPermissions = new Map<string, { requestId: number | string; method: string; params: Record<string, unknown> }>();
+  /**
+   * The files each in-flight `fileChange` item touches. Its approval request
+   * names only the item, and a person deciding needs to see the files.
+   */
+  private readonly fileChangePaths = new Map<string, string[]>();
+  /** Requests this adapter sent and awaits an answer to, by JSON-RPC id. */
+  private readonly pendingRequests = new Map<number, (ok: boolean) => void>();
   private resumeAttempted = false;
   private resumeFallbackSent = false;
   private sandbox: CodexSandboxDecision = 'default';
@@ -163,28 +250,25 @@ export class CodexAdapter extends StdioAgentAdapter {
    */
   private readonly subagents = new Map<string, { model?: string }>();
 
-  /** Codex only plans for now (#54): its tasks stay on the terminal transport. */
-  async start(opts: AgentStartOptions): Promise<void> {
-    plannerOnly(this.agentId, opts);
-    await super.start(opts);
-  }
-
   protected spawnSpec(opts: AgentStartOptions): SpawnSpec {
-    this.startOpts = plannerOnly(this.agentId, opts);
+    this.startOpts = opts;
     return { command: 'codex', args: ['app-server'] };
   }
 
   /**
-   * `initialize`, then `thread/start`, both before the first user message. The
-   * thread is pinned to the read-only sandbox with approvals set to `never` —
-   * with nobody watching a planner's prompts, "ask" would mean "hang", which is
-   * ADR-0008's absent-is-denial invariant kept by construction.
+   * `initialize`, then `thread/start`, both before the first user message. A
+   * planner's thread is pinned to the read-only sandbox with approvals set to
+   * `never` — with nobody watching a planner's prompts, "ask" would mean
+   * "hang", which is ADR-0008's absent-is-denial invariant kept by
+   * construction. A task's runs as its mode says (see {@link threadParams}).
    */
   protected async handshake(opts: AgentStartOptions): Promise<void> {
     // Before the protocol, the machine: a Codex whose sandbox cannot start runs
-    // no command and plans from imagination instead of from the repository.
+    // no command and works from imagination instead of from the repository.
     this.sandbox = await probeCodexSandbox(this.deps, opts.cwd, this.spawnEnv);
-    if (this.sandbox === 'unavailable') throw new Error(codexSandboxUnavailableMessage());
+    // A full-access task asks for no sandbox, so a host without one is no reason to refuse it.
+    const needsSandbox = opts.kind === 'planner' || opts.flags.permissionMode !== 'danger-full-access';
+    if (this.sandbox === 'unavailable' && needsSandbox) throw new Error(codexSandboxUnavailableMessage(opts.kind));
 
     const ready = new Promise<boolean>((resolve) => { this.settleHandshake = resolve; });
     this.writeLine({
@@ -207,14 +291,15 @@ export class CodexAdapter extends StdioAgentAdapter {
   }
 
   /**
-   * Open the thread this session plans in. A resume id means the previous
+   * Open this session's thread. A resume id means the previous
    * process died mid-session: `thread/resume` puts the agent back in front of
-   * the context it already paid to read. A failed resume is not an error — the
-   * response handler falls back to a fresh thread, which is the same
-   * degradation `restoreChat` performs on every surface (T4).
+   * the context it already paid to read. A planner's failed resume is not an
+   * error — the response handler falls back to a fresh thread, which is the
+   * same degradation `restoreChat` performs on every surface (T4). A task's
+   * is: Continue (K1) offers the session that did the work, and a fresh thread
+   * in its place would pretend it was resumed.
    */
   private startThread(resumeSessionId?: string): void {
-    const opts = this.startOpts;
     this.resumeAttempted = this.resumeAttempted || !!resumeSessionId;
     this.writeLine({
       jsonrpc: '2.0',
@@ -222,33 +307,117 @@ export class CodexAdapter extends StdioAgentAdapter {
       method: resumeSessionId ? 'thread/resume' : 'thread/start',
       params: {
         ...(resumeSessionId ? { threadId: resumeSessionId } : {}),
-        cwd: opts?.cwd,
-        ...(opts?.model ? { model: opts.model } : {}),
-        sandbox: 'read-only',
-        approvalPolicy: 'never',
-        ...(this.sandbox === 'legacy-landlock'
-          ? { config: { features: { use_legacy_landlock: true } } }
-          : {}),
-        // `developerInstructions` layers on top of Codex's own base prompt, the
-        // way Claude Code's `--append-system-prompt` does. `baseInstructions`
-        // replaces it — which takes Codex's description of its own tools with
-        // it, and a planner that has forgotten it can read the workspace
-        // answers from a web search instead.
-        developerInstructions: opts?.systemPrompt,
+        ...this.threadParams(),
       },
     });
   }
 
-  protected turnPayload(message: string): string {
+  private threadParams(): Record<string, unknown> {
     const opts = this.startOpts;
+    const common = {
+      cwd: opts?.cwd,
+      ...(opts?.model ? { model: opts.model } : {}),
+    };
+    const legacyLandlock = this.sandbox === 'legacy-landlock'
+      ? { config: { features: { use_legacy_landlock: true } } }
+      : {};
+    if (opts?.kind === 'task') {
+      // What the mode means is the manifest's (ADR-0001); this only spells it
+      // in the protocol. No `developerInstructions`: the task prompt is the
+      // first turn, as on the terminal transport.
+      const { approvalPolicy, approvalsReviewer } = opts.flags.modeSettings;
+      return {
+        ...common,
+        sandbox: opts.flags.permissionMode,
+        ...(approvalPolicy ? { approvalPolicy } : {}),
+        ...(approvalsReviewer ? { approvalsReviewer } : {}),
+        ...legacyLandlock,
+      };
+    }
+    return {
+      ...common,
+      sandbox: 'read-only',
+      approvalPolicy: 'never',
+      ...legacyLandlock,
+      // `developerInstructions` layers on top of Codex's own base prompt, the
+      // way Claude Code's `--append-system-prompt` does. `baseInstructions`
+      // replaces it — which takes Codex's description of its own tools with
+      // it, and a planner that has forgotten it can read the workspace
+      // answers from a web search instead.
+      developerInstructions: opts?.systemPrompt,
+    };
+  }
+
+  private effort(): string | undefined {
+    const opts = this.startOpts;
+    return opts?.kind === 'task' ? opts.flags.effort : opts?.effort;
+  }
+
+  /**
+   * `turn/interrupt` names the turn as well as the thread, so an interrupt
+   * asked for before Codex has named the turn waits for it. Codex acknowledges
+   * with an empty result, then ends the turn as `interrupted`.
+   */
+  interrupt(timeoutMs: number): Promise<boolean> {
+    const turn = this.turn;
+    if (!this.process || !turn) return Promise.resolve(false);
+    this.interruptRequested = true;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let requestId: number | null = null;
+      const settle = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (requestId !== null) this.pendingRequests.delete(requestId);
+        if (this.interruptOnStart === send) this.interruptOnStart = null;
+        resolve(ok);
+      };
+      const send = () => {
+        requestId = this.nextRequestId++;
+        this.pendingRequests.set(requestId, settle);
+        this.writeLine({ jsonrpc: '2.0', id: requestId, method: 'turn/interrupt', params: { threadId: this.threadId, turnId: turn.id } });
+      };
+      const timer = setTimeout(() => settle(false), timeoutMs);
+      timer.unref?.();
+      void this.processEnded.then(() => settle(false));
+      if (turn.id) send();
+      else this.interruptOnStart = send;
+    });
+  }
+
+  /**
+   * Answer an open approval in its own result schema. Codex's decline carries
+   * no message, so a deny note reaches the agent as input steered into the
+   * running turn.
+   */
+  answerPermission(id: string, decision: ApprovalDecision): boolean {
+    const open = this.openPermissions.get(id);
+    if (!open || !this.process) return false;
+    this.openPermissions.delete(id);
+    this.writeLine({ jsonrpc: '2.0', id: open.requestId, result: TASK_APPROVALS[open.method].answer(decision.decision, open.params) });
+    const note = decision.decision === 'deny' ? decision.note?.trim() : undefined;
+    if (note && this.turn?.id) {
+      this.writeLine({
+        jsonrpc: '2.0', id: this.nextRequestId++, method: 'turn/steer',
+        params: { threadId: this.threadId, expectedTurnId: this.turn.id, input: [{ type: 'text', text: note }] },
+      });
+    }
+    return true;
+  }
+
+  protected turnPayload(message: string): string {
+    this.turn = { id: null };
+    this.interruptRequested = false;
+    this.turnRequestId = this.nextRequestId++;
     return `${JSON.stringify({
       jsonrpc: '2.0',
-      id: this.nextRequestId++,
+      id: this.turnRequestId,
       method: 'turn/start',
       params: {
         threadId: this.threadId,
         input: [{ type: 'text', text: message }],
-        ...(opts?.effort ? { effort: opts.effort } : {}),
+        ...(this.effort() ? { effort: this.effort() } : {}),
       },
     })}\n`;
   }
@@ -270,12 +439,18 @@ export class CodexAdapter extends StdioAgentAdapter {
     if (msg.id === 2 && !msg.method) {
       const thread = msg.result?.thread as { id?: string } | undefined;
       if (msg.error || !thread?.id) {
+        const reason = msg.error?.message ?? 'no thread id returned';
+        if (this.startOpts?.kind === 'task' && this.resumeAttempted) {
+          this.handshakeError = `Codex could not resume thread ${this.startOpts.resumeSessionId}: ${reason}`;
+          this.settleHandshake?.(false);
+          return;
+        }
         if (this.resumeAttempted && !this.resumeFallbackSent) {
           this.resumeFallbackSent = true;
           this.startThread();
           return;
         }
-        this.handshakeError = `The Codex app-server could not start a thread: ${msg.error?.message ?? 'no thread id returned'}`;
+        this.handshakeError = `The Codex app-server could not start a thread: ${reason}`;
         this.settleHandshake?.(false);
         return;
       }
@@ -287,13 +462,36 @@ export class CodexAdapter extends StdioAgentAdapter {
       return;
     }
 
+    if (!msg.method && typeof msg.id === 'number' && this.pendingRequests.has(msg.id)) {
+      this.pendingRequests.get(msg.id)?.(!msg.error);
+      return;
+    }
+
+    if (msg.id === this.turnRequestId && !msg.method) {
+      if (msg.error) {
+        this.closeTurn();
+        emit({ type: 'error', message: `Codex refused the turn: ${msg.error.message ?? 'unknown error'}` });
+        return;
+      }
+      this.turnStarted((msg.result?.turn as { id?: unknown } | undefined)?.id);
+      return;
+    }
+
     // Every server→client request — one that carries both a method and an id —
     // gets an answer, because an unanswered one stalls the turn forever. That
     // is ADR-0008's absent-is-denial invariant applied to the whole request
     // surface rather than to the three approval methods that happened to be
     // known when this adapter was written.
     if (msg.method && msg.id !== undefined) {
-      this.answerServerRequest(msg, emit);
+      if (msg.method === 'currentTime/read') {
+        // Answered rather than refused: it is not a capability request, and
+        // failing it would break a tool for no reason.
+        this.writeLine({ jsonrpc: '2.0', id: msg.id, result: { currentTimeAt: Math.floor(Date.now() / 1000) } });
+      } else if (this.startOpts?.kind === 'task') {
+        this.openTaskRequest(msg, emit);
+      } else {
+        this.answerServerRequest(msg, emit);
+      }
       return;
     }
 
@@ -331,14 +529,36 @@ export class CodexAdapter extends StdioAgentAdapter {
       // as deltas; the boundary carries none of its own.
       case 'item/reasoning/summaryPartAdded':
         return;
+      // Codex settled a request itself — the turn it belonged to ended, or its
+      // reviewer answered first. One this adapter answered is already closed.
+      case 'serverRequest/resolved': {
+        const id = String(msg.params?.requestId ?? '');
+        if (this.openPermissions.delete(id)) emit({ type: 'permission_cancelled', id });
+        return;
+      }
       case 'thread/tokenUsage/updated':
         this.emitUsage(msg.params as ThreadTokenUsageParams | undefined, emit);
         return;
-      case 'turn/started':
+      case 'turn/started': {
         // A subagent runs its own turn in its own thread; its start must not
         // reset the planner turn's paragraph state.
-        if (!this.subagentOf(msg.params?.threadId)) this.turnHasText = false;
+        if (this.subagentOf(msg.params?.threadId)) return;
+        this.turnHasText = false;
+        const turn = msg.params?.turn as { id?: unknown } | undefined;
+        this.turnStarted(turn?.id ?? msg.params?.turnId);
         return;
+      }
+      // Codex announces a finished turn twice — `turn/completed` and the
+      // thread going idle — in either order, and either may come alone. The
+      // first ends the turn. An idle before the turn has an id is the previous
+      // turn's, arriving late.
+      case 'thread/status/changed': {
+        const params = msg.params as { threadId?: string; status?: { type?: string } } | undefined;
+        if (params?.threadId !== this.threadId || params?.status?.type !== 'idle' || !this.turn?.id) return;
+        this.closeTurn();
+        emit(this.interruptRequested ? { type: 'turn_end', interrupted: true } : { type: 'turn_end' });
+        return;
+      }
       // Codex reports a setup problem once, at startup, and then plans anyway.
       // Surfacing it is enough: the warning is not always fatal, and refusing to
       // plan on an unrecognized one would be worse than showing it.
@@ -351,7 +571,7 @@ export class CodexAdapter extends StdioAgentAdapter {
         // dropping it would hide a host that still needs fixing — Landlock is
         // deprecated upstream, so this is a reprieve, not a repair.
         if (this.sandbox === 'legacy-landlock' && /bubblewrap|user namespace/i.test(text)) {
-          emit({ type: 'thinking', text: LANDLOCK_FALLBACK_NOTE });
+          emit({ type: 'thinking', text: landlockFallbackNote(this.role) });
           return;
         }
         if (text) emit({ type: 'thinking', text: `Codex configuration warning: ${text}` });
@@ -366,6 +586,7 @@ export class CodexAdapter extends StdioAgentAdapter {
         if (this.subagentOf(msg.params?.threadId)) return;
         const failure = msg.params as { error?: { message?: string }; willRetry?: boolean } | undefined;
         if (failure?.willRetry) return;
+        this.closeTurn();
         emit({ type: 'error', message: failure?.error?.message || 'Codex ended the turn with an error.' });
         return;
       }
@@ -374,8 +595,12 @@ export class CodexAdapter extends StdioAgentAdapter {
         // Settling the planner on a child's completion cut the turn short
         // before the planner had read the subagent's report.
         if (this.subagentOf(msg.params?.threadId)) return;
-        const turn = msg.params?.turn as { status?: string; error?: { message?: string } } | undefined;
-        if (turn?.status === 'failed') {
+        const turn = msg.params?.turn as { id?: string; status?: string; error?: { message?: string } } | undefined;
+        if (!this.turn || (turn?.id && turn.id === this.endedTurnId)) return;
+        this.closeTurn();
+        if (this.interruptRequested || turn?.status === 'interrupted') {
+          emit({ type: 'turn_end', interrupted: true });
+        } else if (turn?.status === 'failed') {
           emit({ type: 'error', message: turn.error?.message || 'Codex ended the turn with an error.' });
         } else {
           emit({ type: 'turn_end' });
@@ -387,6 +612,20 @@ export class CodexAdapter extends StdioAgentAdapter {
       default:
         return;
     }
+  }
+
+  private turnStarted(id: unknown): void {
+    if (!this.turn || this.turn.id || typeof id !== 'string') return;
+    this.turn.id = id;
+    const interrupt = this.interruptOnStart;
+    this.interruptOnStart = null;
+    interrupt?.();
+  }
+
+  private closeTurn(): void {
+    this.endedTurnId = this.turn?.id ?? null;
+    this.turn = null;
+    this.interruptOnStart = null;
   }
 
   /**
@@ -437,6 +676,48 @@ export class CodexAdapter extends StdioAgentAdapter {
   }
 
   /**
+   * A task's server→client request. An approval stays open for someone to
+   * answer (ADR-0018, A1); everything else is answered at once, because an
+   * unanswered request stalls the turn forever.
+   */
+  private openTaskRequest(msg: RpcMessage, emit: (e: AgentEvent) => void): void {
+    const method = msg.method!;
+    const params = msg.params ?? {};
+    const approval = TASK_APPROVALS[method];
+    if (approval && (method !== 'mcpServer/elicitation/request' || isYesNoElicitation(params))) {
+      const id = String(msg.id);
+      const input = this.approvalInput(method, params);
+      this.openPermissions.set(id, { requestId: msg.id!, method, params });
+      emit({
+        type: 'permission_request',
+        id,
+        name: approval.name,
+        detail: JSON.stringify(input),
+        input,
+        suggestions: approval.forSession ? [approval.forSession] : [],
+        ...(typeof params.itemId === 'string' ? { toolUseId: params.itemId } : {}),
+      });
+    } else if (method === 'mcpServer/elicitation/request') {
+      this.writeLine({ jsonrpc: '2.0', id: msg.id, result: { action: 'decline', content: null } });
+    } else {
+      this.writeLine({
+        jsonrpc: '2.0',
+        id: msg.id,
+        error: { code: -32601, message: method === 'item/tool/requestUserInput' ? ASK_IN_PLAIN_TEXT : `Ordewell does not handle ${method}.` },
+      });
+    }
+  }
+
+  /** The request as a person sees it, led by the field that says what it is about. */
+  private approvalInput(method: string, params: Record<string, unknown>): Record<string, unknown> {
+    const paths = typeof params.itemId === 'string' ? this.fileChangePaths.get(params.itemId) : undefined;
+    if (method === 'item/fileChange/requestApproval' && paths?.length) return { path: paths.join(', '), ...params };
+    const about = typeof params.reason === 'string' ? params.reason : params.message;
+    if (method !== 'item/commandExecution/requestApproval' && typeof about === 'string') return { description: about, ...params };
+    return params;
+  }
+
+  /**
    * Refuse one server→client request. Requests whose result schema can express
    * a refusal get that payload; everything else — a permission grant, a
    * question for a user who is not watching, a tool call the client is supposed
@@ -448,11 +729,6 @@ export class CodexAdapter extends StdioAgentAdapter {
     const result = DECLINE_RESULTS[method];
     if (result) {
       this.writeLine({ jsonrpc: '2.0', id: msg.id, result });
-    } else if (method === 'currentTime/read') {
-      // Answered rather than refused: it is not a capability request, and
-      // failing it would break a tool for no reason.
-      this.writeLine({ jsonrpc: '2.0', id: msg.id, result: { currentTimeAt: Math.floor(Date.now() / 1000) } });
-      return;
     } else {
       this.writeLine({
         jsonrpc: '2.0',
@@ -485,6 +761,14 @@ export class CodexAdapter extends StdioAgentAdapter {
       case 'webSearch':
         emit({ type: 'tool_call', id: item.id, name: 'web_search', args: { query: item.query }, ...(subagentId ? { subagentId } : {}) });
         return;
+      case 'fileChange': {
+        const paths = (item.changes ?? []).map((change) => change.path).filter((path): path is string => !!path);
+        this.fileChangePaths.set(item.id, paths);
+        if (this.startOpts?.kind === 'task') {
+          emit({ type: 'tool_call', id: item.id, name: 'file_change', args: { path: paths.join(', ') }, ...(subagentId ? { subagentId } : {}) });
+        }
+        return;
+      }
       // Delegation is a tool call like any other: the planner's own call is
       // unparented, and shows in the timeline as the agent tool it really is.
       case 'collabAgentToolCall':
@@ -544,9 +828,15 @@ export class CodexAdapter extends StdioAgentAdapter {
       case 'webSearch':
         emit({ type: 'tool_result', id, name: 'web_search', output: item.query ?? '', success: true, ...(subagentId ? { subagentId } : {}) });
         return;
-      // `fileChange` can only appear if the read-only sandbox was bypassed;
-      // reporting it keeps that visible rather than silent.
       case 'fileChange':
+        this.fileChangePaths.delete(id);
+        if (this.startOpts?.kind === 'task') {
+          const diff = (item.changes ?? []).map((change) => change.diff ?? '').join('\n');
+          emit({ type: 'tool_result', id, name: 'file_change', output: diff, success: item.status === 'completed', ...(subagentId ? { subagentId } : {}) });
+          return;
+        }
+        // A planner's `fileChange` can only appear if the read-only sandbox
+        // was bypassed; reporting it keeps that visible rather than silent.
         emit({ type: 'tool_result', id, name: 'file_change', output: JSON.stringify(item), success: false, ...(subagentId ? { subagentId } : {}) });
         return;
       default:

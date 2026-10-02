@@ -147,6 +147,13 @@ describe('top bar', () => {
     expect(on).toContain('tdd');
   });
 
+  it('names the autonomy level, Full auto or Auto', () => {
+    expect(text({ autonomous: true })).toContain('Full auto');
+    const auto = text({ autonomous: false });
+    expect(auto).toContain('Auto');
+    expect(auto).not.toContain('Full auto');
+  });
+
   it('carries no product name, model, or workspace — those live in the welcome banner', () => {
     const out = screen({ orchestratorModel: 'deepseek/deepseek-v4-flash', workspace: '/home/dev/ordewell-tui' });
     expect(stripAnsi(out[0])).not.toMatch(/Ordewell|ordewell-tui|deepseek/i);

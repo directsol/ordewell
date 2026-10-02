@@ -28,6 +28,14 @@ export interface StructuredRunnerDeps {
 }
 
 
+/**
+ * What the agent does only when it is working — the events that open a turn it
+ * started itself. Anything else arriving between turns (a subagent's report, a
+ * usage line) is the closed turn's tail and must not leave the task "working"
+ * with nothing to end it.
+ */
+const TURN_OPENING_EVENTS = new Set<AgentEvent['type']>(['assistant_text', 'assistant_text_delta', 'thinking', 'thinking_delta', 'tool_call']);
+
 /** The argument that says what a tool call is about: the command, the file, the pattern. */
 const KEY_ARGS: Partial<Record<ResearchToolType, string>> = {
   bash: 'command',
@@ -119,6 +127,13 @@ class PlainTextChannel {
   }
 }
 
+interface OpenTurn {
+  id: number;
+  abort: AbortController;
+  ended: boolean;
+  reason: StructuredTurnEnd;
+}
+
 interface SessionLaunch {
   runner: string;
   deps: AgentProcessDeps;
@@ -145,7 +160,7 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
   private output = '';
   private readonly text: PlainTextChannel;
   private state: 'working' | 'idle' = 'idle';
-  private turn: { id: number; abort: AbortController; ended: boolean } | null = null;
+  private turn: OpenTurn | null = null;
   private turnCount = 0;
   private queue: QueuedTaskMessage[] = [];
   private messageCount = 0;
@@ -263,7 +278,7 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
     return this.interrupting;
   }
 
-  private async interruptTurn(turn: NonNullable<StructuredSession['turn']>, adapter: TaskModeAgentAdapter): Promise<void> {
+  private async interruptTurn(turn: OpenTurn, adapter: TaskModeAgentAdapter): Promise<void> {
     const grace = this.launch.interruptGraceMs;
     const ended = new Promise<void>((resolve) => this.structuredEmitter.once('turnEnd', () => resolve()));
     if (await adapter.interrupt(grace)) {
@@ -283,7 +298,7 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
    * its session in a fresh process, the way the planner restarts from its
    * session id after an abort.
    */
-  private async restartInterrupted(turn: NonNullable<StructuredSession['turn']>): Promise<void> {
+  private async restartInterrupted(turn: OpenTurn): Promise<void> {
     // A continue interrupted before its runner took the session up still
     // resumes that session, never a fresh one.
     const resumeSessionId = this.nativeSessionId() ?? this.launch.startOptions.resumeSessionId;
@@ -313,6 +328,7 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
       adapter.dispose();
       return;
     }
+    adapter.onOutOfTurn?.((event) => this.handleOutOfTurn(adapter, generation, event));
     adapter.onProcessExit((code) => {
       if (generation !== this.generation) return;
       this.lastSessionId = adapter.nativeSessionId() ?? this.lastSessionId;
@@ -321,38 +337,66 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
     });
   }
 
-  private deliver(text: string, messageId?: string): void {
-    const adapter = this.adapter;
-    if (!adapter) return;
+  private openTurn(text: string, messageId?: string): OpenTurn {
     this.turnCount += 1;
-    const turn = { id: this.turnCount, abort: new AbortController(), ended: false };
+    const turn: OpenTurn = { id: this.turnCount, abort: new AbortController(), ended: false, reason: 'completed' };
     this.turn = turn;
     this.state = 'working';
     this.emitEvent({ type: 'turn_start', text, ...(messageId ? { messageId } : {}) });
+    return turn;
+  }
+
+  private deliver(text: string, messageId?: string): void {
+    const adapter = this.adapter;
+    if (!adapter) return;
+    const turn = this.openTurn(text, messageId);
     const generation = this.generation;
-    let reason: StructuredTurnEnd = 'completed';
 
     void adapter.send(text, (event) => {
       if (generation !== this.generation) return;
-      if (event.type === 'turn_end') reason = event.interrupted ? 'interrupted' : 'completed';
-      else if (event.type === 'permission_request') this.openPermission(adapter, event);
-      else if (event.type === 'permission_cancelled') this.cancelPermission(adapter, event.id);
-      else {
-        if (event.type === 'error') reason = 'failed';
-        this.handleEvent(event);
-      }
+      this.route(adapter, turn, event);
     }, turn.abort.signal).catch((err: unknown) => {
-      reason = 'failed';
+      turn.reason = 'failed';
       this.handleEvent({ type: 'error', message: err instanceof Error ? err.message : String(err) });
     }).then(() => {
       this.lastSessionId = adapter.nativeSessionId() ?? this.lastSessionId;
-      if (generation === this.generation) this.endTurn(turn, reason);
+      if (generation === this.generation) this.endTurn(turn, turn.reason);
     });
+  }
+
+  private route(adapter: TaskModeAgentAdapter, turn: OpenTurn | null, event: AgentEvent): void {
+    if (event.type === 'turn_end') {
+      if (turn) turn.reason = event.interrupted ? 'interrupted' : 'completed';
+    } else if (event.type === 'permission_request') this.openPermission(adapter, event);
+    else if (event.type === 'permission_cancelled') this.cancelPermission(adapter, event.id);
+    else {
+      if (event.type === 'error' && turn) turn.reason = 'failed';
+      this.handleEvent(event);
+    }
+  }
+
+  /**
+   * The runner spoke with no message of ours in flight. When it is working — a
+   * turn it opened itself once background work finished — that is a turn of the
+   * task like any other: the state says working, a queued message waits, and its
+   * end settles it. A message with no text in `turn_start` marks it as not ours.
+   */
+  private handleOutOfTurn(adapter: TaskModeAgentAdapter, generation: number, event: AgentEvent): void {
+    if (generation !== this.generation || this.exited) return;
+    let turn = this.turn && !this.turn.ended ? this.turn : null;
+    if (!turn && TURN_OPENING_EVENTS.has(event.type)) turn = this.openTurn('');
+    this.route(adapter, turn, event);
+    if (turn && (event.type === 'turn_end' || event.type === 'error')) this.endTurn(turn, turn.reason);
   }
 
   private openPermission(adapter: TaskModeAgentAdapter, event: Extract<AgentEvent, { type: 'permission_request' }>): void {
     this.permissionCount += 1;
     const id = `${this.id}-perm-${this.permissionCount}`;
+    if (event.decided) {
+      this.emitEvent({ ...event, id });
+      this.emitEvent({ type: 'permission_decided', id, decision: event.decided });
+      return;
+    }
     this.permissions.set(id, { requestId: event.id, adapter });
     this.emitEvent({ ...event, id });
   }
@@ -382,7 +426,7 @@ export class StructuredSession extends AbstractTerminalSession implements Struct
    * through `idle` on the way, so a listener told the turn ended can already
    * see the task is not waiting.
    */
-  private endTurn(turn: NonNullable<StructuredSession['turn']>, reason: StructuredTurnEnd): void {
+  private endTurn(turn: OpenTurn, reason: StructuredTurnEnd): void {
     if (turn.ended) return;
     turn.ended = true;
     this.text.endTurn();

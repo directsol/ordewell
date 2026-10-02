@@ -59,6 +59,16 @@ export interface PluginFeatures {
   thinkingValueAdaptive?: string;
   /** Maps mode IDs to the CLI --permission-mode value. Used by {{feature:permissionModeVal}}. */
   permissionModeValues?: Record<string, string>;
+  /**
+   * Further per-mode settings for runners whose permission story has more than
+   * one axis (Codex: sandbox, approval policy, approvals reviewer). Keyed by
+   * setting name, then by mode id; a mode a map does not name leaves that
+   * setting to the runner's own default. Codex declares `approvalPolicy`
+   * (`-a` / `approval_policy`) and `approvalsReviewer` (`approvals_reviewer`);
+   * the terminal template reads them too, through `{{feature:approvalPolicyVal}}`
+   * and the `*Config` tokens.
+   */
+  modeSettings?: Record<string, Record<string, string>>;
 }
 
 export type PluginParser = 'claude-help' | 'opencode-models' | 'opencode-models-verbose' | 'anthropic-models' | 'line-by-line' | 'json' | 'json-table';

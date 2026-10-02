@@ -3,8 +3,10 @@ import { StructuredRunner } from '../StructuredRunner';
 import type { RunnerSpawnOptions } from '../AbstractRunner';
 import { HeadlessSession } from '../HeadlessRunner';
 import { RunnerRegistry } from '../../plugins/RunnerRegistry';
+import { CLAUDE_CODE_MANIFEST } from '../../plugins/builtin/claude-code.manifest';
 import { isStructuredSession, type ITerminalSession, type StructuredEvent, type StructuredTurnEnd } from '../../interfaces/ITerminalRunner';
-import { TaskModeUnsupportedError } from '../harness/AgentAdapter';
+import { TaskModeUnsupportedError, type AgentEvent, type AgentStartOptions, type TaskModeAgentAdapter } from '../harness/AgentAdapter';
+import { ClaudeCodeAdapter } from '../harness/ClaudeCodeAdapter';
 import type { SpawnFn } from '../HeadlessRunner';
 import { fakeSpawn, fixture, type FakeSpawnResult, type ScriptedReply } from './harnessTestKit';
 
@@ -91,6 +93,51 @@ async function firstTurn(spawned: FakeSpawnResult): Promise<void> {
   await until(() => (spawned.processes[0]?.written.length ?? 0) > 0);
 }
 
+describe('StructuredRunner out-of-turn output', () => {
+  // The turn that follows a background task, recorded from `claude` 2.1.286, which the CLI
+  // opens by itself with no user message behind it.
+  const wakeTurn = fixture('claude-code', 'task-background').split('\n').slice(
+    fixture('claude-code', 'task-background').split('\n').findIndex((line) => line.includes('"task_notification"')) + 1,
+  ).join('\n');
+
+  it('shows a turn the runner starts on its own as a turn of the task, and keeps the task working until it ends', async () => {
+    const { runner, spawned } = harness([fixture('claude-code', 'task-marker')]);
+    const seen = observe(await runner.spawn(options()));
+    await seen.nextTurnEnd();
+    expect(seen.session.turnState()).toBe('idle');
+
+    const ended = seen.nextTurnEnd();
+    spawned.processes[0].emitStdout(wakeTurn);
+    await ended;
+
+    expect(seen.turnEnds).toEqual(['completed', 'completed']);
+    expect(seen.statesAtTurnEnd).toEqual(['idle', 'idle']);
+    expect(seen.chunks.join('')).toContain('FINISHED');
+    const starts = seen.events.filter((e) => e.type === 'turn_start');
+    expect(starts).toHaveLength(2);
+    expect(starts[1]).toMatchObject({ text: '' });
+    seen.session.kill();
+  });
+
+  it('queues a message sent while such a turn runs, and delivers it when the turn ends', async () => {
+    const { runner, spawned } = harness([fixture('claude-code', 'task-marker'), fixture('claude-code', 'task-marker')]);
+    const seen = observe(await runner.spawn(options()));
+    await seen.nextTurnEnd();
+
+    const lines = wakeTurn.split('\n').filter(Boolean);
+    const result = lines.pop()!;
+    spawned.processes[0].emitStdout(`${lines.join('\n')}\n`);
+    await until(() => seen.session.turnState() === 'working');
+    seen.session.sendMessage('and then?');
+    expect(seen.session.queued().map((m) => m.text)).toEqual(['and then?']);
+
+    spawned.processes[0].emitStdout(`${result}\n`);
+    await until(() => userTurns(spawned.processes[0].written).includes('and then?'));
+    expect(seen.session.queued()).toEqual([]);
+    seen.session.kill();
+  });
+});
+
 describe('StructuredRunner spawn', () => {
   it.each([
     ['default', 'default'],
@@ -104,7 +151,8 @@ describe('StructuredRunner spawn', () => {
     const session = await runner.spawn(options({ mode }));
     const args = spawned.lastArgs();
     expect(args[args.indexOf('--permission-mode') + 1]).toBe(expected);
-    expect(args).not.toContain('--disallowedTools');
+    // Only the question tool: a task keeps every other tool its mode allows.
+    expect(args[args.indexOf('--disallowedTools') + 1]).toBe('AskUserQuestion');
     expect(args).not.toContain('--append-system-prompt');
     expect(args).not.toContain('--dangerously-skip-permissions');
     session.kill();
@@ -121,6 +169,7 @@ describe('StructuredRunner spawn', () => {
       '--include-partial-messages',
       '--permission-prompt-tool', 'stdio',
       '--permission-mode', 'acceptEdits',
+      '--disallowedTools', 'AskUserQuestion',
       '--thinking', 'enabled', '--effort', 'high',
       '--model', 'sonnet',
       '--resume', 'sess-prev',
@@ -137,9 +186,33 @@ describe('StructuredRunner spawn', () => {
     const { runner, spawned } = harness([]);
     const session = await runner.spawn(options({ thinkingEffort, modelId }));
     const args = spawned.lastArgs();
-    const from = args.indexOf('--permission-mode') + 2;
+    const from = args.indexOf('--disallowedTools') + 2;
     const to = modelId ? args.indexOf('--model') : args.length;
     expect(args.slice(from, to)).toEqual(expected);
+    session.kill();
+  });
+
+  it.each([
+    ['claude-code', 'acceptEdits', 'sonnet', 'high', { permissionMode: 'acceptEdits', effort: 'high', modeSettings: {} }],
+    // Runner-neutral: a Codex task gets its sandbox value and the raw effort, never Claude's thinking flags.
+    ['codex', 'agent', 'gpt-5.5', 'high', { permissionMode: 'workspace-write', effort: 'high', modeSettings: { approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' } }],
+    ['claude-code', 'default', undefined, 'max', { permissionMode: 'default', modeSettings: {} }],
+  ])('hands the %s adapter the manifest\'s flags for mode %s, model %s, effort %s', async (runnerId, mode, modelId, thinkingEffort, flags) => {
+    const starts: AgentStartOptions[] = [];
+    class Recording extends ClaudeCodeAdapter {
+      override start(opts: AgentStartOptions): Promise<void> {
+        starts.push(opts);
+        return super.start(opts);
+      }
+    }
+    const runner = new StructuredRunner({
+      process: { spawn: fakeSpawn([]).spawn, resolvePath: async () => '/usr/bin', platform: 'linux', isDirectory: () => true, exists: () => true },
+      createAdapter: (_runner, deps) => new Recording(deps),
+    });
+    const session = await runner.spawn(options({ runner: runnerId, mode, modelId, thinkingEffort }));
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({ kind: 'task', mode, model: modelId });
+    expect(starts[0].kind === 'task' && starts[0].flags).toEqual(flags);
     session.kill();
   });
 
@@ -156,7 +229,12 @@ describe('StructuredRunner spawn', () => {
 
   it('refuses a runner without a task-mode connector', async () => {
     const { runner, spawned } = harness([]);
-    await expect(runner.spawn(options({ runner: 'codex' }))).rejects.toBeInstanceOf(TaskModeUnsupportedError);
+    const withPlugin = new class extends RunnerRegistry {
+      override get(id: string) {
+        return id === 'my-plugin' ? { manifest: { ...CLAUDE_CODE_MANIFEST, name: 'my-plugin' }, source: 'user' as const } : super.get(id);
+      }
+    }();
+    await expect(runner.spawn(options({ runner: 'my-plugin', registry: withPlugin }))).rejects.toBeInstanceOf(TaskModeUnsupportedError);
     expect(spawned.processes).toHaveLength(0);
     expect(runner.activeCount).toBe(0);
   });
@@ -197,8 +275,9 @@ describe('StructuredSession output', () => {
   });
 
   it('leaves subagent work out of the plain text, but not out of the events', async () => {
+    // Recorded under plan mode, which the adapter holds the CLI to.
     const { runner } = harness([fixture('claude-code', 'stream-subagent')]);
-    const turn = observe(await runner.spawn(options()));
+    const turn = observe(await runner.spawn(options({ mode: 'plan' })));
     await turn.nextTurnEnd();
     const output = turn.session.getOutput();
     expect(output).toContain('› Agent(Read README first line)');
@@ -238,6 +317,34 @@ describe('StructuredSession output', () => {
     const answer = JSON.parse(spawned.processes[0].written[1]) as { response: { request_id: string } };
     expect(answer.response.request_id).toBe('9a948184-6792-4049-85b1-3e837387f618');
     expect(turn.session.answerPermission(id, { decision: 'deny' })).toBe(false);
+    turn.session.kill();
+  });
+
+  it('shows a request the task\'s mode already answered as asked and decided, with nothing left open', async () => {
+    const answered: string[] = [];
+    const decided: AgentEvent = { type: 'permission_request', id: 'per_1', name: 'bash', detail: '{}', decided: { decision: 'allow' } };
+    const adapter: TaskModeAgentAdapter = {
+      agentId: 'opencode',
+      start: async () => {},
+      send: async (_message, onEvent) => { onEvent(decided); onEvent({ type: 'turn_end' }); },
+      nativeSessionId: () => null,
+      dispose: () => {},
+      interrupt: async () => true,
+      onProcessExit: () => {},
+      answerPermission: (id) => { answered.push(id); return true; },
+    };
+    const runner = new StructuredRunner({ createAdapter: () => adapter });
+    const turn = observe(await runner.spawn(options({ runner: 'opencode', mode: 'build' })));
+    await turn.nextTurnEnd();
+
+    const id = `${turn.session.id}-perm-1`;
+    const permissionEvents = turn.events.filter((e) => e.type.startsWith('permission_'));
+    expect(permissionEvents).toEqual([
+      { ...decided, id },
+      { type: 'permission_decided', id, decision: { decision: 'allow' } },
+    ]);
+    expect(turn.session.answerPermission(id, { decision: 'deny' })).toBe(false);
+    expect(answered).toEqual([]);
     turn.session.kill();
   });
 

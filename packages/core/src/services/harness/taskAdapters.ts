@@ -1,13 +1,13 @@
 import { TaskModeUnsupportedError, type AgentProcessDeps, type TaskModeAgentAdapter } from './AgentAdapter';
 import { ClaudeCodeAdapter } from './ClaudeCodeAdapter';
+import { CodexAdapter } from './CodexAdapter';
+import { OpenCodeAdapter } from './OpenCodeAdapter';
 
-/**
- * The runners with a task-mode connector (ADR-0018, S3). Codex (#54) and
- * OpenCode (#55) join when their adapters learn task mode; until then their
- * adapters refuse it and their tasks run on the terminal transport.
- */
+/** The runners with a task-mode connector (ADR-0018, S3). */
 const TASK_MODE_ADAPTERS: Record<string, (deps: AgentProcessDeps) => TaskModeAgentAdapter> = {
   'claude-code': (deps) => new ClaudeCodeAdapter(deps),
+  codex: (deps) => new CodexAdapter(deps),
+  opencode: (deps) => new OpenCodeAdapter(deps),
 };
 
 /** Whether a runner's tasks can run on the structured transport. */

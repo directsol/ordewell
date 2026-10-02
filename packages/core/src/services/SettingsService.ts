@@ -15,8 +15,8 @@ export interface UserSettings {
    */
   enabledRunners?: string[];
   /**
-   * How tasks' runners are driven (ADR-0018). Experimental; a run copies it
-   * onto its plan when it starts, so a change applies from the next run.
+   * How tasks' runners are driven (ADR-0018). A run copies it onto its plan
+   * when it starts, so a change applies from the next run.
    */
   runnerTransport: RunnerTransport;
 }
@@ -24,7 +24,7 @@ export interface UserSettings {
 const DEFAULTS: UserSettings = {
   tdd: { enabled: true },
   verification: { enabled: false },
-  runnerTransport: 'terminal',
+  runnerTransport: 'structured',
 };
 
 /**
@@ -67,6 +67,12 @@ export class SettingsService {
   private filePath: string;
   private cache: UserSettings | null = null;
   private cachedMtimeMs: number | null = null;
+  /**
+   * Whether the transport on disk (or just set) is the user's own choice.
+   * Writing the default back out would turn it into one, and a later change of
+   * default would then never reach this user.
+   */
+  private transportChosen = false;
 
   constructor(filePath: string = getSettingsPath()) {
     this.filePath = filePath;
@@ -119,6 +125,7 @@ export class SettingsService {
   setRunnerTransport(transport: RunnerTransport): void {
     this.getAll();
     this.cache!.runnerTransport = transport;
+    this.transportChosen = true;
     this.persist();
   }
 
@@ -182,9 +189,11 @@ export class SettingsService {
     // A pre-`.ordewell` install keeps its toggles in the old config dir; lift
     // them once before reading so the first read already sees the moved file.
     migrateOldConfigDir();
+    this.transportChosen = false;
     try {
       if (fs.existsSync(this.filePath)) {
         const raw = JSON.parse(fs.readFileSync(this.filePath, 'utf-8'));
+        this.transportChosen = isRunnerTransport(raw.runnerTransport);
         const settings: UserSettings = {
           tdd: { enabled: raw.tdd?.enabled ?? DEFAULTS.tdd.enabled },
           verification: { enabled: raw.verification?.enabled ?? DEFAULTS.verification.enabled },
@@ -213,7 +222,9 @@ export class SettingsService {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    fs.writeFileSync(this.filePath, JSON.stringify(this.cache, null, 2));
+    const { runnerTransport, ...rest } = this.cache!;
+    const out = this.transportChosen ? { ...rest, runnerTransport } : rest;
+    fs.writeFileSync(this.filePath, JSON.stringify(out, null, 2));
     this.cachedMtimeMs = this.fileMtimeMs();
   }
 }

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { describe, it, expect } from 'vitest';
@@ -15,12 +15,19 @@ import { isStructuredSession, type ITerminalSession, type StructuredTurnEnd } fr
  *
  * It runs in a throwaway directory under `acceptEdits`, on the cheapest model
  * unless ORDEWELL_LIVE_MODEL says otherwise. What it asserts is the transport:
- * the marker reaches `onOutput` whole, a tool call becomes one line, and a
- * soft interrupt ends the turn without ending the task.
+ * the marker reaches `onOutput` whole, a tool call becomes one line, a soft
+ * interrupt ends the turn without ending the task, and a turn is not closed
+ * while background work is still running.
+ *
+ * The `auto` case needs a model and an account the CLI offers auto mode on. If
+ * it refuses, the case is skipped with the CLI's own words — the mode is never
+ * swapped for another one (ADR-0001).
  */
 
 const live = (process.env.ORDEWELL_LIVE_AGENTS ?? '').split(',').map((s) => s.trim()).includes('claude-code');
 const model = process.env.ORDEWELL_LIVE_MODEL ?? 'haiku';
+// Haiku does not offer auto mode: the CLI starts in `default` and says nothing.
+const autoModel = process.env.ORDEWELL_LIVE_AUTO_MODEL ?? model;
 const TIMEOUT_MS = 180_000;
 
 function turnEnds(session: ITerminalSession) {
@@ -67,6 +74,72 @@ describe.runIf(live)('structured transport — live smoke', () => {
       session.kill();
       await new Promise((resolve) => setTimeout(resolve, 200));
       expect(exits).toHaveLength(1);
+    } finally {
+      runner.stopAll();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, TIMEOUT_MS);
+
+  it('keeps the turn open while background work runs, and reports a marker said after it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ordewell-structured-'));
+    const runner = new StructuredRunner();
+    const marker = '<<<ORDEWELL_DONE_live-background>>>';
+    try {
+      const startedAt = Date.now();
+      const session = await runner.spawn({
+        taskId: 'live-background',
+        runner: 'claude-code',
+        prompt: 'Start `sleep 20 && echo BG-DONE` as a background shell with the Bash tool (run_in_background). Wait for it to finish and read its output. Only then print one final line containing only the completion marker. Build it by writing `<<<ORDEWELL_` immediately followed by `DONE_live-background>>>` with nothing between the two parts.',
+        modelId: model,
+        mode: 'acceptEdits',
+        cwd: dir,
+        registry: new RunnerRegistry(),
+      });
+      const turns = turnEnds(session);
+      const chunks: string[] = [];
+      session.onOutput((text) => chunks.push(text));
+
+      await turns.next();
+      // Long enough that the 20s sleep, not a quick reply, is what held it.
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(15_000);
+      expect(chunks.some((chunk) => chunk.includes(marker)), session.getOutput()).toBe(true);
+      // Nothing straggles in after the turn, and no second turn ends.
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      expect(turns.ends).toEqual(['completed']);
+      expect(chunks.filter((chunk) => chunk.includes(marker))).toHaveLength(1);
+    } finally {
+      runner.stopAll();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, TIMEOUT_MS);
+
+  it('runs a task under auto mode, or skips with the reason the run gave', async (ctx) => {
+    const dir = mkdtempSync(join(tmpdir(), 'ordewell-structured-'));
+    const runner = new StructuredRunner();
+    const marker = '<<<ORDEWELL_DONE_live-auto>>>';
+    try {
+      const session = await runner.spawn({
+        taskId: 'live-auto',
+        runner: 'claude-code',
+        prompt: 'Write a file named hello.txt containing the single word hello. Then print one final line containing only the completion marker. Build it by writing `<<<ORDEWELL_` immediately followed by `DONE_live-auto>>>` with nothing between the two parts.',
+        modelId: autoModel,
+        mode: 'auto',
+        cwd: dir,
+        registry: new RunnerRegistry(),
+      });
+      const turns = turnEnds(session);
+      const exited = new Promise<number>((resolve) => session.onExit(resolve));
+      const outcome = await Promise.race([turns.next().then(() => 'turn' as const), exited.then(() => 'exit' as const)]);
+
+      if (outcome === 'exit' || turns.ends[0] === 'failed') {
+        console.warn(`[live] auto mode on ${autoModel} skipped: ${session.getOutput().trim()}`);
+        ctx.skip();
+        return;
+      }
+      expect(turns.ends).toEqual(['completed']);
+      expect(session.getOutput(), session.getOutput()).toContain(marker);
+      expect(existsSync(join(dir, 'hello.txt'))).toBe(true);
+      expect(readFileSync(join(dir, 'hello.txt'), 'utf8')).toContain('hello');
     } finally {
       runner.stopAll();
       rmSync(dir, { recursive: true, force: true });

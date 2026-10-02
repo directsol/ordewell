@@ -30,11 +30,8 @@ function spawnOptions(overrides: Partial<RunnerSpawnOptions> = {}): RunnerSpawnO
 describe('routeTransport', () => {
   it('runs a structured request on the structured transport when the runner has a connector', () => {
     expect(routeTransport('structured', 'claude-code', registry)).toEqual({ transport: 'structured' });
-  });
-
-  it('falls back to the terminal for a runner without one, naming it', () => {
-    expect(routeTransport('structured', 'codex', registry)).toEqual({ transport: 'terminal', fallback: 'no structured connector for Codex yet' });
-    expect(routeTransport('structured', 'opencode', registry)).toEqual({ transport: 'terminal', fallback: 'no structured connector for OpenCode yet' });
+    expect(routeTransport('structured', 'codex', registry)).toEqual({ transport: 'structured' });
+    expect(routeTransport('structured', 'opencode', registry)).toEqual({ transport: 'structured' });
   });
 
   it('names an unregistered runner by its id', () => {
@@ -67,7 +64,7 @@ describe('TransportRouter', () => {
 
   it('falls back to the terminal runner for a runner with no connector', async () => {
     const { router, terminal, structured } = routed();
-    const session = await router.spawn(spawnOptions({ runner: 'codex', transport: 'structured' }));
+    const session = await router.spawn(spawnOptions({ runner: 'my-plugin', transport: 'structured' }));
 
     expect(session.id).toBe('term-1');
     expect(terminal.spawn).toHaveBeenCalledOnce();
@@ -77,7 +74,7 @@ describe('TransportRouter', () => {
   it('stops each session on the runner that spawned it', async () => {
     const { router, terminal, structured } = routed();
     const s = await router.spawn(spawnOptions({ transport: 'structured' }));
-    const t = await router.spawn(spawnOptions({ taskId: 't2', runner: 'codex', transport: 'structured' }));
+    const t = await router.spawn(spawnOptions({ taskId: 't2', runner: 'my-plugin', transport: 'structured' }));
 
     router.stop(s.id);
     router.stop(t.id);

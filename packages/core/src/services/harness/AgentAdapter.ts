@@ -57,8 +57,10 @@ export type AgentEvent =
    *
    * `input` and `suggestions` are the raw request; `suggestions` are the
    * agent's own session-scoped grants, what "Allow for this task" answers with.
+   * `decided` marks a request the task's mode already answered — the adapter
+   * replied as the manifest says that mode does — so it is shown, never asked.
    */
-  | { type: 'permission_request'; id: string; name: string; detail: string; input?: Record<string, unknown>; suggestions?: unknown[]; toolUseId?: string }
+  | { type: 'permission_request'; id: string; name: string; detail: string; input?: Record<string, unknown>; suggestions?: unknown[]; toolUseId?: string; decided?: ApprovalDecision }
   /** The agent withdrew an open request — an interrupt cancels the call it was for. It takes no answer now. */
   | { type: 'permission_cancelled'; id: string }
   /**
@@ -108,8 +110,10 @@ export interface PlannerStartOptions extends AgentStartCommon {
 export interface TaskRunnerFlags {
   /** The runner's own permission-mode value for the task's mode. */
   permissionMode: string;
-  /** Thinking/effort arguments, already split into argv entries. */
-  effortArgs: string[];
+  /** The task's raw effort id, present only alongside a model. Each adapter maps it to its own protocol. */
+  effort?: string;
+  /** The manifest's further settings for the task's mode, by setting name — see `PluginFeatures.modeSettings`. */
+  modeSettings: Record<string, string>;
 }
 
 /** A plan task driven over the runner's programmatic protocol (ADR-0018, C1). */
@@ -133,12 +137,6 @@ export class TaskModeUnsupportedError extends Error {
     super(`${runner} has no structured task connector yet; its tasks run on the terminal transport.`);
     this.name = 'TaskModeUnsupportedError';
   }
-}
-
-/** Narrow a start to the planner, refusing task mode for adapters that only plan. */
-export function plannerOnly(runner: string, opts: AgentStartOptions): PlannerStartOptions {
-  if (opts.kind !== 'planner') throw new TaskModeUnsupportedError(runner);
-  return opts;
 }
 
 export interface AgentAdapter {
@@ -179,6 +177,13 @@ export interface TaskModeAgentAdapter extends AgentAdapter {
    * within `timeoutMs`, and the caller must fall back to killing it.
    */
   interrupt(timeoutMs: number): Promise<boolean>;
+  /**
+   * Registers the listener for what the agent does after a turn has ended and
+   * before the next message — a turn it opens itself when background work
+   * finishes, most often. Without one that output is dropped, which is right
+   * for a planner and wrong for a task, whose marker may be said there.
+   */
+  onOutOfTurn?(listener: (event: AgentEvent) => void): void;
   /** Registers a listener for the process ending, for any reason. Fires at most once. */
   onProcessExit(listener: (code: number) => void): void;
   /**

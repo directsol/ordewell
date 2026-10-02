@@ -70,8 +70,9 @@ function makeProcess(): FakeAgentProcess {
     written: { get: () => written },
     killed: { get: () => killed },
     stdinEnded: { get: () => stdinEnded },
+    // An emitter, as a real pipe is: an `error` on it with no listener throws.
     stdin: {
-      value: {
+      value: Object.assign(new EventEmitter(), {
         write(chunk: string) {
           written.push(chunk);
           // Deliver asynchronously: a real CLI never answers inside the same
@@ -81,7 +82,7 @@ function makeProcess(): FakeAgentProcess {
           return true;
         },
         end() { stdinEnded = true; },
-      },
+      }),
       writable: false,
     },
     kill: {

@@ -355,10 +355,12 @@ invocation flow through the `RunnerRegistry` + manifest engine.
 a task's runner (ADR-0018). *Terminal*: a TUI in tmux, or a headless one-shot
 process, read through its screen and written to with keystrokes (ADR-0007).
 *Structured*: the runner's programmatic protocol, with events in and messages
-out. An opt-in, experimental setting, default `terminal`, copied onto the plan
-when a run starts, so a change applies from the next run. Routed per task by
-connector availability: a runner with no task-mode connector runs on the
-terminal transport, and surfaces say so and why.
+out. A setting, default `structured` (`/transport terminal` goes back), copied
+onto the plan when a run starts, so a change applies from the next run. Routed
+per task by connector availability: a runner with no task-mode connector runs
+on the terminal transport, and surfaces say so and why. tmux is needed only by
+the terminal transport, to give a task a terminal window; without it those
+tasks run headless and the first one says what is missing.
 *Avoid:* "mode" (that is permission mode, ADR-0001), "backend", "provider".
 
 **Waiting for input** — a structured task whose turn ended without the done
@@ -371,7 +373,8 @@ approval" is derived from the task's pending approvals.
 "paused", "blocked" (a dependency term).
 
 **Continue** — a retry of a completed or failed structured task that resumes
-its saved Claude session (`--resume`) with the user's message as the next turn.
+its saved runner session (Claude's `--resume`, Codex's `thread/resume`) with
+the user's message as the next turn.
 It is verified and landed like any attempt, is not offered on conflicts, and
 leaves dependents alone, as retry does. `continuability` is the one rule, and
 a status carries only whether it holds (`continuable`), never the session id.
@@ -405,7 +408,10 @@ runner's own session-scoped grant, offered only when it proposed one) and
 whole decision from any answerer, a person or later the supervisor (#28). The
 task stays `in_progress`: "waiting for approval" is derived from its pending
 requests. Cancel, stop and retry deny them before the runner goes; one the
-runner cancels itself, or whose process ends, is *withdrawn*.
+runner cancels itself, or whose process ends, is *withdrawn*. A mode whose
+manifest sets `approvals: auto` (OpenCode's `build`, the structured `--auto`)
+answers its own requests: they are logged as requested and decided, never
+carded.
 *Avoid:* "permission prompt" for Ordewell's side (that is Claude's protocol),
 and "awaiting approval" as a task status.
 
@@ -964,13 +970,19 @@ keep the two surfaces from diverging.
 **ModeResolver** — the deep module owning ADR-0001 mode resolution: the
 planner-nudged, parser-validated policy that picks each AI task's runner mode
 (`build`/`acceptEdits`/`plan`/…) from manifest `autonomous`/`safe` tags and the
-global autonomous toggle. Three operations behind one interface:
+global autonomy toggle — two named levels, **Full auto** (the `autonomous`-tagged
+mode, today's ON) and **Auto** (the `safe`-tagged mode, today's OFF), carried as
+the boolean `autonomousMode` (`autonomousDefault`, TUI `autonomous`) and named for
+users by `autonomyLevelLabel`; `/auto full|auto` selects one, with `on`/`off` as
+aliases (`parseAutonomyLevel`). Three operations behind one interface:
 `resolveDefaultMode` (tag-based default per toggle), `buildModeGuide` (the
 mode list the planner's prompt shows, DEFAULT-tagged, opposite-toggle modes
 hidden), and `resolveTaskMode` (the parser's validator — fixes invalid or
 toggle-conflicting emissions, never overrides a valid `plan`). The policy is
 planner-nudged, never runtime-overridden; what the plan says is what runs.
-*Avoid:* "mode service", "mode manager" — and do not confuse with
+*Avoid:* "mode service", "mode manager", "auto mode" for either level — Claude Code
+has a real `auto` permission mode (its classifier), which is Ordewell's *Auto*
+level on that runner, not a synonym for Full auto — and do not confuse with
 **ModelResolver** (model discovery/routing). The names differ by one letter on
 purpose: ModeResolver resolves *runner modes*; ModelResolver resolves *models*.
 *Avoid:* "the parser" for this policy — it lives in `ModeResolver.ts`, not the
@@ -1408,9 +1420,10 @@ workspace and the subscription.
 which was the last one left, in `ModelDiscovery`'s Codex app-server probe.
 
 **Platform support** — the VS Code extension and the local daemon run on Linux,
-macOS, and native Windows. The **TUI does not run on Windows**: it is tmux-backed
-(ADR-0007) and `hasTmux` feature-detects rather than assuming, so WSL is the
-answer there. Three things about Windows are explicitly unverified rather than
+macOS, and native Windows. The **TUI is not verified on Windows**: its per-task
+terminal windows are tmux-backed (ADR-0007) and `hasTmux` feature-detects
+rather than assuming. tmux is optional now that structured is the default
+(ADR-0018), but WSL remains the supported answer for the TUI. Three things about Windows are explicitly unverified rather than
 claimed — Codex's read-only sandbox enforcement, `%VAR%` expansion on the
 cmd.exe shim route, and argument fidelity on the PowerShell shim route. See
 ADR-0010.
