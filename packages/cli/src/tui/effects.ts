@@ -309,7 +309,14 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
       return;
     }
 
+    // A task with a saved log ran structured, whatever its `transport` says
+    // after a reload; it has no tmux window, so open the log rather than fail.
     case 'openTaskTerminal': {
+      const saved = await api.getTaskLogAttempts(effect.sessionId, effect.taskId, workspace).catch(() => []);
+      if (saved.length > 0) {
+        dispatch({ type: 'taskViewRequested', sessionId: effect.sessionId, taskId: effect.taskId });
+        return;
+      }
       const result = await deps.openTerminal(effect.sessionId, effect.taskId);
       dispatch(result.ok ? { type: 'notice', message: result.message } : { type: 'failed', message: result.message });
       return;

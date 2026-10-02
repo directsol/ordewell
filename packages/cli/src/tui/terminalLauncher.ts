@@ -77,7 +77,7 @@ export async function openTaskTerminal(
 
   const window = latestAttempt(windows, base);
   if (!window) {
-    return { ok: false, message: "This task hasn't opened a terminal yet — it may still be pending." };
+    return { ok: false, message: "This task has no live terminal and no saved log — it may still be pending." };
   }
 
   const manualHint = `tmux -L ${socket} attach -t ${session}:${window}`;

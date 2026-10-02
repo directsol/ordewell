@@ -35,7 +35,7 @@ describe('openTaskTerminal', () => {
     const result = await open(d);
 
     expect(result.ok).toBe(false);
-    expect(result.message).toMatch(/hasn't/i);
+    expect(result.message).toMatch(/no live terminal/i);
     expect(d.spawnImpl).not.toHaveBeenCalled();
   });
 
@@ -52,7 +52,7 @@ describe('openTaskTerminal', () => {
     const result = await open(d);
 
     expect(result.ok).toBe(false);
-    expect(result.message).toMatch(/hasn't/i);
+    expect(result.message).toMatch(/no live terminal/i);
   });
 
   it('attaches to the latest attempt after retries opened fresh windows', async () => {

@@ -101,6 +101,8 @@ export type Action =
   | { type: 'taskLog'; taskId: string; attempt: number; events: TaskLogEvent[]; sessionId?: string }
   /** A structured task's saved log, read when its view opens or an attempt is switched to. `attempts` is omitted when a switch already knows the list. */
   | { type: 'taskLogLoaded'; taskId: string; attempts?: number[]; attempt: number; events: TaskLogEvent[]; sessionId?: string }
+  /** A task whose terminal does not exist but whose saved log does: show the log instead. */
+  | { type: 'taskViewRequested'; taskId: string; sessionId: string }
   | { type: 'taskStarted'; taskId: string; title: string; runner?: string; sessionId?: string }
   | { type: 'taskStatus'; taskId: string; status: string; sessionId?: string }
   | { type: 'tasksStatus'; updates: Record<string, TaskStatusUpdate>; sessionId?: string }

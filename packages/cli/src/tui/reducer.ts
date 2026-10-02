@@ -10,7 +10,7 @@ import { continuesTask, findTask, isTaskRunning, planRows, plannerInFlight, type
 import type { Key } from './keys';
 import { handleOverlayKey } from './reducers/overlays';
 import { handlePlanKey } from './reducers/planPane';
-import { announceApprovals, continueTaskStep, handleTaskViewKey, taskLogAbandoned, taskLogArrived, taskLogLoaded } from './reducers/taskView';
+import { announceApprovals, continueTaskStep, handleTaskViewKey, openTaskView, taskLogAbandoned, taskLogArrived, taskLogLoaded } from './reducers/taskView';
 import { pickRewindTarget, runCommand } from './reducers/commands';
 import { disarmStop, drainQueue, plannerEscape } from './reducers/turnQueue';
 import { applySettings, followSession, normalizeTasks, runLabel } from './reducers/incoming';
@@ -101,6 +101,10 @@ export function reduce(state: TuiState, action: Action): Step {
     case 'taskLog':
       if (stale(state, action.sessionId)) return step(state);
       return step(announceApprovals(taskLogArrived(state, action), action));
+
+    case 'taskViewRequested':
+      if (stale(state, action.sessionId)) return step(state);
+      return openTaskView(state, action.sessionId, action.taskId);
 
     case 'taskLogLoaded':
       if (stale(state, action.sessionId)) return step(state);

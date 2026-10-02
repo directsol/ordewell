@@ -39,6 +39,10 @@ While Ordewell is pre-1.0, minor versions may contain breaking changes.
 
 ### Fixed
 
+- **Opening a structured task after reopening a session.** `t` and `/terminal`
+  looked for a tmux window the task never had, and said it "hasn't opened a
+  terminal yet". A task with a saved log now opens that log, and a task with
+  neither says so plainly.
 - **Live logs in VS Code follow new output again.** The task log, the planner
   conversation and a task card's runner output now stay on the newest lines
   while you are at the bottom, and stop following as soon as you scroll up to

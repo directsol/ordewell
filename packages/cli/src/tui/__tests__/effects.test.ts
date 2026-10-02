@@ -776,13 +776,23 @@ describe('task control', () => {
     expect(h.actions).toContainEqual({ type: 'notice', message: 'Opened a terminal for this task.' });
   });
 
-  it('surfaces a failed terminal open as an error, not a crash', async () => {
-    const h = harness();
-    (h.deps.openTerminal as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, message: "This task hasn't opened a terminal yet — it may still be pending." });
+  it('opens the saved log instead when the task has one but no terminal', async () => {
+    const getTaskLogAttempts = vi.fn().mockResolvedValue([1]);
+    const h = harness({ getTaskLogAttempts } as Partial<OrdewellApi>);
 
     await runEffect({ type: 'openTaskTerminal', sessionId: 's1', taskId: 't1' }, h.deps);
 
-    expect(h.actions).toContainEqual({ type: 'failed', message: "This task hasn't opened a terminal yet — it may still be pending." });
+    expect(h.deps.openTerminal).not.toHaveBeenCalled();
+    expect(h.actions).toContainEqual({ type: 'taskViewRequested', sessionId: 's1', taskId: 't1' });
+  });
+
+  it('surfaces a failed terminal open as an error, not a crash', async () => {
+    const h = harness();
+    (h.deps.openTerminal as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, message: "This task has no live terminal and no saved log — it may still be pending." });
+
+    await runEffect({ type: 'openTaskTerminal', sessionId: 's1', taskId: 't1' }, h.deps);
+
+    expect(h.actions).toContainEqual({ type: 'failed', message: "This task has no live terminal and no saved log — it may still be pending." });
   });
 });
 
