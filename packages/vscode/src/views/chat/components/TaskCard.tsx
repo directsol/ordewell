@@ -56,6 +56,10 @@ interface TaskCardProps {
   /** Called when this task's model dropdown opens, so a stale/degraded catalog self-heals. */
   onModelsRefreshNeeded?: () => void;
   onModeChange?: (taskId: string, mode: string) => void;
+  /** Change versus ops (ADR-0020); offered until the task starts. */
+  onOpsChange?: (taskId: string, ops: boolean) => void;
+  /** The dependencies this task waits on at its merge gate (ADR-0020); absent when it waits for no Merge all. */
+  mergeGate?: string[];
   onRemoveTask?: (taskId: string) => void;
   onPromptChange?: (taskId: string, prompt: string) => void;
   onRetry?: (taskId: string) => void;
@@ -139,7 +143,7 @@ export function runnerOptionsFor(runners: RunnerOption[] | undefined, assignedRu
   return [...runners, { id: assignedRunner, displayName: assignedRunner }];
 }
 
-export default function TaskCard({ task, models, modes, modelsByRunner, modesByRunner, runners, effectiveRunner, configuredProviders, modelApiMapping, isExecuting, output, idleSince, awaitingApproval = 0, isolation, onResolveConflict, taskOrderMap, dependentCount, siblings, onDependenciesChange, onRunnerChange, onModelChange, onModelsRefreshNeeded, onModeChange, onRemoveTask, onPromptChange, onRetry, onSkip, onCancel, onForceStart, onMarkComplete, onMarkIncomplete, onRunTask, onOpenLog, expanded: expandedProp, onExpandedChange }: TaskCardProps) {
+export default function TaskCard({ task, models, modes, modelsByRunner, modesByRunner, runners, effectiveRunner, configuredProviders, modelApiMapping, isExecuting, output, idleSince, awaitingApproval = 0, isolation, onResolveConflict, taskOrderMap, dependentCount, siblings, onDependenciesChange, onRunnerChange, onModelChange, onModelsRefreshNeeded, onModeChange, onOpsChange, mergeGate, onRemoveTask, onPromptChange, onRetry, onSkip, onCancel, onForceStart, onMarkComplete, onMarkIncomplete, onRunTask, onOpenLog, expanded: expandedProp, onExpandedChange }: TaskCardProps) {
   const [internalExpanded, setInternalExpanded] = useState(false);
   const isControlled = expandedProp !== undefined;
   const expanded = isControlled ? expandedProp : internalExpanded;
@@ -219,7 +223,18 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
         <span className={`task-type-badge ${task.type}`}>
           {isUserTask ? 'Manual' : 'AI'}
         </span>
+        {task.ops && !isUserTask && (
+          <span className="task-type-badge ops" title="An ops task: it changes no repository files and runs in your checkout, once the work it depends on is merged">Ops</span>
+        )}
         <span className="task-title-text">{task.title}</span>
+
+        {/* As plain as a task that waits on the user (ADR-0020). */}
+        {mergeGate && mergeGate.length > 0 && (
+          <span className="task-isolation-badge gate"
+            title={`The work of ${mergeGate.map((id) => `#${taskOrderMap?.get(id) ?? id}`).join(', ')} is not merged into your branch yet. Merge all lets this task go on.`}>
+            Waits for Merge all
+          </span>
+        )}
 
         {/* A stopped integration is not a hidden failure (US33) — visible on the
             collapsed card, since it is the one isolation state that needs a
@@ -377,6 +392,13 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
             </div>
           )}
 
+          {task.status === 'awaiting_user' && task.awaitingReason === 'files-changed' && (
+            <div className="task-ops-note warn">This ops task changed tracked files in your checkout, and nothing was committed. Check the changes, then mark it complete or retry it.</div>
+          )}
+          {task.forcedPastGate && task.forcedPastGate.length > 0 && (
+            <div className="task-ops-note">Force-started before the work of {task.forcedPastGate.join(', ')} was merged into your branch.</div>
+          )}
+
           {output && (
             <div className="task-output">
               <div className="task-output-header">Runner output (tail)</div>
@@ -518,6 +540,13 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
                 ))}
               </select>
             </div>
+          )}
+
+          {!isExecuting && task.type === 'ai' && onOpsChange && (task.status === 'pending' || task.status === 'approved' || task.status === 'blocked') && (
+            <label className="task-ops-toggle" title="An ops task changes no repository files: it acts on outside systems or on your branch's refs, from your checkout, once the work it depends on is merged.">
+              <input type="checkbox" checked={!!task.ops} onChange={(e) => onOpsChange(task.id, e.target.checked)} />
+              Ops task — runs in your checkout, not a worktree
+            </label>
           )}
 
           {!isExecuting && task.type === 'ai' && onRunTask && (

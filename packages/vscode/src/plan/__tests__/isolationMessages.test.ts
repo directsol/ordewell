@@ -13,11 +13,12 @@ function deps() {
     showIsolationHandoff: vi.fn(),
     showIsolationMergeResult: vi.fn(),
     clearIsolationHandoff: vi.fn(),
+    showMergeGate: vi.fn(),
     showPlan: vi.fn(),
   };
   const plan = { status: 'draft', tasks: [] };
   const d = {
-    session: { isExecuting: true, status: 'running' },
+    session: { isExecuting: true, status: 'running', isolationView: () => null },
     chatProvider,
     getCurrentPlan: () => plan,
     isGeneratingPlan: () => false,
@@ -90,6 +91,28 @@ describe('worktree isolation messages (ADR-0013)', () => {
 
   // Core clears a fully merged run up and forgets it: the card and every mark
   // would otherwise offer a merge of branches that no longer exist.
+  it('tells the webview which tasks wait at a merge gate, and what Merge all would merge (ADR-0020)', () => {
+    const { d, chatProvider } = deps();
+    const gate = { paused: true, repos: [], landed: [{ taskId: 't1', order: 1, title: 'A' }] };
+
+    handleSessionMessage({
+      type: 'status_update',
+      tasks: [{ id: 't1', status: 'completed', verdict: null }, { id: 'o2', status: 'pending', verdict: null, mergeGate: ['t1'] }],
+      gate,
+    }, d);
+
+    expect(chatProvider.showMergeGate).toHaveBeenCalledWith(gate, { o2: ['t1'] });
+  });
+
+  it('keeps the marks after a Merge all mid-run, whose run goes on', () => {
+    const { d, chatProvider } = deps();
+    (d.session as unknown as { isolationView: () => unknown }).isolationView = () => ({ tasks: {}, handoff: { repos: [], landed: [] } });
+
+    handleSessionMessage({ type: 'isolation_merge', result: { outcome: 'merged' } }, d);
+
+    expect(chatProvider.clearIsolationHandoff).not.toHaveBeenCalled();
+  });
+
   it('drops the handoff card and the marks once Merge all merged everything', () => {
     const { d, chatProvider } = deps();
 

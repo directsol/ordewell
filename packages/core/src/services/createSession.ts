@@ -1210,6 +1210,11 @@ export class Session {
     return this.orchestrator.isolationView();
   }
 
+  /** The dependencies a task waits on at its merge gate (ADR-0020); empty when it waits for no Merge all. */
+  mergeGate(taskId: string): string[] {
+    return this.orchestrator.getMergeGate(taskId);
+  }
+
   /** The run's integration branch against its base ref, as a unified diff. */
   async reviewRunDiff(): Promise<string> {
     if (!this.orchestrator.isolationRecord) throw new PlanEditError('This plan has no isolated run');

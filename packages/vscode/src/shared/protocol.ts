@@ -1,5 +1,5 @@
 import type {
-  AiProvider, DisplayBlock, DiscoveredModel, IsolationHandoff, IsolationMergeResult, LegacyPlanState, PromptHold, RunnerId,
+  AiProvider, DisplayBlock, DiscoveredModel, IsolationHandoff, IsolationMergeResult, LegacyPlanState, MergeGateView, PromptHold, RunnerId,
   RunnerTransport, TaskIsolation, TaskModelAssignment,
 } from '@ordewell/core';
 
@@ -57,7 +57,9 @@ export type TaskEdit =
   | { kind: 'model'; assignment: TaskModelAssignment }
   | { kind: 'mode'; mode: string }
   | { kind: 'prompt'; prompt: string }
-  | { kind: 'dependencies'; dependencies: string[] };
+  | { kind: 'dependencies'; dependencies: string[] }
+  /** Change versus ops (ADR-0020); the session refuses it once the task has started. */
+  | { kind: 'ops'; ops: boolean };
 
 /** A hand-written task from the add form: only what a user can fill in. */
 export interface TaskDraft {
@@ -209,6 +211,9 @@ export type HostToWebview =
   // The run's isolation is gone (discarded or the plan restarted); the handoff
   // card and every conflict indicator clear.
   | { type: 'isolationCleared' }
+  // Merge gates (ADR-0020): which tasks wait for Merge all, on which
+  // dependencies, and — while any does — what Merge all would merge now.
+  | { type: 'mergeGate'; gate: MergeGateView | null; tasks: Record<string, string[]> }
   /**
    * A session was (re)loaded: the webview drops the previous session's plan,
    * task output, isolation and any stuck busy state. The conversation itself

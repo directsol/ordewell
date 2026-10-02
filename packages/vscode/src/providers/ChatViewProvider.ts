@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { AiProvider, LegacyPlanState, DiscoveredModel, RunnerId, TaskIsolation, IsolationHandoff, IsolationMergeResult, RunnerTransport } from '@ordewell/core';
+import type { AiProvider, LegacyPlanState, DiscoveredModel, RunnerId, TaskIsolation, IsolationHandoff, IsolationMergeResult, MergeGateView, RunnerTransport } from '@ordewell/core';
 import { ConversationViewHost, type SavedConversation } from '../ConversationViewHost';
 import { renderWebviewHtml } from './webviewHtml';
 import type { ChatState, HostToWebview, ModelOption, PendingPlanEdit, PlannerBackend, RunnerMeta, RunnerModeMeta, WebviewToHost } from '../shared/protocol';
@@ -120,6 +120,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** What "Merge all" did, so a blocked or part-landed group is visible on the card. */
   showIsolationMergeResult(result: IsolationMergeResult): void {
     this.postMessage({ type: 'isolationMergeResult', result });
+  }
+
+  /** Which tasks wait at a merge gate, and what Merge all would merge mid-run (ADR-0020). */
+  showMergeGate(gate: MergeGateView | null, tasks: Record<string, string[]>): void {
+    this.postMessage({ type: 'mergeGate', gate, tasks });
   }
 
   /** Drop the handoff card and every per-task isolation indicator. */

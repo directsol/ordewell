@@ -13,7 +13,7 @@ import HandoffCard from './components/HandoffCard';
 import CheckpointPanel from './components/CheckpointPanel';
 import type { RunnerMode } from './components/TaskCard';
 import type { TaskDraft } from './components/NewTaskCard';
-import type { LegacyPlanState, DiscoveredModel, Task, TaskModelAssignment, RunnerId, RunnerTransport, IsolationHandoff, IsolationMergeResult, TaskIsolation } from '@ordewell/core';
+import type { LegacyPlanState, DiscoveredModel, Task, TaskModelAssignment, RunnerId, RunnerTransport, IsolationHandoff, IsolationMergeResult, MergeGateView, TaskIsolation } from '@ordewell/core';
 import type { AiProvider } from '@ordewell/core';
 import { isPlanRevision, planSummaryLabel, nextDock } from './planDock';
 import { DetailContext } from './detail';
@@ -96,6 +96,10 @@ export default function App() {
   const [handoff, setHandoff] = useState<IsolationHandoff | null>(null);
   /** What the last Merge all did; a blocked or part-landed group stays visible until the run clears. */
   const [mergeResult, setMergeResult] = useState<IsolationMergeResult | null>(null);
+  /** While tasks wait at a merge gate (ADR-0020): what Merge all would merge now. */
+  const [mergeGate, setMergeGate] = useState<MergeGateView | null>(null);
+  /** Per task id, the dependencies it waits on at its merge gate. */
+  const [taskGates, setTaskGates] = useState<Record<string, string[]>>({});
   /** Is the plan dock open? See planDock.ts for when this flips. */
   const [dockExpanded, setDockExpanded] = useState(false);
   /** The dock's dragged cap in px, remembered by the host; undefined keeps the stylesheet's default. */
@@ -145,6 +149,8 @@ export default function App() {
             setTaskIsolation({});
             setHandoff(null);
             setMergeResult(null);
+            setMergeGate(null);
+            setTaskGates({});
             setPendingEdits([]);
             setDockExpanded((v) => nextDock(v, 'session-reset'));
           }
@@ -194,6 +200,8 @@ export default function App() {
           setTaskIsolation({});
           setHandoff(null);
           setMergeResult(null);
+          setMergeGate(null);
+          setTaskGates({});
           // A restore is followed by the host's own pendingPlanEdits; clearing
           // here keeps a stale session's edits from flashing until they land.
           setPendingEdits([]);
@@ -258,6 +266,13 @@ export default function App() {
           setTaskIsolation({});
           setHandoff(null);
           setMergeResult(null);
+          setMergeGate(null);
+          setTaskGates({});
+          break;
+
+        case 'mergeGate':
+          setMergeGate(msg.gate ?? null);
+          setTaskGates(msg.tasks ?? {});
           break;
 
         case 'setModels':
@@ -404,6 +419,8 @@ export default function App() {
     setTaskIsolation({});
     setHandoff(null);
     setMergeResult(null);
+    setMergeGate(null);
+    setTaskGates({});
     setPendingEdits([]);
     setHeld(EMPTY_HOLD);
     setDockExpanded((v) => nextDock(v, 'session-reset'));
@@ -531,6 +548,11 @@ export default function App() {
   const handleModeChange = useCallback((taskId: string, mode: string) => {
     vscode.postMessage({ type: 'editTask', taskId, edit: { kind: 'mode', mode } });
     echoTask(taskId, { taskMode: mode });
+  }, [echoTask]);
+
+  const handleOpsChange = useCallback((taskId: string, ops: boolean) => {
+    vscode.postMessage({ type: 'editTask', taskId, edit: { kind: 'ops', ops } });
+    echoTask(taskId, { ops });
   }, [echoTask]);
 
   const handleRetry = useCallback((taskId: string) => {
@@ -890,6 +912,8 @@ export default function App() {
             onModelChange={handleModelChange}
             onModelsRefreshNeeded={handleModelsRefreshNeeded}
             onModeChange={handleModeChange}
+            onOpsChange={handleOpsChange}
+            mergeGates={taskGates}
             onRemoveTask={handleRemoveTask}
             onPromptChange={handlePromptChange}
             onRetry={handleRetry}
@@ -907,11 +931,20 @@ export default function App() {
             onResolveConflict={handleResolveConflict}
             onOpenLog={handleOpenTaskLog}
           />
-          {handoff && (
+          {handoff && !mergeGate && (
             <HandoffCard
               repos={handoff.repos}
               landed={handoff.landed}
               mergeResult={mergeResult}
+              onAction={(action) => handleIsolationAction(action)}
+            />
+          )}
+          {mergeGate && (
+            <HandoffCard
+              repos={mergeGate.repos}
+              landed={mergeGate.landed}
+              mergeResult={mergeResult}
+              midRun={{ paused: mergeGate.paused }}
               onAction={(action) => handleIsolationAction(action)}
             />
           )}

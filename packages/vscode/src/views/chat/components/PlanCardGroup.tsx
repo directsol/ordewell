@@ -31,6 +31,10 @@ interface PlanCardGroupProps {
   onModelChange?: (taskId: string, assignment: TaskModelAssignment) => void;
   onModelsRefreshNeeded?: () => void;
   onModeChange?: (taskId: string, mode: string) => void;
+  /** Change versus ops (ADR-0020). */
+  onOpsChange?: (taskId: string, ops: boolean) => void;
+  /** Per task id, the dependencies it waits on at its merge gate (ADR-0020). */
+  mergeGates?: Record<string, string[]>;
   onRemoveTask?: (taskId: string) => void;
   onPromptChange?: (taskId: string, prompt: string) => void;
   onRetry?: (taskId: string) => void;
@@ -67,6 +71,8 @@ export default function PlanCardGroup({
   onModelChange,
   onModelsRefreshNeeded,
   onModeChange,
+  onOpsChange,
+  mergeGates,
   onRemoveTask,
   onPromptChange,
   onRetry,
@@ -241,6 +247,8 @@ export default function PlanCardGroup({
                 onModelChange={onModelChange}
                 onModelsRefreshNeeded={onModelsRefreshNeeded}
                 onModeChange={onModeChange}
+                onOpsChange={onOpsChange}
+                mergeGate={mergeGates?.[task.id]}
                 onRemoveTask={onRemoveTask}
                 onPromptChange={onPromptChange}
                 onRetry={onRetry}

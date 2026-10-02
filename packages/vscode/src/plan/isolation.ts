@@ -66,8 +66,11 @@ export async function handleIsolationAction(
         await openDiff(await deps.session.reviewRunDiff());
         return;
       case 'merge': {
+        // Mid-run, Merge all opens the merge gates and the run goes on (ADR-0020).
         const confirm = await vscode.window.showWarningMessage(
-          'Merge the isolated run into your checked-out branch? This cannot be undone from Ordewell. Once it has merged, the run\'s worktrees and branches are removed.',
+          deps.session.isExecuting
+            ? 'Merge what the run has landed so far into your checked-out branch? This cannot be undone from Ordewell. The run goes on: tasks waiting for Merge all start once it has merged, and later tasks land on the same branch.'
+            : 'Merge the isolated run into your checked-out branch? This cannot be undone from Ordewell. Once it has merged, the run\'s worktrees and branches are removed.',
           { modal: true },
           'Merge',
         );

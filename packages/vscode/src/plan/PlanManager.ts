@@ -317,6 +317,7 @@ function applyTaskEdit(session: Session, taskId: string, edit: TaskEdit): Promis
     case 'mode': return session.updateTask(taskId, { taskMode: edit.mode });
     case 'prompt': return session.updateTask(taskId, { prompt: edit.prompt, description: edit.prompt || undefined });
     case 'dependencies': return session.setTaskDependencies(taskId, edit.dependencies);
+    case 'ops': return session.updateTask(taskId, { ops: edit.ops });
   }
 }
 
@@ -418,6 +419,26 @@ export function handleNewSession(deps: Pick<PlanManagerDeps,
   deps.log('New session started');
 }
 
+/**
+ * A force start passes a merge gate (ADR-0020) once the user has seen, in a
+ * real modal, which work the task would act without. True when nothing gates
+ * the task or the user went ahead.
+ */
+async function confirmPastGate(taskId: string, deps: PlanManagerDeps): Promise<boolean> {
+  const unmerged = deps.session.mergeGate(taskId);
+  if (unmerged.length === 0) return true;
+  const named = unmerged.map((id) => {
+    const dep = deps.session.planState?.tasks && flattenTasks(deps.session.planState.tasks).find((t) => t.id === id);
+    return dep ? `#${dep.order} ${dep.title}` : id;
+  });
+  const choice = await vscode.window.showWarningMessage(
+    `This task waits for Merge all: the work of ${named.join(', ')} is not merged into your branch yet, so it would act without it. Starting it now is kept on the task.`,
+    { modal: true },
+    'Start anyway',
+  );
+  return choice === 'Start anyway';
+}
+
 export async function handleSystemCommand(
   command: string,
   taskId: string,
@@ -438,6 +459,7 @@ export async function handleSystemCommand(
       await deps.session.markTaskIncomplete(taskId);
       break;
     case 'forceStart':
+      if (!(await confirmPastGate(taskId, deps))) return;
       deps.chatProvider.clearIsolationHandoff();
       await deps.session.forceStartTask(taskId);
       break;
@@ -489,13 +511,16 @@ export function handleSessionMessage(
         : deps.session.status === 'completed'
           ? 'completed'
           : 'draft';
+      const gates: Record<string, string[]> = {};
       for (const task of msg.tasks) {
         deps.chatProvider.sendTaskIdle(task.id, task.idleSince ?? null);
         deps.chatProvider.sendTaskApprovals(task.id, task.awaitingApproval ?? 0);
         // A shared-root plan sends none; only a task with isolated work reports
         // it, so the cards stay quiet unless isolation has something to say.
         if (task.isolation) deps.chatProvider.sendTaskIsolation(task.id, task.isolation);
+        if (task.mergeGate) gates[task.id] = task.mergeGate;
       }
+      deps.chatProvider.showMergeGate(msg.gate ?? null, gates);
       deps.chatProvider.showPlan(plan);
       break;
     }
@@ -558,8 +583,10 @@ export function handleSessionMessage(
     // already told the user in prose. A full merge is the end of the run: core
     // has cleared it up, so there is no card left to show.
     case 'isolation_merge':
-      if (msg.result.outcome === 'merged') deps.chatProvider.clearIsolationHandoff();
-      else deps.chatProvider.showIsolationMergeResult(msg.result);
+      // A run merged at a gate goes on (ADR-0020): its record, and the marks
+      // the next status update re-sends, stay.
+      if (msg.result.outcome !== 'merged') deps.chatProvider.showIsolationMergeResult(msg.result);
+      else if (!deps.session.isolationView()) deps.chatProvider.clearIsolationHandoff();
       break;
     default: {
       const exhaustive: never = msg;

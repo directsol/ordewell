@@ -5264,3 +5264,34 @@ body {
   outline: none;
   border-color: var(--accent);
 }
+
+/* Ops tasks and merge gates (ADR-0020) */
+.task-type-badge.ops {
+  background: var(--purple-subtle);
+  color: var(--purple);
+}
+
+.task-isolation-badge.gate {
+  background: var(--orange-subtle);
+  color: var(--orange);
+}
+
+.task-ops-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.task-ops-note {
+  margin: 6px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.task-ops-note.warn {
+  color: var(--orange);
+}

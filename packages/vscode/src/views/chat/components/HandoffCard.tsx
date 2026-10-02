@@ -28,7 +28,13 @@ interface HandoffCardProps {
   landed: HandoffLandedTask[];
   /** The result of the last Merge all, so a blocked or part-landed group is visible. */
   mergeResult?: IsolationMergeResult | null;
-  /** The run is settled, so every action here is available. */
+  /**
+   * Set while the run is still going and tasks wait at a merge gate
+   * (ADR-0020): only reviewing and Merge all are offered, and `paused` says
+   * nothing else is running.
+   */
+  midRun?: { paused: boolean };
+  /** Every action here is available once the run is settled; mid-run, only review and merge. */
   onAction: (action: 'reviewDiff' | 'merge' | 'discard' | 'cleanup') => void;
 }
 
@@ -93,7 +99,7 @@ function MergeOutcome({ result, branch }: { result: IsolationMergeResult; branch
  * A repo group (ADR-0014) reports per repo and merges all-or-nothing; a group
  * of one reads exactly as it did before.
  */
-export default function HandoffCard({ repos, landed, mergeResult, onAction }: HandoffCardProps) {
+export default function HandoffCard({ repos, landed, mergeResult, midRun, onAction }: HandoffCardProps) {
   const sorted = sortLanded(landed);
   const isGroup = repos.length > 1;
   // Every repo's integration branch has the same name.
@@ -102,7 +108,11 @@ export default function HandoffCard({ repos, landed, mergeResult, onAction }: Ha
   return (
     <div className="isolation-handoff">
       <div className="isolation-handoff-header">
-        <span className="isolation-handoff-title">Run complete &mdash; review the integration branch</span>
+        <span className="isolation-handoff-title">
+          {midRun
+            ? midRun.paused ? 'Paused for Merge all — tasks wait for this work in your branch' : 'Tasks wait for Merge all — merge what has landed so far'
+            : <>Run complete &mdash; review the integration branch</>}
+        </span>
         <code className="isolation-handoff-branch">{branch}</code>
       </div>
       {isGroup ? (
@@ -152,8 +162,8 @@ export default function HandoffCard({ repos, landed, mergeResult, onAction }: Ha
       <div className="isolation-handoff-actions">
         <button className="task-action-btn" onClick={() => onAction('reviewDiff')}>Review diff</button>
         <button className="task-action-btn run" onClick={() => onAction('merge')}>{isGroup ? 'Merge all' : 'Merge'}</button>
-        <button className="task-action-btn skip" onClick={() => onAction('cleanup')}>Clean up</button>
-        <button className="task-action-btn cancel" onClick={() => onAction('discard')}>Discard</button>
+        {!midRun && <button className="task-action-btn skip" onClick={() => onAction('cleanup')}>Clean up</button>}
+        {!midRun && <button className="task-action-btn cancel" onClick={() => onAction('discard')}>Discard</button>}
       </div>
     </div>
   );
