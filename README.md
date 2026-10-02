@@ -65,8 +65,9 @@ or run `code --install-extension ordewell.ordewell`. The extension bundles its o
 core and needs nothing from npm.
 
 **Requirements:** Node.js 20 or newer, at least one of Claude Code, Codex or
-OpenCode, and git for task isolation. The terminal UI also needs tmux; on Windows,
-run it under WSL.
+OpenCode, and git for task isolation. tmux is optional: only the terminal
+transport (`/transport terminal`) uses it, to give each task a terminal window
+you can open. On Windows, run the terminal UI under WSL.
 
 ## Quick start
 
@@ -120,7 +121,7 @@ that were rejected, are recorded as [architecture decision records](docs/adr/), 
 
 ## Where it's going
 
-- **Now:** making the structured transport the default. Ordewell drives each runner through its own protocol instead of a terminal screen, and tmux stops being required ([#61](https://github.com/ordewell/ordewell/issues/61)).
+- **Now:** take-over, opening a structured task in its runner's own terminal UI ([#58](https://github.com/ordewell/ordewell/issues/58)). The structured transport is the default and tmux is optional ([#61](https://github.com/ordewell/ordewell/issues/61)).
 - **Next:** the planner keeps watching a run after you approve it, and suggests fixes when a task fails or gets stuck.
 - **Later:** the planner supervises a run on its own, within limits you set in advance.
 

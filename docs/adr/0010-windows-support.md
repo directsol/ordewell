@@ -196,7 +196,7 @@ The **VS Code extension and the web surface work on native Windows**: harness
 planners (Claude Code, Codex, OpenCode), API-key planners, runner execution,
 model discovery, and the exploration envelope with its gate intact.
 
-The **TUI does not**, and this ADR does not change that. It is tmux-backed
+The **TUI does not** (see the 2026-10-02 update to ADR-0018 on tmux being optional), and this ADR does not change that. It is tmux-backed
 (ADR-0007), and `hasTmux` already feature-detects, so the requirement is
 declared rather than assumed. WSL remains the answer there. The launch and kill
 seams are platform-general, so a future non-tmux Windows TUI inherits them

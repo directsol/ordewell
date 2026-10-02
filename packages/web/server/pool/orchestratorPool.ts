@@ -44,6 +44,7 @@ import { WebConfig } from '../adapters/WebConfig';
 import { scanWorkspaces as scanWorkspacesImpl } from '../utils/workspaceScanner';
 import { PoolFileSystem } from '../adapters/PoolFileSystem';
 import { PoolAwareRunner } from '../adapters/PoolAwareRunner';
+import { AdvisingRunner } from '../adapters/TerminalHost';
 import type { ApprovalAnswer, RunnerRegistry as CoreRunnerRegistry, ITerminalRunner } from '@ordewell/core';
 
 /** A fork the pool has adopted: addressable at once, its plan read back from the file it was written to. */
@@ -66,6 +67,8 @@ export interface OrchestratorPoolDeps {
    * `runner`, and defaulted to a real one; tests inject a fake.
    */
   structuredRunner?: ITerminalRunner;
+  /** What a plan's first terminal-transport task tells the user the host lacks; structured tasks never trigger it. */
+  terminalAdvice?: string;
   /**
    * Overrides the pool's own `ModelResolver`. Left undefined, behavior is
    * unchanged; tests inject one built with fake exec/fetch impls so a
@@ -89,10 +92,12 @@ export class OrchestratorPool {
   private plannerModelMemory = new PlannerModelMemory(this.settingsService);
   private sharedRunner?: ITerminalRunner;
   private structuredRunner: ITerminalRunner;
+  private terminalAdvice?: string;
 
   constructor(deps: OrchestratorPoolDeps = {}) {
     this.sharedRunner = deps.runner;
     this.structuredRunner = deps.structuredRunner ?? new StructuredRunner();
+    this.terminalAdvice = deps.terminalAdvice;
     this.modelResolver = deps.modelResolver ?? new ModelResolver(this.registry, new WebConfig());
   }
 
@@ -171,7 +176,13 @@ export class OrchestratorPool {
     const broadcast = (msg: SessionMessage) => this.broadcast(sessionId, msg);
     // The router sits under the per-plan wrapper, so a plan's /stop still
     // reaches only its own tasks, on either transport.
-    const router = new TransportRouter({ terminal: this.sharedRunner ?? new HeadlessRunner(), structured: this.structuredRunner });
+    const terminal = this.sharedRunner ?? new HeadlessRunner();
+    const router = new TransportRouter({
+      terminal: this.terminalAdvice
+        ? new AdvisingRunner(terminal, this.terminalAdvice, (message) => this.broadcast(sessionId, { type: 'notice', level: 'warn', message }))
+        : terminal,
+      structured: this.structuredRunner,
+    });
     const runner = new PoolAwareRunner(sessionId, broadcast, router);
     return createSession({
       config,
@@ -232,7 +243,7 @@ export class OrchestratorPool {
       // The model remembered per planner backend (this task), so a surface can
       // render what's remembered without a second round-trip.
       plannerModels: userSettings.plannerModels,
-      // Experimental (ADR-0018); a run copies it when it starts.
+      // ADR-0018; a run copies it when it starts.
       runnerTransport: userSettings.runnerTransport,
     };
   }

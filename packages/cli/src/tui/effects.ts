@@ -372,7 +372,7 @@ async function perform(effect: Effect, deps: EffectDeps): Promise<void> {
     case 'setTransport': {
       const result = await api.sendCommand('transport', { action: effect.transport });
       if (result.settings) dispatch({ type: 'settingsLoaded', settings: result.settings });
-      dispatch({ type: 'notice', message: `Runner transport is ${effect.transport}${effect.transport === 'structured' ? ' (experimental)' : ''} — it applies from the next run.` });
+      dispatch({ type: 'notice', message: `Runner transport is ${effect.transport} — it applies from the next run.` });
       return;
     }
 

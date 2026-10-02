@@ -355,10 +355,12 @@ invocation flow through the `RunnerRegistry` + manifest engine.
 a task's runner (ADR-0018). *Terminal*: a TUI in tmux, or a headless one-shot
 process, read through its screen and written to with keystrokes (ADR-0007).
 *Structured*: the runner's programmatic protocol, with events in and messages
-out. An opt-in, experimental setting, default `terminal`, copied onto the plan
-when a run starts, so a change applies from the next run. Routed per task by
-connector availability: a runner with no task-mode connector runs on the
-terminal transport, and surfaces say so and why.
+out. A setting, default `structured` (`/transport terminal` goes back), copied
+onto the plan when a run starts, so a change applies from the next run. Routed
+per task by connector availability: a runner with no task-mode connector runs
+on the terminal transport, and surfaces say so and why. tmux is needed only by
+the terminal transport, to give a task a terminal window; without it those
+tasks run headless and the first one says what is missing.
 *Avoid:* "mode" (that is permission mode, ADR-0001), "backend", "provider".
 
 **Waiting for input** — a structured task whose turn ended without the done
@@ -1418,9 +1420,10 @@ workspace and the subscription.
 which was the last one left, in `ModelDiscovery`'s Codex app-server probe.
 
 **Platform support** — the VS Code extension and the local daemon run on Linux,
-macOS, and native Windows. The **TUI does not run on Windows**: it is tmux-backed
-(ADR-0007) and `hasTmux` feature-detects rather than assuming, so WSL is the
-answer there. Three things about Windows are explicitly unverified rather than
+macOS, and native Windows. The **TUI is not verified on Windows**: its per-task
+terminal windows are tmux-backed (ADR-0007) and `hasTmux` feature-detects
+rather than assuming. tmux is optional now that structured is the default
+(ADR-0018), but WSL remains the supported answer for the TUI. Three things about Windows are explicitly unverified rather than
 claimed — Codex's read-only sandbox enforcement, `%VAR%` expansion on the
 cmd.exe shim route, and argument fidelity on the PowerShell shim route. See
 ADR-0010.

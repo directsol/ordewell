@@ -239,7 +239,7 @@ export default function TaskCard({ task, models, modes, modelsByRunner, modesByR
         {/* A task that asked for the structured transport and did not get
             it says why on the card (ADR-0018) — never a silent downgrade. */}
         {task.transport?.kind === 'structured' && (
-          <span className="task-transport-badge" title="Driven through Claude Code's protocol instead of a terminal (experimental)">Structured</span>
+          <span className="task-transport-badge" title="Driven through its runner's protocol instead of a terminal">Structured</span>
         )}
         {task.transport?.fallback && (
           <span className="task-transport-badge fallback" title={`Ran in a terminal: ${task.transport.fallback}`}>Terminal: {task.transport.fallback}</span>

@@ -805,13 +805,6 @@ body {
   opacity: 0.5;
 }
 
-.skill-toggle-experimental {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  opacity: 0.7;
-}
-
 .skill-toggle-pill:hover {
   background: var(--bg-hover);
 }
