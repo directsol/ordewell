@@ -38,9 +38,11 @@ falling back to hardcoded `fallbackModels` in the manifest.
   means the template cannot inline `{{thinkingEffort}}` into a compound arg).
 - **Modes mirror Claude Code's shape**: `agent` (safe → `--sandbox workspace-write`),
   `plan` (→ `--sandbox read-only`), `fullAccess` (autonomous → `--sandbox
-  danger-full-access`), mapped through `permissionModeValues`. `codex exec` is
-  non-interactive and has no approval flag, so the sandbox axis is the entire permission
-  story for headless runs.
+  danger-full-access`), mapped through `permissionModeValues`. Approvals are per
+  mode too (`features.modeSettings`): `agent` runs with approval policy `on-request`
+  and the `auto_review` reviewer, `plan` and `fullAccess` with approvals `never`
+  (ADR-0001). `codex exec` has no `-a` flag, so a headless task takes the same values
+  as `-c approval_policy=…` and `-c approvals_reviewer=…`.
 
 ## Considered options
 
@@ -53,8 +55,12 @@ falling back to hardcoded `fallbackModels` in the manifest.
   `~/.codex/auth.json`). Rejected: reverse-engineered and unversioned — strictly worse
   than the app-server protocol, which is at least schema-published by the CLI itself.
 - **Approval-policy modes** (`untrusted`/`on-request`/`never` as distinct Ordewell
-  modes). Rejected: 6+ modes bloat the planner's mode guide, and the flags don't exist
-  on `codex exec`, so headless tasks could never honor them.
+  modes). Rejected: 6+ modes bloat the planner's mode guide. Each mode carries one
+  approval policy instead.
+- **The sandbox as the whole permission story**, approvals always `never`. It was the
+  first design, on the belief that `codex exec` could not take an approval policy.
+  Rejected once `-c` overrides were found to carry it: `agent` can then let Codex's
+  reviewer judge risky actions instead of running them unasked.
 
 ## Consequences
 
@@ -69,10 +75,7 @@ falling back to hardcoded `fallbackModels` in the manifest.
 - Installation detection is unchanged: `codex --version` answers, so absent installs
   filter out everywhere.
 
-## Update 2026-10-01: approvals are per mode
+## History
 
-"The sandbox axis is the entire permission story" no longer holds: `agent` now
-carries approval policy `on-request` with the `auto_review` reviewer, and only
-`plan` and `fullAccess` run with approvals `never` (ADR-0001, update of
-2026-10-01). `exec` accepts both as `-c` overrides, which is how a headless
-`agent` task gets them.
+- 2026-07-31 — accepted: sandbox-only modes, approvals `never`.
+- 2026-10-01 — approvals per mode; `agent` gains `on-request` with the auto reviewer (ADR-0001).

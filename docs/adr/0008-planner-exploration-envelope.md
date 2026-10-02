@@ -35,7 +35,7 @@ Both halves have to agree on what the shell will actually do with a string, or t
 
 - **Quoting is the shell's, not ours.** Splitting on a bare `/[|;&]/` made `rg "error|warn" src` two segments — so the planner's commonest search asked for approval, scoped to the nonsense binary `warn"` — while leaving quotes on argument tokens hid `cat "/etc/passwd"` from the path check entirely (`looksLikePath('"/etc/passwd"')` is false). One lexer now owns both answers.
 - **`~` is expanded because the shell expands it.** `path.resolve(root, '~/.ssh/id_rsa')` yields `<root>/~/.ssh/id_rsa`, which reads as *inside* the workspace, so an auto-tier `cat ~/.ssh/id_rsa` passed confinement unprompted and then read the real file. `resolveWithin` expands `~` before resolving.
-- **A path is anything that climbs, not only what starts with `../`.** `looksLikePath` recognised a relative path by its first characters, so `cat src/../../etc/passwd` — which the shell resolves through a directory that exists — was a plain name to the check and read the file unprompted. An argument with a `..` segment anywhere is now a path (2026-09-27).
+- **A path is anything that climbs, not only what starts with `../`.** `looksLikePath` recognised a relative path by its first characters, so `cat src/../../etc/passwd` — which the shell resolves through a directory that exists — was a plain name to the check and read the file unprompted. An argument with a `..` segment anywhere is now a path.
 
 `ApprovalPolicy` decides and remembers; `PendingApprovals` parks the promise; `Session` announces on the **existing broadcast seam** and exposes `resolveApproval(id, granted)`. Every surface answers through that one call.
 
@@ -94,21 +94,11 @@ Three defects were structural rather than incidental, so they are recorded here:
 
 `find_symbol` was added rather than extending `grep`: searching for a named symbol returns every import and call site, so with a 100-row cap the definition frequently fell outside the returned page. It runs two bounded searches (definitions, then per-file reference counts) using language-aware declaration patterns.
 
-## Considered options
+## Words the shell computes
 
-- **Widen the `bash` allowlist (M1).** Rejected: it fixes the too-strict half and leaves the substring matching, the invisible `$(…)`, and the ungated path escape untouched.
-- **opencode-style LSP for structural lookups (M2).** Rejected. Its `packages/opencode/src/lsp/` is ~98 KB across 6 files, and `server.ts` is a toolchain installer — `go install gopls`, `gem install rubocop`, `dotnet tool install`, GitHub release downloads for zls/clangd/rust-analyzer — plus per-server initialize handshakes and index waits. `@ordewell/core` has three dependencies and is pinned as "pure TypeScript, zero UI deps"; making *planning*, the deliberately cheap half of the architecture, slower to start is the wrong trade. A planner needs to scope tasks ("defined here, used across ~14 files in 3 packages"), not prove rename-safety — that is the runner's job, and runners have their own tools.
-- **tree-sitter in-process (M3).** Rejected: per-language WASM grammars plus hand-written queries, a real dependency in a three-dep core, to get definitions that regex or optional `universal-ctags` already provide adequately.
-- **TypeScript compiler API only (M4).** Rejected despite `typescript` already being a devDependency and giving genuinely precise results: it covers TS/JS only. A planner that is sharp on TS repos and blunt everywhere else is worse than one that is consistent.
-- **Answer approvals over the WebSocket (M5).** Rejected: the CLI and TUI already speak HTTP to the daemon, a prompt can outlive the socket that announced it, and a plain POST is answerable from any surface — including `curl` when debugging.
-- **Prompt per exact command rather than per scope (M6).** Rejected as the default (T1). opencode parses commands with tree-sitter and asks per command pattern; that precision costs a grammar dependency, and for a read-mostly planner whose destructive verbs are already hard-refused, binary-plus-leading-arguments is the useful granularity.
-
-## Amendment (2026-09-27) — words the shell computes
-
-A review of `commandPolicy.ts` found five more places where the classifier read
-a different command from the one the shell runs. Each is closed by narrowing,
-under the rule the file already applied to `eval` and assignments: what the
-classifier cannot read is refused, and an argument it cannot see into prompts.
+The classifier must judge the command the shell will run, not a different one
+it reads. The rule, as for `eval` and assignments: what the classifier cannot
+read is refused, and an argument it cannot see into prompts.
 
 - **A computed command name is refused.** `$(printf rm) -rf build` lexed to an
   empty first word, and a segment without a binary was dropped before
@@ -125,13 +115,13 @@ classifier cannot read is refused, and an argument it cannot see into prompts.
 - **A value glued onto a short flag is confined.** `grep -f/etc/passwd` skipped
   the path check that `grep -f /etc/passwd` gets.
 
-## Amendment (2026-09-28) — command runners, and programs inside filters
+## Command runners, and programs inside filters
 
 The refusal tier rests on one premise: a destructive verb never reaches `ask`,
 because `ask` is remembered at `scope` granularity and one approval would
-cover every later use. Wrappers (`env`, `nice`, `timeout`, …) were already
-unwrapped for that reason. Commands that *run* another command were not, and
-nor were the filters that carry a program, so the premise had four holes, each
+cover every later use. Wrappers (`env`, `nice`, `timeout`, …) are unwrapped for
+that reason, and so are commands that *run* another command and the filters
+that carry a program. Before they were, the premise had four holes, each
 classified as `ask` with a binary-wide scope:
 
 - `xargs rm < list`, `xargs -a list rm` — `xargs` was refused only when piped
@@ -144,7 +134,7 @@ classified as `ask` with a binary-wide scope:
 - `sed '1e rm x'`, `sed 's/x/y/e'`, and the `w`/`W` commands and `w` flag that
   write a file.
 
-Closed as follows, under the file's existing rule: when unsure, refuse.
+How they are read, under the file's rule: when unsure, refuse.
 
 - **A runner whose command is a plain argv is unwrapped; one that hands it to a
   shell is refused.** `xargs` is the one runner unwrapped: its flags are walked
@@ -179,25 +169,25 @@ The residual is the one `ask` always had: an approved `xargs grep` reads
 whatever files its input lists, outside the workspace included, because the
 arguments are not visible to confinement. That is why it prompts.
 
-## Amendment (2026-09-29) — the seam also carries runner tool requests
+## The seam also carries runner tool requests
 
-The approval seam (`IApproval` / `PendingApprovals` / `resolveApproval`) now
-also carries a task runner's tool requests under the structured transport, as
+The approval seam (`IApproval` / `PendingApprovals` / `resolveApproval`) also
+carries a task runner's tool requests under the structured transport, as
 kind `runner_tool` ([ADR-0018](0018-structured-runner-transport.md)). They have
 no timeout: T5's five-minute auto-deny is the planner's, where an unanswered
 prompt would hang a research loop; a task's request waits for a person. The
 planner's envelope is unchanged.
 
-*Added 2026-09-29 (#56).* `resolveApproval` takes the whole decision — allow,
+`resolveApproval` takes the whole decision — allow,
 allow for this task, or deny with a note — and a boolean still answers a
 planner prompt exactly as before. A turn's abort and a plan change deny only
 the planner's own prompts; a runner's is denied when its attempt's runner
 stops.
 
-## Amendment (2026-10-01) — patterns are not paths, and one command is one prompt
+## Patterns are not paths, and one command is one prompt
 
-Path confinement read every `/`-leading argument as a file, so a search
-pattern (`grep "/api/users" src`), a `find -name`/`-path`/`-regex` value, a
+Path confinement must not read every `/`-leading argument as a file. When it
+did, a search pattern (`grep "/api/users" src`), a `find -name`/`-path`/`-regex` value, a
 `git log --grep`/`-S`/`-G` value, or a sed script or awk program prompted to
 leave the workspace, and `curl -o /dev/null` asked for `/dev/*`. Each was a
 prompt about nothing, and teaching people to approve `/dev/*` or `/api/*` to
@@ -221,3 +211,20 @@ get past them wears down the prompts that matter.
 
 None of this changes what is reachable. Every path argument is still confined,
 and every grant still covers only its own scope.
+
+## Considered options
+
+- **Widen the `bash` allowlist (M1).** Rejected: it fixes the too-strict half and leaves the substring matching, the invisible `$(…)`, and the ungated path escape untouched.
+- **opencode-style LSP for structural lookups (M2).** Rejected. Its `packages/opencode/src/lsp/` is ~98 KB across 6 files, and `server.ts` is a toolchain installer — `go install gopls`, `gem install rubocop`, `dotnet tool install`, GitHub release downloads for zls/clangd/rust-analyzer — plus per-server initialize handshakes and index waits. `@ordewell/core` has three dependencies and is pinned as "pure TypeScript, zero UI deps"; making *planning*, the deliberately cheap half of the architecture, slower to start is the wrong trade. A planner needs to scope tasks ("defined here, used across ~14 files in 3 packages"), not prove rename-safety — that is the runner's job, and runners have their own tools.
+- **tree-sitter in-process (M3).** Rejected: per-language WASM grammars plus hand-written queries, a real dependency in a three-dep core, to get definitions that regex or optional `universal-ctags` already provide adequately.
+- **TypeScript compiler API only (M4).** Rejected despite `typescript` already being a devDependency and giving genuinely precise results: it covers TS/JS only. A planner that is sharp on TS repos and blunt everywhere else is worse than one that is consistent.
+- **Answer approvals over the WebSocket (M5).** Rejected: the CLI and TUI already speak HTTP to the daemon, a prompt can outlive the socket that announced it, and a plain POST is answerable from any surface — including `curl` when debugging.
+- **Prompt per exact command rather than per scope (M6).** Rejected as the default (T1). opencode parses commands with tree-sitter and asks per command pattern; that precision costs a grammar dependency, and for a read-mostly planner whose destructive verbs are already hard-refused, binary-plus-leading-arguments is the useful granularity.
+
+## History
+
+- 2026-07-31 — accepted.
+- 2026-09-27 — computed command names refused, computed arguments prompt, `|&`, glued short-flag values.
+- 2026-09-28 — command runners unwrapped or refused, `xargs` allowlist, sed and awk programs read, `<` targets confined.
+- 2026-09-29 — the seam carries runner tool requests (ADR-0018, #56).
+- 2026-10-01 — patterns are not paths, inert devices, one prompt per command.

@@ -78,6 +78,19 @@ Overflow means a very large prompt, which is where `-File` argument fidelity is
 least worth betting on, and a visible held task beats a plausibly mangled one.
 So a `.ps1` sitting beside a too-long `.cmd` still raises.
 
+**A line break is different: the batch route cannot carry one at all.** cmd.exe
+reads its command line up to the first CR/LF and discards the rest — no error,
+exit code 0 — and quoting does not help. Every prompt Ordewell builds spans
+lines (`composeAugmentedPrompt` appends the completion-marker instruction after
+a blank line, and the harness planners' system prompts share the seam), so a
+task would start with its opening paragraph only and no completion marker for
+`VerdictEngine` to find. So `planFor` disqualifies the batch route for a
+multi-line argument, and — unlike overflow, a capacity judgement about a line
+cmd.exe would at least read — that disqualification **falls through to the next
+route**: a `.ps1` beside a `.cmd` is taken when the arguments span lines, and a
+`.cmd` standing alone raises `EmbeddedNewlineError`, which
+`TaskOrchestrator.startTask` turns into a held task naming the fix.
+
 The batch route wraps its whole command line in one more pair of quotes, which
 is load-bearing rather than cosmetic. Under `/s`, cmd's rule is to strip the
 first quote on the line and the *last* one and take the rest verbatim — so a
@@ -192,18 +205,20 @@ nothing there.
 
 ## Consequences
 
-The **VS Code extension and the web surface work on native Windows**: harness
+The **VS Code extension and the daemon work on native Windows**: harness
 planners (Claude Code, Codex, OpenCode), API-key planners, runner execution,
 model discovery, and the exploration envelope with its gate intact.
 
-The **TUI does not** (see the 2026-10-02 update to ADR-0018 on tmux being optional), and this ADR does not change that. It is tmux-backed
-(ADR-0007), and `hasTmux` already feature-detects, so the requirement is
-declared rather than assumed. WSL remains the answer there. The launch and kill
+The **TUI is not verified on Windows**, and this ADR does not change that. It is tmux-backed
+(ADR-0007) for its per-task terminal windows, and `hasTmux` feature-detects,
+so the requirement is declared rather than assumed; tmux is optional since
+structured became the default transport (ADR-0018). WSL remains the supported
+answer there. The launch and kill
 seams are platform-general, so a future non-tmux Windows TUI inherits them
 without new work — which is why they live in `core` and not in the VS Code
 adapter.
 
-Three things are **explicitly not claimed**:
+Two things are **explicitly not claimed**:
 
 1. **Codex's read-only guarantee on Windows is unverified.** `codexSandbox`
    correctly short-circuits its bubblewrap probe off Linux, and the approvals
@@ -219,45 +234,16 @@ Three things are **explicitly not claimed**:
    an argument naming a *defined* environment variable is expanded. Preferring a
    native executable skips cmd.exe and the hazard with it, which is the main
    reason the preference is global.
-3. **Argument fidelity on the PowerShell shim route.** `-File` receives an
-   ordinary argument vector and Node quotes it by the CommandLineToArgvW
-   inverse, which is what `powershell.exe` parses when it is started as a
-   process rather than from a shell — so this should be exact. "Should be" is
-   the claim: it is the one route with no Windows host behind it. It is also
-   the one route whose alternative is a hard `spawn ENOENT`, so it can only
-   improve on a failure, never regress a working install — and it is kept away
-   from the large-prompt case, where a mangled argument would cost most, by
-   refusing to rescue an overflowing `.cmd`.
+**Argument fidelity on the PowerShell shim route is measured.** `-File`
+receives an ordinary argument vector that Node quotes by the CommandLineToArgvW
+inverse. On a Windows host, a multi-line argument containing `$(…)`, a backtick
+and `%PATH%` arrived byte-exact, with no expansion — so `%VAR%` expansion is a
+hazard this route avoids too.
 
-Everything here was verified by test on Linux (1221 core, 317 VS Code, 152 web,
-773 CLI, all passing) with the Windows branches driven through injected seams.
-It has not been run on a Windows host.
+The Windows branches are tested on Linux through injected seams. The batch
+route's line-break failure and the PowerShell route's fidelity were found and
+measured on a Windows host; the rest has not been run on one.
 
-## Amendment — the batch route cannot carry a line break
+## History
 
-First run on a real Windows host, against an npm-installed OpenCode
-(`opencode.cmd`, `opencode.ps1`, no `.exe`): tasks started with only the first
-paragraph of their prompt. **cmd.exe reads its command line up to the first
-CR/LF and discards the rest — no error, exit code 0.** Quoting does not help;
-the line ends at the break whether or not it falls inside quotes.
-
-Every prompt Ordewell builds spans lines. `composeAugmentedPrompt` appends the
-completion-marker instruction after a blank line and prepends the plan map and
-prior task outputs, so the batch route delivered the task's opening paragraph
-and nothing else — including no completion marker, which is the token
-`VerdictEngine` watches for. The same seam carries the harness planners' system
-prompts, so those were truncated too.
-
-So `planFor` disqualifies the batch route outright for a multi-line argument,
-and — unlike overflow — that disqualification **falls through to the next
-route**. The two are different in kind: overflow is a capacity judgement about a
-line cmd.exe would at least read, while a line break means it cannot carry the
-argument at any length. A `.ps1` beside a `.cmd` is therefore taken when the
-arguments span lines; a `.cmd` standing alone raises `EmbeddedNewlineError`,
-which `TaskOrchestrator.startTask` turns into a held task naming the fix.
-
-This also settles claim 3 above. Argument fidelity on `powershell.exe -File` was
-measured on a Windows host: a multi-line argument containing `$(…)`, a backtick
-and `%PATH%` arrived byte-exact, with no expansion — so the tier is no longer
-the one route with nothing behind it, and `%VAR%` expansion (claim 2) is another
-hazard it avoids.
+- 2026-07-31 — accepted, with an amendment from the first run on a Windows host (OpenCode installed by npm): the batch route's line-break truncation found and routed around, PowerShell `-File` fidelity measured.

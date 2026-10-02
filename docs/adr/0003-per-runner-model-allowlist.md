@@ -13,8 +13,9 @@ We decided to add a per-**RunnerId** model-id allowlist (stored on `UserSettings
 - **Wipe paired `thinkingEffort` on coercion (T2).** When the id is coerced, the paired `thinkingEffort` is cleared (runner applies its own default), because the effort the planner picked was calibrated to a model it didn't get to use. The id-keyed `model_id` list the allowlist stores (W1) intentionally excludes variant/eﬀort granularity — the planner's variant pick on an *allowed* model is unconstrained.
 - **New deep module: `ModelAllowlistResolver` (L3).** Symmetric to `ModeResolver`: owns one planner policy (nudge the prompt's `modelsByRunner` block + ﬁx the planner's emissions) behind one interface. Coercion does *not* live in `PlanValidator` (which validates execution-log invariants, unrelated) nor in `ModelResolver` (which owns discovery/routing; CONTEXT.md is explicit that the names differ by one letter on purpose — mixing concerns ﬁghts the established split).
 - **Runner-level granularity (G1).** One allowlist per `RunnerId`, matching `modelsByRunner`'s shape. `runnerProvider` (the per-model backend distinction the UI surfaces) stays display-only — promoting it to an allowlist key would split one logical choice into two against the grain of the existing prompt/dropdown/coerce paths.
-- **Auto-disable on stale intersection (R1).** The allowlist is intersected against currently-discovered ids before use; a phantom id (e.g. the runner's `models` command renamed it) silently drops. If the intersection goes empty, the restriction auto-disables for that runner (falls back to all discovered), never blocks execution. D1 clariﬁes that both "unset" and "explicit empty array" mean "no restriction" — the user can't trap themselves in a "block all" state.
-- **Snapshot at `startPlanning` (C1).** The allowlist is read live at every emit-path, but the conversation loop (ADR-0002) holds the model block once at `startPlanning`; mid-conversation allowlist changes take eﬀect on the next conversation, not the running one. Coercion of residual stray ids from the stale snapshot is the safety net.
+- **Discovery settles only what it can prove (R1).** Discovery can be stale, and a plugin runner may list nothing, so "this runner didn't list it" does not make an allowlisted id wrong. `effectiveAllowlist` keeps an id the runner lists, keeps an id **no** runner lists (the user named it; the runner validates last), and drops an id listed only by *other* runners — it provably cannot run here. If that leaves nothing, the allowlist was about another runner and the restriction is off for this one. An allowlisted id discovery does not cover is synthesized into the prompt's list rather than falling back to the full discovered set, so a set allowlist stays a hard bound on what the planner sees. D1: both "unset" and "explicit empty array" mean "no restriction" — the user can't trap themselves in a "block all" state.
+- **Read live on every turn (C1).** The catalog is re-sent every planner turn (`Session.catalogBlock`, and the `taskQuery` catalog answer, ADR-0012), and both read the allowlist and the resolver's discovery cache live (`ModelResolver.getCachedRunnerModels`, which never triggers discovery; the Session discovers on its own only where nothing is cached). Only the system prompt's model block is a snapshot from `startPlanning`, and the per-turn block supersedes it. A change to the allowlist reaches the running conversation on its next turn.
+- **The edit validator reads it the same way.** `checkModelAndModeValidity` accepts an id in the runner's effective allowlist even when discovery never listed it — the reading `coerceAssignments` makes.
 - **All ﬁve emit-paths ﬁlter+coerce; `loadPlan` untouched (E1).** `generate`, `startPlanning`, `continueConversation`, `modify`, `modifyDuringExecution` each build a `modelsByRunner` block and yield fresh task arrays — all need the ﬁlter (otherwise the restriction leaks) and the coerce (otherwise stray ids land unrewritten). `loadPlan` only restores a previously-saved plan; coercing there would silently rewrite the user's own previously-edited assignments on reload, defeating P1.
 
 ## Considered options
@@ -24,64 +25,34 @@ We decided to add a per-**RunnerId** model-id allowlist (stored on `UserSettings
 - **Coerce to orchestrator model (B3).** Rejected: the orchestrator model is a planning model (OpenRouter/Gemini id), not a runner executor model — its id may not even be in the runner's discovered set, and using it would cross a domain boundary.
 - **Coercion in `PlanValidator` (L1).** Rejected: that module validates execution-log invariants (status transitions, dependency integrity); model-id membership is an unrelated concern and would grow an unrelated new param branch.
 - **Coercion in `ModelResolver` (L2).** Rejected: CONTEXT.md's ModelResolver entry is explicit ("the names differ by one letter on purpose") — mode coercion lives in `ModeResolver` precisely *because* it didn't belong in `ModelResolver`. Mixing the new policy into the discovery/routing module repeats the mistake the codebase already corrected.
-- **Allowlist authoritative — coerce to phantoms (R2).** Rejected: discovery is the ground truth for "is this model runnable"; coercing to ids the runner no longer reports breaks execution to preserve intent, the wrong trade for a planner-time conﬁg.
-- **Discovery authoritative + warning (R3).** Honest, but the warning channel is new machinery for an edge case (renamed ids are rare); R1's silent auto-disable is self-correcting on the user's next open of the settings UI.
+- **Allowlist authoritative for every id (R2).** Rejected: an id listed only by another runner provably cannot run on this one; keeping it hands the planner a model that fails once a task is already running.
+- **Discovery authoritative: drop every id discovery does not list, and turn the restriction off when nothing is left.** It was R1 at first. Rejected: discovery can be stale and a plugin runner may list nothing, so a deliberate pick was silently dropped — and an emptied list fell back to the full discovered set, showing the planner exactly the models the user had excluded.
+- **Discovery authoritative + warning (R3).** Rejected: a new warning channel for an edge case the three-way reading above already settles.
 - **Empty array = block-all (D2).** Rejected: an error state with no graceful recovery — hard to distinguish "user wants to block all" from "default state, never conﬁgured," and contradicts the spec wording "all models fetched as available by default."
 - **Runner+Provider-level allowlist (G2).** Rejected: divergence from the runner-keyed `modelsByRunner` / dropdown / prompt-block shape. Coercion's "ﬁrst allowed" would need provider-aware logic and a `ProviderRouting` call into the coerce path — concern creep.
 - **Model+variant allowlist (W2).** Rejected: the dropdown is id-keyed; a variant restriction would silently not apply to manual overrides, the pick list doubles or triples, and the paired-eﬀort control is unmotivated by the user's actual ask ("select … only the ones that the planner model will use"). Variant control is a clean *future* corollary on top of the id-keyed allowlist, not a refactor.
 - **Leave `thinkingEffort` on coercion (T1).** Rejected: we'd be *introducing* an unsupported id+eﬀort pairing as a side eﬀect of our own rewrite, worse than the inherited (unvalidated) state today.
 - **Coerce `thinkingEffort` to `allowlist[0]`'s ﬁrst variant (T3).** Rejected: "ﬁrst variant" is a covert priority for an eﬀort the planner picked deliberately; could silently pick `xhigh` for a task the planner wanted `low` on.
-- **Re-ﬁlter mid-conversation (C2).** Rejected: ADR-0002's premise is the prompt is a snapshot at `startPlanning`; mutating API message history mid-conversation risks incoherent emissions where the model's prior tool calls referenced the larger set.
-- **Surface a restart warning (C3).** Rejected: observability that buys little — "restart planning" is already cheap (New Session).
+- **Snapshot at `startPlanning` (C2).** It was C1 at first: changes took effect on the next conversation. Rejected once the catalog went per-turn (ADR-0012): a snapshot kept a newly allowed model out of reach, and clearing the allowlist (which unsets the whole map) fell back to the restriction read at the start.
+- **Rewrite the system prompt's model block mid-conversation.** Rejected: mutating API message history risks incoherent emissions where the model's prior tool calls referenced the larger set. A fresh per-turn block adds rather than rewrites.
+- **Surface a restart warning (C3).** Rejected: observability that buys little, and moot once the catalog is read every turn.
+- **A planner tool for listing or selecting models.** Rejected: the catalog block already delivers the list every turn to both planner backends, and a registered tool would not reach harness planners (ADR-0012 T1).
 - **Coerce on `loadPlan` (E2).** Rejected: would silently rewrite the user's previously-edited assignments the moment they reload a workspace — surprising, invisible, possibly destructive.
 - **Filter only `generate`/`startPlanning` (E3).** Rejected: modify/modifyDuringExecution re-emit task arrays with a fresh `modelsByRunner` block — skipping the ﬁlter there leaks the full discovered set back into the planner's view, defeating the feature.
 - **Runtime enforcement in orchestrator (X2/X3).** Rejected: the orchestrator is documented as a pure scheduler (CONTEXT.md); a guard there would refuse a manual-dropdown override that P1 explicitly allows, contradicting the design.
 
 ## Consequences
 
-- `UserSettings` gains its ﬁrst nested, non-boolean ﬁeld (`modelAllowlist?: Partial<Record<RunnerId, string[]>>`); `SettingsService.load`/`persist` and `OrchestratorPool.updateSettings` grow a new branch for that shape. The existing in-memory cache stays (S1-cache) — cross-process staleness is the documented, pre-existing trade-oﬀ ( grilleMe/tdd/prd already have it); C1's snapshot-at-conversation-start bounds staleness to one session lifetime.
-- A new `ModelAllowlistResolver` lands next to `ModeResolver`: two operations (`ﬁlterModelsForPrompt(modelsByRunner, runners)` + `coerceAssignments(tasks, perRunnerAllowlist)`), pure functions, injected allowlist. The nudge half is called by every emit-path before building the prompt block; the coerce half runs on every freshly-emitted task array before the tasks land on the plan.
+- `UserSettings` has a nested, non-boolean ﬁeld (`modelAllowlist?: Partial<Record<RunnerId, string[]>>`); `SettingsService.load`/`persist` and `OrchestratorPool.updateSettings` handle that shape. The in-memory settings cache stays (S1-cache) — cross-process staleness is the documented, pre-existing trade-oﬀ shared by every setting.
+- `ModelAllowlistResolver` sits next to `ModeResolver`: two operations (`ﬁlterModelsForPrompt(modelsByRunner, runners)` + `coerceAssignments(tasks, perRunnerAllowlist)`), pure functions, injected allowlist. The nudge half is called by every emit-path before building the prompt block; the coerce half runs on every freshly-emitted task array before the tasks land on the plan.
 - `Planner` / `AiService` / `Session` threads the resolver through `PlanRequest`, `ModifyPlanRequest`, `ModifyDuringExecutionRequest`, and `IAiService.startConversation`'s `modelsByRunner`. `loadPlan` and `TaskOrchestrator.startTask` are unchanged.
-- VS Code gains an `ordewell.conﬁgureModelAllowlist` command (QuickPick runner → `withProgress` discover → `showQuickPick({ canPickMany: true })` over that runner's discovered models, pre-checked with the current allowlist; empty discovery aborts with a message). The per-task dropdown in `PlanCardGroup.tsx` is unchanged.
-- CLI gains an `ai-ﬂow allowlist` subcommand (`set <runner> <id1,id2,…>` / `clear <runner>` / `show`), calling the existing `PATCH /settings` route. No new TTY picker dependency.
-- The web HTTP `PATCH /settings` route is the single persistence channel both surfaces call — no new `/api/commands` entry, since the allowlist isn't a toggle action like grill-me.
+- VS Code has an `ordewell.conﬁgureModelAllowlist` command (QuickPick runner → `withProgress` discover → `showQuickPick({ canPickMany: true })` over that runner's discovered models, pre-checked with the current allowlist; empty discovery aborts with a message). The per-task dropdown in `PlanCardGroup.tsx` is unchanged.
+- The CLI has `ordewell allowlist` (`set <runner> <id1,id2,…>` / `clear <runner>` / `show`), calling the existing `PATCH /settings` route. No new TTY picker dependency.
+- The daemon's `PATCH /settings` route is the single persistence channel both surfaces call — no new `/api/commands` entry, since the allowlist is a setting, not a toggle action.
 - A future reader sees `ModelAllowlistResolver` separate from `ModelResolver`, `UserSettings.modelAllowlist` keyed by `RunnerId` not by `runnerProvider`, `loadPlan` untouched, and the orchestrator unaware — this ADR is the "why."
 
-## Update (2026-08-20) — grill-me renamed to grilling; no longer a toggle
+## History
 
-The `grill-me` toggle referenced above (S1-cache, E1) has since been removed
-from `UserSettings` entirely; the interview workflow is now the user-invoked
-`grilling` skill, not a mode toggle. The comparisons above describe the
-toggle-based mechanism as it existed when this ADR was written and are left
-as-is.
-## Update (2026-09-23) — the per-turn catalog and edit validation are live (#17)
-
-C1's "mid-conversation allowlist changes take effect on the next
-conversation" no longer holds. Since ADR-0012 the catalog is re-sent every
-turn (`Session.catalogBlock`, and the `taskQuery` catalog answer), and both
-read the allowlist live. Only the system prompt's model block is still a
-snapshot from `startPlanning`, and the per-turn block supersedes it.
-
-Three things still kept a newly allowed model out of reach, and are now
-fixed:
-
-- **The edit validator disagreed with the catalog.** `filterModelsForPrompt`
-  shows the planner an allowlisted id that discovery never listed, but
-  `checkModelAndModeValidity` refused any id missing from discovery before it
-  looked at the allowlist. It now accepts an id in the runner's effective
-  allowlist, which is the same reading `coerceAssignments` makes ("listed for
-  no runner → keep, the runner validates last").
-- **The Session's model catalog was a start-of-session snapshot.** The Session
-  now reads the resolver's discovery cache on every use
-  (`ModelResolver.getCachedRunnerModels`, which never triggers discovery). It
-  falls back to its own discovery only where the resolver has nothing cached,
-  so a model re-discovered mid-session arrives with its real label and
-  variants.
-- **Clearing the allowlist fell back to the old one.** Live reads used
-  `settings.modelAllowlist ?? <allowlist at startPlanning>`, so clearing the
-  last runner's entry (which unsets the whole map) brought back the restriction
-  the user had just removed. Unset now means no restriction, as D1 intended.
-
-We still didn't add a planner tool for listing or selecting models. The
-catalog block already delivers the list on every turn to both planner
-backends, and a registered tool would not reach harness planners (ADR-0012 T1).
+- 2026-07-31 — accepted: snapshot at `startPlanning`, phantom ids dropped against discovery.
+- 2026-08-20 — the `grill-me` toggle it was compared with became the `grilling` skill.
+- 2026-09-23 — read live on every turn (ADR-0012); the edit validator and the cleared-allowlist reading fixed (#17).

@@ -44,11 +44,14 @@ binaries themselves rather than against memory:
 - **Claude Code needs `--verbose`.** `--output-format stream-json` is rejected
   without it.
 - **OpenCode replays the user's own message** into `/event` as text parts, with
-  no role on the frame to filter by. Prose is therefore taken from the settled
-  POST response (whose `info.id` names the assistant message) and the event
-  stream is used for tool activity only. Letting the echo through put the
-  user's goal in the planner's reply — and a goal quoting JSON would then have
-  been parsed as the plan.
+  no role on the frame to filter by. The settled POST response (whose `info.id`
+  names the assistant message) is authoritative; the event stream feeds display.
+  The adapter tracks the assistant message ids the server advertises and streams
+  only their text parts as `planner_text_delta` (with `plan_token` for
+  envelopes); a part of any other message is the user's own words. Each
+  message's reported `tokens` and `cost` feed the usage ledger (#47–#53).
+  Letting the echo through put the user's goal in the planner's reply — and a
+  goal quoting JSON would then have been parsed as the plan.
 
 Exploration is the harness's job, not Ordewell's. `BaseAiService` is deliberately
 **not** the parent class here: its entire body is Ordewell executing tools on the
@@ -56,8 +59,12 @@ model's behalf, which is precisely what a coding agent replaces.
 
 ## Key properties
 
-- **The planner cannot mutate the workspace.** Every adapter spawns in its
-  agent's read-only mode, and any permission request that still arrives is
+- **The planner cannot mutate the workspace.** The planner path always spawns
+  an adapter in its agent's read-only mode. Adapters also have a task mode, for
+  the structured transport ([ADR-0018](0018-structured-runner-transport.md)),
+  whose permission mode and effort come from the runner manifest; it is an
+  explicit start switch the planner path never passes, and tests assert it. The
+  planner's spawn is read-only, and any permission request that still arrives is
   auto-denied and surfaced as a `refused` step. ADR-0008's envelope does not
   apply — `commandPolicy`, `BaseFileSystem` confinement and the `IApproval` seam
   are all bypassed, because the agent brings its own tools and its own approval
@@ -223,6 +230,9 @@ this backend should understand they are trading speed for not holding a key.
   `researchStepSummary` and four surfaces' icon/label switches, and one new
   member with a label field buys the same honesty without turning every one of
   those into a runtime default branch.
+- **OpenCode's event stream for tool activity only.** It was, while the echo
+  was filtered by dropping all prose from the stream. Rejected: filtering the
+  user's message by message id keeps the echo out and the reply streaming.
 - **Live CLI runs as the test suite.** Tests only what ships. Rejected as
   the default: every turn costs subscription quota and tens of seconds, it
   cannot run in CI without credentials, and a rate-limited account becomes a red
@@ -232,25 +242,8 @@ this backend should understand they are trading speed for not holding a key.
   transport table above all came from running that check, which is the argument
   for keeping it.
 
-## Update (2026-09-27) — OpenCode streams its reply, not only its tool activity
+## History
 
-One sentence above is now out of date: "the event stream is used for tool
-activity only." It was right when it was written — letting the user's own
-replayed message through put the goal in the planner's reply — but the fix was
-not to stop reading prose from the stream, only to filter the echo. OpenCode
-planner turns now stream the assistant message's text parts as
-`planner_text_delta` (with `plan_token` for envelopes), and each message's
-reported `tokens` and `cost` feed the usage ledger (#47–#53). The user's
-message is still excluded: the adapter tracks the assistant message ids the
-server advertises, and a part of any other message is the user's own words —
-not every text part is treated as the assistant's. The framing above — the settled response is authoritative, the
-stream feeds display — still holds; only the "tool activity only" scope
-changed.
-
-## Amendment (2026-09-29) — adapters gain a task mode
-
-"Every adapter spawns read-only" becomes "the *planner* path always spawns
-read-only". Adapters gain an explicit start switch for a task mode
-([ADR-0018](0018-structured-runner-transport.md)), whose permission mode and
-effort come from the runner manifest, not from the adapter. The planner path
-never passes the task switch, and tests assert it.
+- 2026-07-31 — accepted.
+- 2026-09-27 — OpenCode streams the assistant's reply and reports usage, with the user's echo filtered by message id.
+- 2026-09-29 — adapters gain a task mode for the structured transport (ADR-0018); the planner path stays read-only.

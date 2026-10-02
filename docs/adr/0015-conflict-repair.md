@@ -44,7 +44,7 @@ request.
   a claim taken at its word — exactly the guard `resolveConflictAsTask`
   already relies on. Nothing here lets a model's say-so stand in for the
   Verdict.
-- **Bounded.** A new setting, `conflictRepairAttempts` (env
+- **Bounded.** A setting, `conflictRepairAttempts` (env
   `ORDEWELL_CONFLICT_REPAIR_ATTEMPTS`, VS Code
   `ordewell.conflictRepairAttempts`), caps how many repairs one task may go
   through. Default is 2; 0 turns repair off and every conflict surfaces exactly
@@ -69,6 +69,40 @@ request.
   instead of having to re-derive it from git history. Ordewell still never
   merges into the user's own checked-out branch by itself; that boundary is
   untouched.
+
+### How a repair runs
+
+- **Two operations on the isolation seam.** `reopen` hands a `conflict`
+  task's kept workspace to the repair as it is and returns the same cwd;
+  it records each changed repo's integration tip as `repairBase`, counts the
+  repair in `repairs`, adds the conflict's files to `repairedFiles`, and moves
+  the record to a new status, `repairing`. `verifyRepair` commits the
+  repair's work and checks (2) and (3) above per repo of `repairBase`. The
+  landing (4) is the unchanged `integrate`, so `land()` still makes one
+  `--no-ff` merge per changed repo, all or nothing.
+- **A repair is spent when it starts.** `reopen` counts it before the runner
+  is spawned, so a crash can never hand an attempt back. Anything that ends a
+  repair without landing it — a failed verdict, a stop, a spawn that fails,
+  missing evidence, a release, or `pruneOrphans` after a crash — leaves the
+  record `conflict` again, with its files and worktree.
+- **Scheduling.** A repair takes the slot the integrating attempt freed. When
+  none is free — a Mark complete or a resolver's re-landing that conflicted
+  while other tasks hold every slot — the task goes back to `pending`, and the
+  scheduler repairs it once a slot frees. More generally, whenever the
+  scheduler starts a task whose record is `conflict` and that has repairs
+  left — a session restored from disk, the next Execute — it repairs it
+  instead of re-running it; with none left it runs afresh from the tip, as a
+  conflicted task always has. A repair that did not land waits on the user and
+  is not tried again in the same run.
+- **What the repair is given.** `buildConflictRepairPrompt` goes through the
+  same `composeAugmentedPrompt` as any spawn, with the task's own completion
+  marker, minus the TDD block. The task keeps the verdict and output summary
+  its own work earned; the repair's verdict only decides whether its work
+  tries to land.
+- **`git diff --check` exits 2 for whitespace as well as markers**, so only
+  its `leftover conflict marker` lines count. Git's own rule decides what a
+  marker is: a line the task adds of exactly seven `=` (a Markdown heading
+  underline) reads as one, and fails the repair.
 
 ## Considered options
 
@@ -108,36 +142,6 @@ request.
   so an old run's first conflict after upgrading still gets its full
   `conflictRepairAttempts`.
 
-## As implemented (2026-09-26) — the core
+## History
 
-- **Two operations on the isolation seam.** `reopen` hands a `conflict`
-  task's kept workspace to the repair as it is and returns the same cwd;
-  it records each changed repo's integration tip as `repairBase`, counts the
-  repair in `repairs`, adds the conflict's files to `repairedFiles`, and moves
-  the record to a new status, `repairing`. `verifyRepair` commits the
-  repair's work and checks (2) and (3) above per repo of `repairBase`. The
-  landing (4) is the unchanged `integrate`, so `land()` still makes one
-  `--no-ff` merge per changed repo, all or nothing.
-- **A repair is spent when it starts.** `reopen` counts it before the runner
-  is spawned, so a crash can never hand an attempt back. Anything that ends a
-  repair without landing it — a failed verdict, a stop, a spawn that fails,
-  missing evidence, a release, or `pruneOrphans` after a crash — leaves the
-  record `conflict` again, with its files and worktree.
-- **Scheduling.** A repair takes the slot the integrating attempt freed. When
-  none is free — a Mark complete or a resolver's re-landing that conflicted
-  while other tasks hold every slot — the task goes back to `pending`, and the
-  scheduler repairs it once a slot frees. More generally, whenever the
-  scheduler starts a task whose record is `conflict` and that has repairs
-  left — a session restored from disk, the next Execute — it repairs it
-  instead of re-running it; with none left it runs afresh from the tip, as a
-  conflicted task always has. A repair that did not land waits on the user and
-  is not tried again in the same run.
-- **What the repair is given.** `buildConflictRepairPrompt` goes through the
-  same `composeAugmentedPrompt` as any spawn, with the task's own completion
-  marker, minus the TDD block. The task keeps the verdict and output summary
-  its own work earned; the repair's verdict only decides whether its work
-  tries to land.
-- **`git diff --check` exits 2 for whitespace as well as markers**, so only
-  its `leftover conflict marker` lines count. Git's own rule decides what a
-  marker is: a line the task adds of exactly seven `=` (a Markdown heading
-  underline) reads as one, and fails the repair.
+- 2026-09-26 — accepted and implemented.

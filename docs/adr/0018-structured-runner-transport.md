@@ -12,25 +12,28 @@ between turns; and what a run consumed is not observable.
 
 The harness planners (ADR-0009) already talk to Claude Code, Codex and OpenCode
 through their programmatic protocols (`stream-json`, `app-server`, `serve`).
-Task execution does not. Issue #25 settled the design; this ADR records it.
-Claude Code is the reference runner; Codex (#54) and OpenCode (#55) follow.
+Task execution did not. Issue #25 settled the design; this ADR records it.
+Claude Code was the reference runner; Codex (#54) and OpenCode (#55) followed.
 
 ## Decision
 
-**Add a second transport for task runners, opt-in, next to the terminal one.**
-A task on the *structured* transport is driven through its runner's
-programmatic protocol instead of a screen and a keyboard. The terminal
-transport is unchanged and stays the default.
+**Task runners are driven through their programmatic protocol — the
+*structured* transport — by default. The terminal transport stays as the
+fallback.** A task on the structured transport is driven through its runner's
+protocol instead of a screen and a keyboard.
 
 ## Key properties
 
-- **An opt-in setting (S1).** `runnerTransport: terminal | structured`, marked
-  experimental, default `terminal`. It is a global `UserSettings` field, copied
+- **A setting, structured by default (S1).** `runnerTransport: terminal |
+  structured`, default `structured`. It is a global `UserSettings` field, copied
   onto the plan when a run starts. Flipping it mid-run takes effect on the next
   run — the same rule as ADR-0001, and for the same reason: the plan, not a
-  live setting, says what runs. The default switches only once structured
-  matches terminal on a parity checklist (done detection, approvals, log view,
-  every built-in runner).
+  live setting, says what runs. An explicit choice is kept: a settings file that
+  stores `terminal` keeps it, and the default is never written back to the file,
+  so it never turns into a choice the user did not make. (A `terminal` written by
+  an older build, when it was the default, is indistinguishable from a deliberate
+  one and stays until `/transport structured`.) The way back is `/transport
+  terminal`, `ordewell transport terminal`, or the Structured toggle in VS Code.
 - **Drop-in shape (S2).** A structured session *is* an
   `ITerminalRunner`/`ITerminalSession`, the way `TmuxRunner` was added
   (ADR-0007 T1), so `VerdictEngine`, `TaskOutputSource`, `PoolAwareRunner` and
@@ -40,10 +43,14 @@ transport is unchanged and stays the default.
   the native session id. Code that does not look for the capability behaves as
   it did.
 - **Per-task routing (S3).** A task runs structured only if its runner has a
-  task-mode connector. Today that is Claude Code alone. Any other runner falls
-  back to the terminal transport, and every surface shows the fallback and its
-  reason (for example `terminal: no structured connector for Codex yet`) —
+  task-mode connector: Claude Code, Codex (`codex app-server`) and OpenCode
+  (`opencode serve`) do. Any other runner, a plugin runner included, falls back
+  to the terminal transport, and every surface shows the fallback and its
+  reason (for example `terminal: no structured connector for <runner>`) —
   never a silent downgrade.
+- **The terminal transport is fallback-only.** Runner-facing features target
+  the structured transport; the terminal transport gets bug fixes, not new
+  features.
 - **One connector per runner, shared with the planner (C1).** The harness
   `AgentAdapter`s gain an explicit start switch: *read-only planner* versus
   *task*. The planner path always starts read-only, and tests assert that the
@@ -73,8 +80,9 @@ transport is unchanged and stays the default.
   turn ends, the task stays `in_progress` with no flicker.
 - **Talking to a task (M1).** Ordewell owns the message queue. Messages are
   shown as queued, can be removed, and are delivered when the turn ends.
-  Interrupt is Claude's soft `control_request` interrupt, with kill-and-resume
-  as the fallback; an interrupted turn becomes "waiting for input".
+  Interrupt is the runner's soft interrupt (Claude's `control_request`,
+  Codex's `turn/interrupt`), with kill-and-resume as the fallback; an
+  interrupted turn becomes "waiting for input".
   `session.write(text)` means "send as a user message", so checkpoint replies
   work unchanged. Clarifying questions are plain text for now: a task starts
   with `AskUserQuestion` disallowed, so the agent asks in prose and ends its
@@ -96,10 +104,12 @@ transport is unchanged and stays the default.
   deliberately differs from `LingeringRunners` for terminal tasks: the log
   lives in Ordewell, and work after the verdict would go unverified. The native
   session id is saved per attempt.
-- **Continue (K1).** A retry that resumes the saved Claude session (`--resume`)
-  with the user's message as the next turn. It is verified and landed like any
-  attempt. It is offered on completed and failed structured tasks with a saved
-  session id, not on conflicts. Dependents are left alone, as with retry.
+- **Continue (K1).** A retry that resumes the saved native session with the
+  user's message as the next turn. It is verified and landed like any attempt.
+  It is offered on completed and failed structured tasks with a saved session
+  id, not on conflicts. Dependents are left alone, as with retry. If the runner
+  refuses the resume, the attempt fails; no fresh session is started in its
+  place.
 - **Task log persistence (P1).** Append-only, per attempt, at
   `.ordewell/sessions/<session>/tasks/<task>/<attempt>.jsonl`, holding
   normalized events with long tool output trimmed. The same reducer rebuilds
@@ -123,12 +133,35 @@ transport is unchanged and stays the default.
   The card keeps its one-line peek and gains a waiting badge.
 - **No tmux, no `script` (W2).** A structured session is a plain child process
   speaking a protocol, so it needs neither, and also works on native Windows
-  (ADR-0010).
+  (ADR-0010). tmux is optional: nothing at start-up refuses to run or warns
+  when it is missing. Only a run on the terminal transport needs it, for the
+  per-task window; on a host without it those tasks run headless, the plan's
+  first such task says what is unavailable and how to get it (install tmux, or
+  keep the structured transport), and opening a task's terminal gives the same
+  advice.
+
+### Codex specifics
+
+- **Start and Continue.** `thread/start` takes the sandbox, approval policy and
+  reviewer from the manifest's per-mode settings. A resume sends
+  `thread/resume` with the full start params, because a bare thread id resets
+  the approval policy.
+- **Interrupt (M1).** `turn/interrupt` requires the turn id as well as the
+  thread id. An interrupt asked for before Codex has named the turn is sent
+  once it does.
+- **Approvals (A1).** Command, file-change and permission requests become
+  runner approvals. *Allow for this task* is `acceptForSession` or a
+  session-scoped grant. Codex's decline carries no message, so a deny note is
+  steered into the running turn. A yes-or-no MCP elicitation is an approval
+  too. One that asks for input is declined.
+- **Questions.** `item/tool/requestUserInput` is refused with an instruction to
+  ask in plain text and end the turn. The question then arrives as a turn
+  without the marker (W1). Any other request gets `-32601` at once, so a turn
+  never waits on Ordewell.
 
 ## Out of scope
 
-#54 and #55 (the Codex and OpenCode connectors), #58 (take over in the
-runner's own TUI), #26 roll-ups, #31, and switching the default transport.
+#58 (take over in the runner's own TUI), #26 roll-ups, #31.
 
 ## Considered options
 
@@ -139,7 +172,7 @@ runner's own TUI), #26 roll-ups, #31, and switching the default transport.
   `Stop`/`PreToolUse`, OpenCode's local server, Codex `notify`. The plumbing
   differs per runner and is weakest for Codex, and sending a message would
   still mean typing keystrokes. The TUI is not lost either: `terminal` stays
-  the default, and take-over (#58) brings it back for structured tasks.
+  available, and take-over (#58) brings it back for structured tasks.
 - **ACP for every agent.** ADR-0009 rejected it as the only transport; still
   worth checking for the long tail.
 - **Replace `ITerminalSession` with a turn-based interface everywhere.** Too
@@ -154,6 +187,11 @@ runner's own TUI), #26 roll-ups, #31, and switching the default transport.
 - **Per-task transport** (a setting on each task). The plan would carry a
   choice the user makes once per run anyway; per-task *routing* by connector
   availability (S3) covers the real need.
+- **Structured as an opt-in, terminal the default.** It shipped that way, marked
+  experimental, until structured matched terminal on a parity checklist (done
+  detection, approvals, log view, a connector for every built-in runner). Once
+  met, two first-class transports would have doubled every runner-facing
+  feature, so the default switched and terminal became the fallback.
 - **Reading the setting at every spawn.** A run would change transport
   half-way through, against ADR-0001. It is read once when the run starts.
 - **A lingering process after pass.** Would mirror `LingeringRunners`, but the
@@ -165,53 +203,8 @@ runner's own TUI), #26 roll-ups, #31, and switching the default transport.
 - **Storing the log inside the session JSON.** That file is rewritten on every
   save; an append-only file per attempt is not.
 
-## Update 2026-10-01: Codex has a task-mode connector (#54)
+## History
 
-S3's "Claude Code alone" no longer holds: `CodexAdapter` drives tasks over
-`codex app-server`, and only OpenCode (#55) still falls back to the terminal.
-The decisions above carry over. Where Codex's protocol differs:
-
-- **Start and Continue.** `thread/start` takes the sandbox, approval policy and
-  reviewer from the manifest's per-mode settings. A resume sends
-  `thread/resume` with the full start params, because a bare thread id resets
-  the approval policy. If Codex refuses the resume, the attempt fails. No fresh
-  thread is started in its place (K1).
-- **Interrupt (M1).** `turn/interrupt` requires the turn id as well as the
-  thread id. An interrupt asked for before Codex has named the turn is sent
-  once it does.
-- **Approvals (A1).** Command, file-change and permission requests become
-  runner approvals. *Allow for this task* is `acceptForSession` or a
-  session-scoped grant. Codex's decline carries no message, so a deny note is
-  steered into the running turn. A yes-or-no MCP elicitation is an approval
-  too. One that asks for input is declined.
-- **Questions.** `item/tool/requestUserInput` is refused with an instruction to
-  ask in plain text and end the turn. The question then arrives as a turn
-  without the marker (W1). Any other request gets `-32601` at once, so a turn
-  never waits on Ordewell.
-
-## Update 2026-10-02: structured is the default; terminal is the fallback (#61)
-
-The parity checklist from S1 is met (done detection, approvals, log view, and
-a connector for Claude Code, Codex and OpenCode), so the default switches:
-`runnerTransport` is `structured` unless the user has chosen otherwise. The
-"experimental" label is gone from every surface. Everything above that says
-"opt-in", "terminal stays the default" or "Today that is Claude Code alone"
-describes the state before this update.
-
-- **Explicit choices are kept.** A settings file that stores `terminal` keeps
-  it. The default is not written back to the file, so it never turns into a
-  choice the user did not make. A file that already holds a `terminal` written
-  by an older build is indistinguishable from a deliberate one and stays
-  terminal until `/transport structured`.
-- **Going back.** `/transport terminal`, `ordewell transport terminal`, and
-  the Structured toggle in VS Code. As before it applies from the next run.
-- **tmux is optional (W2 carries over).** Nothing at start-up refuses to run
-  or warns when tmux is missing. It is needed only by a run on the terminal
-  transport, for the per-task window. On a host without it those tasks run
-  headless, the plan's first such task says what is unavailable and how to get
-  it (install tmux, or keep the structured transport), and opening a task's
-  terminal gives the same advice.
-- **Fallback-only policy.** Runner-facing features target the structured
-  transport only. The terminal transport gets bug fixes, not new features.
-  A runner with no task-mode connector (including a plugin runner) falls back
-  to the terminal transport with a visible reason (S3), never silently.
+- 2026-09-29 — accepted: structured opt-in, Claude Code only.
+- 2026-10-01 — the Codex connector (#54).
+- 2026-10-02 — the OpenCode connector (#55); structured the default, terminal the fallback, tmux optional (#61).
